@@ -8,16 +8,20 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "build:packages": "pnpm --filter @meet/protocol build",
+    "build:packages": "pnpm --filter @meet/protocol build && pnpm --filter @meet/database build",
     "dev": "pnpm run build:packages && pnpm --parallel --filter @meet/api --filter @meet/web dev",
     "dev:api": "pnpm run build:packages && pnpm --filter @meet/api dev",
     "dev:web": "pnpm run build:packages && pnpm --filter @meet/web dev",
     "build": "pnpm run build:packages && pnpm --filter @meet/api build && pnpm --filter @meet/web build",
-    "typecheck": "pnpm run build:packages && pnpm --filter @meet/api typecheck && pnpm --filter @meet/web typecheck",
+    "typecheck": "pnpm run build:packages && pnpm --filter @meet/database typecheck && pnpm --filter @meet/api typecheck && pnpm --filter @meet/web typecheck",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
+    "db:generate": "pnpm --filter @meet/database db:generate",
+    "db:migrate": "pnpm --filter @meet/database db:migrate",
+    "admin:init": "pnpm run build:packages && pnpm --filter @meet/api admin:init",
+    "admin:reset-password": "pnpm run build:packages && pnpm --filter @meet/api admin:reset-password",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {

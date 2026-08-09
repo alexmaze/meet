@@ -1,0 +1,1 @@
+ALTER TYPE "public"."account_security_event_type" ADD VALUE 'guardian_history_access_changed' BEFORE 'account_status_changed';

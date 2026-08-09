@@ -38,12 +38,45 @@ const optionalEndpointSchema = z.preprocess(
     .optional(),
 );
 
+const optionalDatabaseUrlSchema = z.preprocess(
+  (value) =>
+    typeof value === "string" && value.trim() === "" ? undefined : value,
+  z
+    .string()
+    .trim()
+    .min(1)
+    .refine((value) => {
+      try {
+        const protocol = new URL(value).protocol;
+        return protocol === "postgres:" || protocol === "postgresql:";
+      } catch {
+        return false;
+      }
+    }, "DATABASE_URL 必须是 PostgreSQL 连接地址。")
+    .optional(),
+);
+
+const cookieSecureSchema = z
+  .enum(["true", "false"])
+  .default("true")
+  .transform((value) => value === "true");
+
 const envSchema = z.object({
   API_HOST: z.string().trim().min(1).default("127.0.0.1"),
   API_PORT: z.coerce.number().int().min(1).max(65_535).default(8787),
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),
+  DATABASE_URL: optionalDatabaseUrlSchema,
+  AUTH_SESSION_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+  AUTH_COOKIE_SECURE: cookieSecureSchema,
+  AUTH_LOGIN_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(10),
+  AUTH_LOGIN_WINDOW_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(10)
+    .max(3_600)
+    .default(300),
   REALTIME_SPIKE_ENABLED: z
     .enum(["true", "false"])
     .default("false")
@@ -76,6 +109,16 @@ export type AppConfig = {
     port: number;
     logLevel: z.infer<typeof envSchema>["LOG_LEVEL"];
   };
+  database: {
+    url?: string;
+  };
+  auth: {
+    cookieName: "meet_session";
+    cookieSecure: boolean;
+    sessionTtlMs: number;
+    loginMaxAttempts: number;
+    loginWindowMs: number;
+  };
   qwen: {
     enabled: boolean;
     apiKey?: string;
@@ -103,6 +146,16 @@ export function loadConfig(
       host: env.API_HOST,
       port: env.API_PORT,
       logLevel: env.LOG_LEVEL,
+    },
+    database: {
+      url: env.DATABASE_URL,
+    },
+    auth: {
+      cookieName: "meet_session",
+      cookieSecure: env.AUTH_COOKIE_SECURE,
+      sessionTtlMs: env.AUTH_SESSION_TTL_DAYS * 24 * 60 * 60 * 1_000,
+      loginMaxAttempts: env.AUTH_LOGIN_MAX_ATTEMPTS,
+      loginWindowMs: env.AUTH_LOGIN_WINDOW_SECONDS * 1_000,
     },
     qwen: {
       enabled: env.REALTIME_SPIKE_ENABLED,

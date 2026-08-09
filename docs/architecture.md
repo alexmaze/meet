@@ -31,7 +31,7 @@
 └── 用量、错误和延迟记录
         │
 云端实时模型
-├── Qwen-Audio 3.0 Realtime Plus（纯语音首选验证）
+├── Qwen-Audio 3.0 Realtime Plus（第一版默认语音实现）
 ├── Qwen3.5 Omni Plus Realtime（图片与教学多模态候选）
 ├── Doubao S2S-SC（语音对照验证）
 └── 未来的其他供应商
@@ -105,7 +105,7 @@ interface MediaStore {
 
 ## 2. 供应商适配边界
 
-当前技术验证默认连接 `qwen-audio-3.0-realtime-plus`：浏览器以 WebRTC 发送持续音频，免提会话配置为 `turn_detection.type: "smart_turn"`，默认系统音色为 `longanqian`。该模型最多保留 50 轮、累计 300 秒音频上下文，其中 `max_history_turns` 默认是 20；这些是供应商的短期上下文边界，不能替代应用自己的会话记录、摘要和长期记忆。
+第一版默认实时语音实现连接 `qwen-audio-3.0-realtime-plus`：浏览器以 WebRTC 发送持续音频，免提会话配置为 `turn_detection.type: "smart_turn"`，默认系统音色为 `longanqian`。这个默认值用于推进当前业务闭环，不构成永久供应商绑定。该模型最多保留 50 轮、累计 300 秒音频上下文，其中 `max_history_turns` 默认是 20；这些是供应商的短期上下文边界，不能替代应用自己的会话记录、摘要和长期记忆。
 
 千问 WebRTC 当前是白名单能力。部署者需要从阿里云商务获得专用 Endpoint，并以 `QWEN_REALTIME_ENDPOINT` 配置到服务端；不能从 Workspace ID 拼接或推导信令域名。服务端只接受商务提供的 hostname 或不带额外 path、query、hash、用户信息和非默认端口的 HTTPS origin，再自行追加 `/api/v1/webrtc/realtime?model=...`。API Key、Endpoint 和 SDP 鉴权请求均不下发浏览器。
 
@@ -436,14 +436,16 @@ type CharacterMemory = {
 
 ## 9. 实施顺序
 
-1. 单页面实时语音技术样例，默认接 `qwen-audio-3.0-realtime-plus`；
-2. 加入统一事件和延迟记录；
-3. 接入图片能力路由，使用 Qwen3.5 Omni Plus Realtime 或独立视觉分析完成拍题验证；
-4. 接入 Qwen-Audio Flash，完成同系列成本对照；
-5. 接入豆包 S2S-SC 做语音盲测；
-6. 确认主模型和能力路由后开发角色、历史和记忆；
-7. 完成私有部署和移动浏览器适配；
-8. 后续再加入克隆音色。
+1. 已完成单页面实时语音技术样例，第一版默认接 `qwen-audio-3.0-realtime-plus`；
+2. 建立 PostgreSQL、Drizzle、共享配置与 Provider Adapter 基础，把现有千问实现收敛到供应商边界内；
+3. 实现管理员初始化、家庭成员管理、登录会话和服务端授权隔离；
+4. 以预置角色、角色卡、角色首页和实时通话组成第一个业务纵向切片；
+5. 实现会话与消息持久化、历史记录、稳定事件 ID、断线恢复和幂等保存；
+6. 实现摘要、长期记忆、`pg-boss` Worker、MediaStore 和录音生命周期；
+7. 接入图片能力路由、教学辅助和计算器工具，使用 Qwen3.5 Omni Plus Realtime 或独立视觉分析完成拍题流程；
+8. 完成移动浏览器与 PWA 适配，并在上述业务切片中持续补齐统一事件、延迟、打断、用量和错误记录；
+9. 真实手机与桌面设备测试、家庭噪声测试、Qwen-Audio Flash 成本对照和豆包 S2S-SC 盲测与业务开发并行，作为 MVP 验收和默认模型调整依据，不再阻塞第 2–8 项；
+10. 后续按实际质量、成本或能力缺口新增供应商适配器和克隆音色，不为了形式完整预建未使用实现。
 
 ## 10. 已确定的部署边界
 

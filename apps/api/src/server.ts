@@ -1,16 +1,8 @@
-import { existsSync } from "node:fs";
-import { loadEnvFile } from "node:process";
-import { fileURLToPath } from "node:url";
-
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
+import { loadProjectEnvironment } from "./load-environment.js";
 
-const environmentFile = fileURLToPath(
-  new URL("../../../.env", import.meta.url),
-);
-if (existsSync(environmentFile)) {
-  loadEnvFile(environmentFile);
-}
+loadProjectEnvironment();
 
 const config = loadConfig();
 const app = await buildApp({ config });
