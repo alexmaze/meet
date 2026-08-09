@@ -7,7 +7,7 @@
 
 这个样例只回答第一阶段最重要的问题：`qwen-audio-3.0-realtime-plus` 是否能在家庭使用的浏览器中提供自然、低延迟、可打断、有字幕的角色语音聊天。
 
-样例不是完整产品。它暂不包含账号、角色库、历史、长期记忆、数据库、录音、图片、工具调用或豆包适配。
+当前链路已接入账号与角色库，角色卡决定模型、音色和运行时指令。它仍不包含历史、长期记忆、录音、图片、工具调用或豆包适配。
 
 ## 运行
 
@@ -45,7 +45,8 @@ curl http://127.0.0.1:8787/api/health
   → 生成 offer 前通过 sender.replaceTrack(null) 暂时移除 track
   → 创建 bootstrap DataChannel 以触发 SDP 数据通道协商
   → 收集完整 ICE SDP offer
-  → POST /api/realtime/qwen/sessions
+  → POST /api/characters/:characterId/realtime/sessions（只提交原始 SDP）
+  → Fastify 校验当前账号是否可见该角色，并从已保存角色卡派生模型
   → Fastify 添加服务端 Authorization 并代理原始 SDP
   → 浏览器设置千问 SDP answer
   → 服务端创建名为 txt 的 DataChannel
@@ -68,13 +69,9 @@ curl http://127.0.0.1:8787/api/health
 - `turn_detection.type: "smart_turn"`，由声学感知与语义理解共同判断轮次；
 - 可选在 `session.updated` 后先用 `conversation.item.create` 注入一条不展示的开场用户指令，再发送 `response.create` 让角色先打招呼；Qwen-Audio 在没有用户消息时会拒绝直接生成响应。
 
-可在页面中切换：
+模型、Voice、角色指令与开场行为来自服务端已授权的角色卡，不再由会话创建请求即时传入。页面只允许切换免提或按住说话；要修改自建角色的长期配置，需要先经过角色编辑与权限校验。
 
-- 已由服务端允许的 Qwen-Audio Realtime 模型；
-- Voice 名称；
-- 本次通话的角色指令；
-- 免提或按住说话；
-- 是否由角色先开口。
+当前浏览器仍会在直连建立后通过 DataChannel 发送首次 `session.update`。因此，服务端可以保证 HTTP API 不接受伪造的模型、音色或指令，也不会泄露密钥或越权角色数据；但被主动篡改的浏览器仍可改变自己本次供应商会话中的指令。若未来需要对恶意客户端也锁定会话配置，必须改用供应商可锁配置的临时凭据，或引入服务端会话中继。
 
 ## 字幕、轮次与打断
 

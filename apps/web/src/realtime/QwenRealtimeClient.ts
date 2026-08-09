@@ -4,7 +4,6 @@ import {
   qwenResponseCreateEventSchema,
   qwenSessionUpdateEventSchema,
   qwenUserTextItemCreateEventSchema,
-  type QwenRealtimeModel,
   type QwenServerEvent,
   type RealtimeActivity,
   type RealtimeConnectionState,
@@ -21,7 +20,7 @@ import {
 export type InputMode = "hands_free" | "push_to_talk";
 
 export type QwenRealtimeOptions = {
-  model: QwenRealtimeModel;
+  characterId: string;
   voice: string;
   instructions: string;
   inputMode: InputMode;
@@ -58,6 +57,7 @@ export type QwenRealtimeCallbacks = {
   onTranscript?: (transcript: PendingTranscript) => void;
   onProviderEvent?: (direction: Direction, event: unknown) => void;
   onError?: (error: RealtimeError) => void;
+  onUnauthorized?: () => void;
 };
 
 export class QwenRealtimeClient {
@@ -161,7 +161,7 @@ export class QwenRealtimeClient {
       }
 
       const response = await fetch(
-        `/api/realtime/qwen/sessions?model=${encodeURIComponent(options.model)}`,
+        getCharacterRealtimeSessionUrl(options.characterId),
         {
           method: "POST",
           headers: {
@@ -174,6 +174,9 @@ export class QwenRealtimeClient {
       );
       const responseText = await response.text();
       if (!response.ok) {
+        if (response.status === 401) {
+          this.callbacks.onUnauthorized?.();
+        }
         throw readGatewayError(responseText, response.status);
       }
 
@@ -613,6 +616,10 @@ export class QwenRealtimeClient {
     this.pushToTalkActive = false;
     this.seenEventIds.clear();
   }
+}
+
+export function getCharacterRealtimeSessionUrl(characterId: string): string {
+  return `/api/characters/${encodeURIComponent(characterId)}/realtime/sessions`;
 }
 
 class ClientError extends Error {

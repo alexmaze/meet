@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  BUILTIN_CHARACTER_PRESETS,
+  BUILTIN_VOICE_PROFILES,
+  DEFAULT_PROVIDER_PROFILE,
+  type CharacterAggregate,
+} from "@meet/database";
 
 import type {
   AuthRepository,
@@ -7,6 +13,7 @@ import type {
 } from "../src/auth/repository.js";
 import { hashSessionToken } from "../src/auth/session-token.js";
 import { buildApp } from "../src/app.js";
+import type { CharacterRepository } from "../src/characters/repository.js";
 import { loadConfig, type AppConfig } from "../src/config.js";
 
 const config: AppConfig = {
@@ -55,6 +62,40 @@ const authRepository: AuthRepository = {
   async revokeLoginSession() {},
 };
 const authHeaders = { cookie: `meet_session=${sessionToken}` };
+const testCharacter = aggregateFromPreset();
+const characterRepository = {
+  async listVisible() {
+    return [testCharacter];
+  },
+  async findVisible() {
+    return testCharacter;
+  },
+  async listCatalog() {
+    return {
+      providers: [testCharacter.providerProfile],
+      voices: [testCharacter.voiceProfile],
+    };
+  },
+  async create() {
+    throw new Error("unused");
+  },
+  async update() {
+    throw new Error("unused");
+  },
+  async updateVisibility() {
+    throw new Error("unused");
+  },
+  async copy() {
+    throw new Error("unused");
+  },
+  async restore() {
+    throw new Error("unused");
+  },
+  async delete() {
+    throw new Error("unused");
+  },
+} satisfies CharacterRepository;
+const characterSessionUrl = `/api/characters/${testCharacter.character.id}/realtime/sessions`;
 
 describe("Meet API", () => {
   it("returns authenticated realtime config without secrets", async () => {
@@ -114,11 +155,12 @@ describe("Meet API", () => {
       config,
       fetchFunction,
       authRepository,
+      characterRepository,
       logger: false,
     });
     const response = await app.inject({
       method: "POST",
-      url: "/api/realtime/qwen/sessions",
+      url: characterSessionUrl,
       headers: {
         ...authHeaders,
         "content-type": "application/sdp",
@@ -140,11 +182,12 @@ describe("Meet API", () => {
       config,
       fetchFunction,
       authRepository,
+      characterRepository,
       logger: false,
     });
     const response = await app.inject({
       method: "POST",
-      url: "/api/realtime/qwen/sessions",
+      url: characterSessionUrl,
       headers: {
         ...authHeaders,
         "content-type": "application/sdp",
@@ -167,11 +210,12 @@ describe("Meet API", () => {
       config,
       fetchFunction,
       authRepository,
+      characterRepository,
       logger: false,
     });
     const response = await app.inject({
       method: "POST",
-      url: "/api/realtime/qwen/sessions?model=qwen3.5-omni-plus-realtime",
+      url: `${characterSessionUrl}?model=qwen3.5-omni-plus-realtime`,
       headers: {
         ...authHeaders,
         "content-type": "application/sdp",
@@ -180,7 +224,7 @@ describe("Meet API", () => {
     });
 
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toMatchObject({ code: "INVALID_MODEL" });
+    expect(response.json()).toMatchObject({ code: "INVALID_REQUEST" });
     expect(fetchFunction).not.toHaveBeenCalled();
     await app.close();
   });
@@ -191,11 +235,12 @@ describe("Meet API", () => {
       config,
       fetchFunction,
       authRepository,
+      characterRepository,
       logger: false,
     });
     const response = await app.inject({
       method: "POST",
-      url: "/api/realtime/qwen/sessions",
+      url: characterSessionUrl,
       headers: { "content-type": "application/sdp" },
       payload: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
     });
@@ -245,3 +290,29 @@ describe("Meet API", () => {
     );
   });
 });
+
+function aggregateFromPreset(): CharacterAggregate {
+  const preset = BUILTIN_CHARACTER_PRESETS[0]!;
+  const voice = BUILTIN_VOICE_PROFILES.find(
+    ({ id }) => id === preset.voiceProfileId,
+  );
+  if (!voice) throw new Error("测试预置角色缺少声音。");
+  const timestamp = new Date("2026-08-09T00:00:00.000Z");
+  return {
+    character: {
+      ...preset,
+      ownerUserId: null,
+      visibility: "builtin",
+      revision: 1,
+      deletedAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+    providerProfile: {
+      ...DEFAULT_PROVIDER_PROFILE,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+    voiceProfile: { ...voice, createdAt: timestamp, updatedAt: timestamp },
+  };
+}

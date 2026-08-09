@@ -111,6 +111,8 @@ interface MediaStore {
 
 WebRTC 建连时，浏览器在 `getUserMedia` 后立即令 `microphoneTrack.enabled = false`，并在生成 offer 前通过 `sender.replaceTrack(null)` 暂时移除音轨；客户端同时创建一个仅用于触发 SDP 数据通道协商的 bootstrap DataChannel，供应商服务端随后创建名为 `txt` 的 DataChannel。客户端从 `txt` 收到 `session.created` 后，先通过同一通道发送 `session.update`，随后立即重新挂载仍为 disabled 的麦克风音轨；收到 `session.updated` 后才按免提或按住说话的本地 gate 启用发送并进入活动状态，确保首个音频包发送前已经配置 `smart_turn`。真实链路排障表明，延迟到 `session.updated` 后才挂载音轨会导致上行 RTP 不可靠，因此挂载与允许发送必须保持为两个阶段。控制事件和供应商事件此后也都走 `txt` 通道。
 
+角色通话的 Meet HTTP 接口只接收角色 ID 和 SDP，并在服务端依据当前登录账号校验角色可见性、Provider Profile 与模型；它不接受客户端提交 owner、voice、instructions 或 model。由于媒体和 `txt` DataChannel 在 SDP 交换后由浏览器直连供应商，修改过的浏览器仍然可以改变自己当次会话的 `session.update`。这个限制不能用来读取其他账号的私人角色、会话、记忆或服务端密钥，但服务端不能声称已经对不可信浏览器强制锁定角色提示词。若未来需要强制锁定，必须采用供应商支持的受限会话配置能力，或把对应控制通道改为服务端中继。
+
 这条 WebRTC 链路不支持 `turn_detection: null` 或 `input_audio_buffer.commit` 手动模式。界面的“按住说话”只启用或禁用本地 RTP 音轨，松开后仍由 `smart_turn` 收尾。有效插话由服务端自动取消当前响应，客户端收到 `input_audio_buffer.speech_started` 时不发送 `response.cancel`；只有用户点击手动停止时才显式发送取消事件。若 `speech_stopped.reason` 为 `turn_invalid`，前端在没有活动回复时回到聆听，有活动回复时恢复为角色说话状态。
 
 Qwen-Audio 的输入模态只有 Audio 与 Text，能力声明必须把图片输入标记为不支持。`qwen3.5-omni-plus-realtime` 保留为图片与教学多模态候选；也可以先由独立视觉模型分析图片，再把带来源标记的文本或结构化教学结果注入 Audio 会话。模型选择属于 Provider Profile，不写死在角色、会话或前端页面结构中。
@@ -439,7 +441,7 @@ type CharacterMemory = {
 1. 已完成单页面实时语音技术样例，第一版默认接 `qwen-audio-3.0-realtime-plus`；
 2. 建立 PostgreSQL、Drizzle、共享配置与 Provider Adapter 基础，把现有千问实现收敛到供应商边界内；
 3. 实现管理员初始化、家庭成员管理、登录会话和服务端授权隔离；
-4. 以预置角色、角色卡、角色首页和实时通话组成第一个业务纵向切片；
+4. 已以预置角色、结构化角色卡、角色权限、角色首页和实时通话完成第一个业务纵向切片；
 5. 实现会话与消息持久化、历史记录、稳定事件 ID、断线恢复和幂等保存；
 6. 实现摘要、长期记忆、`pg-boss` Worker、MediaStore 和录音生命周期；
 7. 接入图片能力路由、教学辅助和计算器工具，使用 Qwen3.5 Omni Plus Realtime 或独立视觉分析完成拍题流程；

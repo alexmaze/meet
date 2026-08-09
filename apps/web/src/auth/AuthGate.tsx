@@ -4,7 +4,13 @@ import {
   loginRequestSchema,
   type UserAccount,
 } from "@meet/protocol";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 
 import FamilyMembersPanel from "../admin/FamilyMembersPanel.js";
 import {
@@ -13,8 +19,17 @@ import {
   type AuthOperation,
 } from "./auth-errors.js";
 
+export type AuthenticatedAppSession = {
+  user: UserAccount;
+  logoutPending: boolean;
+  logoutError: string;
+  openFamilyMembers: () => void;
+  logout: () => void;
+  invalidateSession: () => void;
+};
+
 type AuthGateProps = {
-  children: ReactNode;
+  children: (session: AuthenticatedAppSession) => ReactNode;
 };
 
 type SessionState =
@@ -42,6 +57,16 @@ export default function AuthGate({ children }: AuthGateProps) {
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState("");
   const [membersOpen, setMembersOpen] = useState(false);
+
+  const invalidateSession = useCallback(() => {
+    setMembersOpen(false);
+    setLogoutError("");
+    setSession({
+      status: "signed_out",
+      message: "登录状态已失效，请重新登录。",
+      serviceUnavailable: false,
+    });
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -101,11 +126,7 @@ export default function AuthGate({ children }: AuthGateProps) {
       });
     } catch (error) {
       if (error instanceof AuthRequestError && error.status === 401) {
-        setSession({
-          status: "signed_out",
-          message: "登录状态已失效，请重新登录。",
-          serviceUnavailable: false,
-        });
+        invalidateSession();
         return;
       }
       if (error instanceof AuthRequestError && error.status === 503) {
@@ -140,18 +161,14 @@ export default function AuthGate({ children }: AuthGateProps) {
 
   return (
     <div className="authenticated-shell">
-      <AccountBar
-        user={session.user}
-        logoutPending={logoutPending}
-        logoutError={logoutError}
-        onManageMembers={
-          session.user.accountType === "admin"
-            ? () => setMembersOpen(true)
-            : undefined
-        }
-        onLogout={() => void handleLogout()}
-      />
-      {children}
+      {children({
+        user: session.user,
+        logoutPending,
+        logoutError,
+        openFamilyMembers: () => setMembersOpen(true),
+        logout: () => void handleLogout(),
+        invalidateSession,
+      })}
       {session.user.accountType === "admin" && (
         <FamilyMembersPanel
           currentUser={session.user}
@@ -317,68 +334,6 @@ function MeetIdentity() {
       </span>
     </div>
   );
-}
-
-type AccountBarProps = {
-  user: UserAccount;
-  logoutPending: boolean;
-  logoutError: string;
-  onManageMembers?: () => void;
-  onLogout: () => void;
-};
-
-function AccountBar({
-  user,
-  logoutPending,
-  logoutError,
-  onManageMembers,
-  onLogout,
-}: AccountBarProps) {
-  return (
-    <section className="account-bar" aria-label="当前登录账号">
-      <div className="account-bar-inner">
-        <span className="account-avatar" aria-hidden="true">
-          {getDisplayInitial(user.displayName)}
-        </span>
-        <div className="account-copy">
-          <span>当前账号</span>
-          <strong>{user.displayName}</strong>
-          <small>
-            @{user.username} · {accountTypeLabels[user.accountType]}
-          </small>
-        </div>
-        {logoutError && (
-          <p className="account-error" role="alert">
-            {logoutError}
-          </p>
-        )}
-        <div className="account-actions">
-          {onManageMembers && (
-            <button
-              className="account-members-button"
-              type="button"
-              onClick={onManageMembers}
-            >
-              家庭成员
-            </button>
-          )}
-          <button type="button" disabled={logoutPending} onClick={onLogout}>
-            {logoutPending ? "正在退出…" : "退出登录"}
-          </button>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-const accountTypeLabels: Record<UserAccount["accountType"], string> = {
-  admin: "管理员",
-  adult: "成人账号",
-  child: "儿童账号",
-};
-
-function getDisplayInitial(displayName: string): string {
-  return Array.from(displayName.trim())[0] ?? "M";
 }
 
 async function requestCurrentUser(signal: AbortSignal): Promise<UserAccount> {

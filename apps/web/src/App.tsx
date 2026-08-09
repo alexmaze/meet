@@ -1,669 +1,695 @@
-import {
-  qwenRealtimePublicConfigSchema,
-  type QwenRealtimeModel,
-  type QwenRealtimePublicConfig,
-  type RealtimeConnectionState,
-  type TranscriptSegment,
+import type {
+  Character,
+  CharacterRuntimeResponse,
+  CharacterSummary,
+  CreateCharacterRequest,
+  ProviderProfile,
+  UserAccount,
+  VoiceProfile,
 } from "@meet/protocol";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type PointerEvent as ReactPointerEvent,
-} from "react";
+import { useEffect, useState } from "react";
 import { registerSW } from "virtual:pwa-register";
 
+import type { AuthenticatedAppSession } from "./auth/AuthGate.js";
 import {
-  initialClientSnapshot,
-  QwenRealtimeClient,
-  type InputMode,
-  type RealtimeClientSnapshot,
-} from "./realtime/QwenRealtimeClient.js";
+  CharacterApiError,
+  copyCharacter,
+  createCharacter,
+  deleteCharacter,
+  getCharacter,
+  getCharacterCatalog,
+  getCharacterRuntime,
+  listCharacters,
+  restoreCharacter,
+  updateCharacter,
+  updateCharacterVisibility,
+} from "./characters/character-api.js";
+import CharacterDetail from "./characters/CharacterDetail.js";
+import CharacterEditor from "./characters/CharacterEditor.js";
+import CharacterLibrary from "./characters/CharacterLibrary.js";
+import {
+  canCreateCharacter,
+  presentCharacterError,
+} from "./characters/character-logic.js";
+import CharacterCall from "./realtime/CharacterCall.js";
 
-type EventLogEntry = {
-  id: string;
-  at: string;
-  direction: "client" | "server";
-  payload: string;
-};
+type ProductSection = "characters" | "history" | "memory" | "profile";
 
-type MicrophoneOption = {
-  deviceId: string;
-  label: string;
-};
+type DetailState =
+  | { status: "idle" }
+  | { status: "loading"; characterId: string }
+  | { status: "error"; characterId: string; message: string }
+  | { status: "ready"; character: Character };
 
-const connectionLabels: Record<RealtimeConnectionState, string> = {
-  idle: "未开始",
-  requesting_microphone: "请求麦克风",
-  connecting: "连接中",
-  configuring: "配置角色",
-  active: "通话中",
-  reconnecting: "恢复连接",
-  paused: "已暂停",
-  closed: "已结束",
-  error: "发生错误",
-};
+type EditorState =
+  | { status: "closed" }
+  | { status: "catalog"; character: Character | null }
+  | {
+      status: "ready";
+      character: Character | null;
+      providers: ProviderProfile[];
+      voices: VoiceProfile[];
+    };
 
-const activityLabels = {
-  idle: "安静等待",
-  listening: "正在聆听",
-  user_speaking: "你正在说话",
-  thinking: "正在思考",
-  assistant_speaking: "角色正在说话",
-} as const;
+type Notice = { kind: "success" | "error"; message: string };
 
-export default function App() {
-  const audioRef = useRef<HTMLAudioElement>(null);
-  const clientRef = useRef<QwenRealtimeClient | null>(null);
-  const updateServiceWorkerRef = useRef<
+export default function App(session: AuthenticatedAppSession) {
+  const { user } = session;
+  const [section, setSection] = useState<ProductSection>("characters");
+  const [characters, setCharacters] = useState<CharacterSummary[]>([]);
+  const [charactersLoading, setCharactersLoading] = useState(true);
+  const [charactersError, setCharactersError] = useState("");
+  const [listReload, setListReload] = useState(0);
+  const [detail, setDetail] = useState<DetailState>({ status: "idle" });
+  const [editor, setEditor] = useState<EditorState>({ status: "closed" });
+  const [editorError, setEditorError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [runtime, setRuntime] = useState<CharacterRuntimeResponse | null>(null);
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [offlineReady, setOfflineReady] = useState(false);
+  const [updateServiceWorker, setUpdateServiceWorker] = useState<
     ((reloadPage?: boolean) => Promise<void>) | null
   >(null);
 
-  const [publicConfig, setPublicConfig] =
-    useState<QwenRealtimePublicConfig | null>(null);
-  const [configError, setConfigError] = useState("");
-  const [snapshot, setSnapshot] = useState<RealtimeClientSnapshot>(
-    initialClientSnapshot,
-  );
-  const [hasClient, setHasClient] = useState(false);
-  const [model, setModel] = useState<QwenRealtimeModel>(
-    "qwen-audio-3.0-realtime-plus",
-  );
-  const [voice, setVoice] = useState("longanqian");
-  const [instructions, setInstructions] = useState(
-    "你是一位自然、耐心、有角色感的中文聊天伙伴。先听清用户再回答，默认简短口语化，不要像客服或说明书。",
-  );
-  const [assistantStarts, setAssistantStarts] = useState(true);
-  const [inputMode, setInputModeState] = useState<InputMode>(() => {
-    const saved = window.localStorage.getItem("meet.inputMode");
-    return saved === "push_to_talk" ? "push_to_talk" : "hands_free";
-  });
-  const [microphones, setMicrophones] = useState<MicrophoneOption[]>([]);
-  const [selectedMicrophoneId, setSelectedMicrophoneId] = useState(
-    () => window.localStorage.getItem("meet.microphoneDeviceId") ?? "",
-  );
-  const [microphoneListError, setMicrophoneListError] = useState("");
-  const [history, setHistory] = useState<TranscriptSegment[]>([]);
-  const [eventLog, setEventLog] = useState<EventLogEntry[]>([]);
-  const [errorMessage, setErrorMessage] = useState("");
-  const [updateAvailable, setUpdateAvailable] = useState(false);
-  const [offlineReady, setOfflineReady] = useState(false);
-
-  const refreshMicrophones = useCallback(async (): Promise<void> => {
-    if (!navigator.mediaDevices?.enumerateDevices) {
-      setMicrophoneListError("当前浏览器不支持列出麦克风设备。");
-      return;
-    }
-
-    try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const audioInputs = devices
-        .filter(
-          (device) =>
-            device.kind === "audioinput" && device.deviceId !== "default",
-        )
-        .map((device, index) => ({
-          deviceId: device.deviceId,
-          label: device.label.trim() || `麦克风 ${index + 1}`,
-        }));
-
-      setMicrophones(audioInputs);
-      setSelectedMicrophoneId((current) => {
-        if (
-          !current ||
-          audioInputs.some(({ deviceId }) => deviceId === current)
-        ) {
-          return current;
-        }
-        window.localStorage.removeItem("meet.microphoneDeviceId");
-        return "";
-      });
-      setMicrophoneListError("");
-    } catch (error) {
-      setMicrophoneListError(
-        error instanceof Error ? error.message : "无法读取麦克风设备。",
-      );
-    }
-  }, []);
-
-  const authorizeAndRefreshMicrophones = async (): Promise<void> => {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setMicrophoneListError("当前浏览器不支持麦克风采集。");
-      return;
-    }
-
-    try {
-      const probeStream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: false,
-      });
-      probeStream.getTracks().forEach((track) => track.stop());
-      await refreshMicrophones();
-    } catch (error) {
-      setMicrophoneListError(
-        error instanceof Error ? error.message : "麦克风授权失败。",
-      );
-    }
-  };
-
   useEffect(() => {
-    let cancelled = false;
-
-    void fetch("/api/realtime/qwen/config")
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(`读取服务端配置失败（HTTP ${response.status}）。`);
-        }
-        return qwenRealtimePublicConfigSchema.parse(await response.json());
-      })
-      .then((config) => {
-        if (cancelled) return;
-        setPublicConfig(config);
-        setModel(config.model);
-        setVoice(config.voice);
-        setInstructions(config.defaultInstructions);
+    const controller = new AbortController();
+    setCharactersLoading(true);
+    setCharactersError("");
+    void listCharacters(controller.signal)
+      .then((result) => {
+        setCharacters(result);
+        setCharactersLoading(false);
       })
       .catch((error: unknown) => {
-        if (!cancelled) {
-          setConfigError(
-            error instanceof Error ? error.message : "无法读取服务端配置。",
-          );
-        }
+        if (controller.signal.aborted) return;
+        if (handleUnauthorized(error, session.invalidateSession)) return;
+        setCharactersError(presentCharacterError(error, "list"));
+        setCharactersLoading(false);
       });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    return () => controller.abort();
+  }, [listReload, session.invalidateSession]);
 
   useEffect(() => {
-    const mediaDevices = navigator.mediaDevices;
-    const handleDeviceChange = (): void => {
-      void refreshMicrophones();
-    };
-
-    void refreshMicrophones();
-    mediaDevices?.addEventListener("devicechange", handleDeviceChange);
-    return () => {
-      mediaDevices?.removeEventListener("devicechange", handleDeviceChange);
-    };
-  }, [refreshMicrophones]);
+    if (detail.status !== "loading") return;
+    const controller = new AbortController();
+    const characterId = detail.characterId;
+    void getCharacter(characterId, controller.signal)
+      .then((character) => setDetail({ status: "ready", character }))
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        if (handleUnauthorized(error, session.invalidateSession)) return;
+        setDetail({
+          status: "error",
+          characterId,
+          message: presentCharacterError(error, "detail"),
+        });
+      });
+    return () => controller.abort();
+  }, [detail, session.invalidateSession]);
 
   useEffect(() => {
-    updateServiceWorkerRef.current = registerSW({
+    if (editor.status !== "catalog") return;
+    const controller = new AbortController();
+    const character = editor.character;
+    setEditorError("");
+    void getCharacterCatalog(controller.signal)
+      .then((catalog) => {
+        setEditor({ status: "ready", character, ...catalog });
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        if (handleUnauthorized(error, session.invalidateSession)) return;
+        setEditorError(presentCharacterError(error, "detail"));
+        setEditor({ status: "closed" });
+      });
+    return () => controller.abort();
+  }, [editor, session.invalidateSession]);
+
+  useEffect(() => {
+    const updater = registerSW({
       immediate: true,
       onNeedRefresh: () => setUpdateAvailable(true),
       onOfflineReady: () => setOfflineReady(true),
     });
+    setUpdateServiceWorker(() => updater);
   }, []);
 
-  useEffect(
-    () => () => {
-      void clientRef.current?.close();
-    },
-    [],
-  );
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [section, detail.status, editor.status, runtime?.character.id]);
 
-  const readyToStart = Boolean(
-    publicConfig?.enabled &&
-    publicConfig.configured &&
-    audioRef.current &&
-    !hasClient,
-  );
-  const configState = useMemo(() => {
-    if (configError) return { label: "API 不可用", tone: "error" };
-    if (!publicConfig) return { label: "读取配置", tone: "neutral" };
-    if (!publicConfig.enabled) return { label: "样例未启用", tone: "warning" };
-    if (!publicConfig.configured)
-      return { label: "等待填写密钥", tone: "warning" };
-    return { label: "服务端已就绪", tone: "success" };
-  }, [configError, publicConfig]);
+  const openCharacter = (characterId: string) => {
+    setNotice(null);
+    setDetail({ status: "loading", characterId });
+  };
 
-  const startCall = async (): Promise<void> => {
-    if (!audioRef.current || !publicConfig || !readyToStart) {
-      return;
-    }
+  const beginCreate = () => {
+    if (!canCreateCharacter(user)) return;
+    setEditorError("");
+    setEditor({ status: "catalog", character: null });
+  };
 
-    setErrorMessage("");
-    setHistory([]);
-    setEventLog([]);
+  const beginEdit = (character: Character) => {
+    if (!character.permissions.canEdit || user.accountType === "child") return;
+    setEditorError("");
+    setEditor({ status: "catalog", character });
+  };
 
-    const client = new QwenRealtimeClient(audioRef.current, {
-      onSnapshot: setSnapshot,
-      onTranscript: ({ speaker, text }) => {
-        setHistory((current) => [
-          ...current,
-          {
-            id: createLocalId(),
-            speaker,
-            text,
-            createdAt: new Date().toISOString(),
-          },
-        ]);
-      },
-      onProviderEvent: (direction, event) => {
-        const entry: EventLogEntry = {
-          id: createLocalId(),
-          at: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
-          direction,
-          payload: JSON.stringify(event),
-        };
-        setEventLog((current) => [...current.slice(-79), entry]);
-      },
-      onError: (error) => setErrorMessage(error.message),
-    });
-
-    clientRef.current = client;
-    setHasClient(true);
+  const beginCall = async (characterId: string) => {
+    if (busyAction) return;
+    setBusyAction(characterId);
+    setNotice(null);
     try {
-      await client.start({
-        model,
-        voice: voice.trim(),
-        instructions: instructions.trim(),
-        inputMode,
-        assistantStarts,
-        audioInputDeviceId: selectedMicrophoneId || undefined,
+      const value = await getCharacterRuntime(characterId);
+      setRuntime(value);
+    } catch (error) {
+      if (handleUnauthorized(error, session.invalidateSession)) return;
+      const message = presentCharacterError(error, "runtime");
+      setNotice({ kind: "error", message });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const saveCharacter = async (request: CreateCharacterRequest) => {
+    if (editor.status !== "ready" || user.accountType === "child") return;
+    setSaving(true);
+    setEditorError("");
+    try {
+      const saved = editor.character
+        ? await updateCharacter(editor.character.id, {
+            revision: editor.character.revision,
+            ...request,
+          })
+        : await createCharacter(request);
+      blurActiveControl();
+      setEditor({ status: "closed" });
+      setDetail({ status: "ready", character: saved });
+      setNotice({
+        kind: "success",
+        message: editor.character
+          ? "角色卡已经更新。"
+          : `${saved.name} 已加入你的角色。`,
       });
-      void refreshMicrophones();
-    } catch {
-      clientRef.current = null;
-      setHasClient(false);
+      setListReload((current) => current + 1);
+    } catch (error) {
+      if (handleUnauthorized(error, session.invalidateSession)) return;
+      setEditorError(presentCharacterError(error, "save"));
+    } finally {
+      setSaving(false);
     }
   };
 
-  const endCall = async (): Promise<void> => {
-    const client = clientRef.current;
-    clientRef.current = null;
-    setHasClient(false);
-    await client?.close();
-  };
+  const performDetailAction = async (
+    action: "copy" | "share" | "restore" | "delete",
+  ) => {
+    if (detail.status !== "ready" || user.accountType === "child") return;
+    if (busyAction) return;
+    const character = detail.character;
+    const allowed = {
+      copy: character.permissions.canCopy,
+      share: character.permissions.canShare,
+      restore: character.permissions.canRestore,
+      delete: character.permissions.canDelete,
+    }[action];
+    if (!allowed) return;
 
-  const setInputMode = (nextMode: InputMode): void => {
-    if (hasClient) {
+    if (
+      action === "restore" &&
+      !window.confirm(
+        "恢复后会使用当前应用内置的人设与声音，但不会删除任何历史或记忆。继续吗？",
+      )
+    )
       return;
+    if (
+      action === "delete" &&
+      !window.confirm(
+        `确定删除“${character.name}”吗？角色的历史数据不会在这个步骤中处理。`,
+      )
+    )
+      return;
+    if (
+      action === "share" &&
+      character.visibility === "private" &&
+      !window.confirm(
+        "共享后，全家成员都能看到这个角色，并使用同一套人设与声音。继续吗？",
+      )
+    )
+      return;
+
+    setBusyAction(action);
+    setNotice(null);
+    try {
+      let changed: Character | null = null;
+      if (action === "copy") changed = await copyCharacter(character.id);
+      if (action === "restore") changed = await restoreCharacter(character.id);
+      if (action === "share") {
+        changed = await updateCharacterVisibility(character.id, {
+          revision: character.revision,
+          visibility: character.visibility === "private" ? "family" : "private",
+        });
+      }
+      if (action === "delete") {
+        await deleteCharacter(character.id, character.revision);
+        setDetail({ status: "idle" });
+        setNotice(null);
+      } else if (changed) {
+        setDetail({ status: "ready", character: changed });
+        setNotice({
+          kind: "success",
+          message:
+            action === "copy"
+              ? `已创建“${changed.name}”。`
+              : action === "restore"
+                ? "预置角色已恢复到当前版本。"
+                : changed.visibility === "family"
+                  ? "角色已共享给全家。"
+                  : "角色已改为仅自己可见。",
+        });
+      }
+      setListReload((current) => current + 1);
+    } catch (error) {
+      if (handleUnauthorized(error, session.invalidateSession)) return;
+      setNotice({
+        kind: "error",
+        message: presentCharacterError(error, action),
+      });
+    } finally {
+      setBusyAction(null);
     }
-    setInputModeState(nextMode);
-    window.localStorage.setItem("meet.inputMode", nextMode);
   };
 
-  const selectMicrophone = (deviceId: string): void => {
-    setSelectedMicrophoneId(deviceId);
-    if (deviceId) {
-      window.localStorage.setItem("meet.microphoneDeviceId", deviceId);
-    } else {
-      window.localStorage.removeItem("meet.microphoneDeviceId");
-    }
+  const navigate = (next: ProductSection) => {
+    setSection(next);
+    setDetail({ status: "idle" });
+    setEditor({ status: "closed" });
+    setNotice(null);
+    setEditorError("");
   };
 
-  const toggleMute = (): void => {
-    clientRef.current?.setMicrophoneMuted(!snapshot.microphoneMuted);
-  };
-
-  const beginPushToTalk = (
-    event: ReactPointerEvent<HTMLButtonElement>,
-  ): void => {
-    event.currentTarget.setPointerCapture(event.pointerId);
-    clientRef.current?.setPushToTalkActive(true);
-  };
-
-  const endPushToTalk = (): void => {
-    clientRef.current?.setPushToTalkActive(false);
-  };
+  if (runtime) {
+    return (
+      <>
+        <CharacterCall
+          runtime={runtime}
+          onExit={() => setRuntime(null)}
+          onUnauthorized={session.invalidateSession}
+        />
+        <PwaNotice
+          inCall
+          updateAvailable={updateAvailable}
+          offlineReady={offlineReady}
+          onDismissUpdate={() => setUpdateAvailable(false)}
+          onDismissOffline={() => setOfflineReady(false)}
+          onUpdate={() => undefined}
+        />
+      </>
+    );
+  }
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="#top" aria-label="Meet 首页">
-          <span className="brand-mark">M</span>
-          <span>
-            <strong>Meet</strong>
-            <small>Realtime Lab</small>
-          </span>
-        </a>
-        <div className={`config-badge ${configState.tone}`}>
-          <span className="status-dot" />
-          {configState.label}
-        </div>
-      </header>
-
-      <main id="top" className="workspace">
-        <section className="stage" aria-label="实时通话舞台">
-          <div className="stage-glow stage-glow-one" />
-          <div className="stage-glow stage-glow-two" />
-
-          <div className="call-status">
-            <span className={`live-dot connection-${snapshot.connection}`} />
-            <span>{connectionLabels[snapshot.connection]}</span>
-            <span className="status-separator">·</span>
-            <span>{activityLabels[snapshot.activity]}</span>
-          </div>
-
-          <div className={`portrait activity-${snapshot.activity}`}>
-            <div className="portrait-ring ring-one" />
-            <div className="portrait-ring ring-two" />
-            <div className="portrait-face">
-              <span className="portrait-letter">M</span>
-              <span className="portrait-spark spark-one" />
-              <span className="portrait-spark spark-two" />
-            </div>
-          </div>
-
-          <div className="caption-area" aria-live="polite">
-            {snapshot.userCaption && (
-              <p className="user-caption">你：{snapshot.userCaption}</p>
-            )}
-            <p className="assistant-caption">
-              {snapshot.assistantCaption || getCaptionPlaceholder(snapshot)}
-            </p>
-            <p className="connection-detail">{snapshot.detail}</p>
-          </div>
-
-          <div className="mode-switch" aria-label="语音输入模式">
-            <button
-              className={inputMode === "hands_free" ? "selected" : ""}
-              type="button"
-              disabled={hasClient}
-              onClick={() => setInputMode("hands_free")}
-            >
-              免提对话
-            </button>
-            <button
-              className={inputMode === "push_to_talk" ? "selected" : ""}
-              type="button"
-              disabled={hasClient}
-              onClick={() => setInputMode("push_to_talk")}
-            >
-              按住说话
-            </button>
-          </div>
-
-          <div className="call-controls">
-            {!hasClient ? (
-              <button
-                className="primary-call-button"
-                type="button"
-                disabled={
-                  !readyToStart || !voice.trim() || !instructions.trim()
-                }
-                onClick={() => void startCall()}
-              >
-                <span className="button-icon">↗</span>
-                开始通话
-              </button>
-            ) : (
-              <>
-                <button
-                  className={`round-control ${snapshot.microphoneMuted ? "active" : ""}`}
-                  type="button"
-                  onClick={toggleMute}
-                  aria-label={
-                    snapshot.microphoneMuted ? "打开麦克风" : "静音麦克风"
+    <div className="product-shell">
+      <ProductSidebar section={section} user={user} onNavigate={navigate} />
+      <div className="product-main">
+        <ProductTopbar user={user} />
+        <div className="product-content">
+          {section === "characters" && (
+            <>
+              {editor.status === "catalog" && (
+                <PageLoading label="正在打开角色编辑器" />
+              )}
+              {editor.status === "ready" && (
+                <CharacterEditor
+                  key={editor.character?.id ?? "new-character"}
+                  user={user}
+                  character={editor.character}
+                  providers={editor.providers}
+                  voices={editor.voices}
+                  saving={saving}
+                  serverError={editorError}
+                  onCancel={() => {
+                    blurActiveControl();
+                    setEditorError("");
+                    setEditor({ status: "closed" });
+                  }}
+                  onSave={(request) => void saveCharacter(request)}
+                />
+              )}
+              {editor.status === "closed" && detail.status === "idle" && (
+                <>
+                  {notice && (
+                    <div
+                      className={`product-notice global ${notice.kind}`}
+                      role={notice.kind === "error" ? "alert" : "status"}
+                    >
+                      {notice.message}
+                    </div>
+                  )}
+                  {editorError && (
+                    <div className="product-notice global error" role="alert">
+                      {editorError}
+                    </div>
+                  )}
+                  <CharacterLibrary
+                    user={user}
+                    characters={characters}
+                    loading={charactersLoading}
+                    error={charactersError}
+                    busyCharacterId={busyAction}
+                    onRetry={() => setListReload((current) => current + 1)}
+                    onOpen={openCharacter}
+                    onCall={(id) => void beginCall(id)}
+                    onCreate={beginCreate}
+                  />
+                </>
+              )}
+              {editor.status === "closed" && detail.status === "loading" && (
+                <PageLoading label="正在读取角色卡" />
+              )}
+              {editor.status === "closed" && detail.status === "error" && (
+                <PageError
+                  message={detail.message}
+                  onBack={() => setDetail({ status: "idle" })}
+                  onRetry={() =>
+                    setDetail({
+                      status: "loading",
+                      characterId: detail.characterId,
+                    })
                   }
-                >
-                  {snapshot.microphoneMuted ? "静" : "麦"}
-                </button>
-
-                {inputMode === "push_to_talk" && (
-                  <button
-                    className="push-to-talk-button"
-                    type="button"
-                    disabled={
-                      snapshot.connection !== "active" ||
-                      snapshot.microphoneMuted
-                    }
-                    onPointerDown={beginPushToTalk}
-                    onPointerUp={endPushToTalk}
-                    onPointerCancel={endPushToTalk}
-                    onLostPointerCapture={endPushToTalk}
-                  >
-                    按住说话
-                  </button>
-                )}
-
-                <button
-                  className="round-control stop-response"
-                  type="button"
-                  onClick={() => clientRef.current?.interrupt()}
-                  aria-label="停止角色说话"
-                >
-                  ■
-                </button>
-                <button
-                  className="end-call-button"
-                  type="button"
-                  onClick={() => void endCall()}
-                >
-                  结束
-                </button>
-              </>
-            )}
-          </div>
-        </section>
-
-        <aside className="lab-panel" aria-label="技术验证设置">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">QWEN AUDIO 3.0 WEBRTC SPIKE</p>
-              <h1>实时语音实验室</h1>
-            </div>
-            <span className="version-chip">v0.1</span>
-          </div>
-          <p className="panel-intro">
-            先验证自然度、打断、字幕和连接体验。这里的角色设定只在本次通话生效。
-          </p>
-
-          {!window.isSecureContext && (
-            <div className="notice error-notice">
-              非安全上下文无法稳定使用麦克风。请通过 localhost 或 HTTPS 打开。
-            </div>
-          )}
-          {configError && (
-            <div className="notice error-notice">{configError}</div>
-          )}
-          {publicConfig && !publicConfig.enabled && (
-            <div className="notice warning-notice">
-              请在 <code>.env</code> 中设置{" "}
-              <code>REALTIME_SPIKE_ENABLED=true</code>。
-            </div>
-          )}
-          {publicConfig?.enabled && !publicConfig.configured && (
-            <div className="notice warning-notice">
-              请在服务端 <code>.env</code> 填写 API Key 和获批的 WebRTC
-              Endpoint；它们不会发送到浏览器。
-            </div>
-          )}
-          {errorMessage && (
-            <div className="notice error-notice" role="alert">
-              {errorMessage}
-            </div>
-          )}
-
-          <fieldset className="settings-group" disabled={hasClient}>
-            <label className="field-label" htmlFor="model">
-              实时模型
-            </label>
-            <select
-              id="model"
-              value={model}
-              onChange={(event) =>
-                setModel(event.target.value as QwenRealtimeModel)
-              }
-            >
-              {(
-                publicConfig?.availableModels ?? [
-                  "qwen-audio-3.0-realtime-plus",
-                  "qwen-audio-3.0-realtime-flash",
-                ]
-              ).map((availableModel) => (
-                <option key={availableModel} value={availableModel}>
-                  {availableModel === "qwen-audio-3.0-realtime-plus"
-                    ? "Qwen Audio 3.0 Plus · 质量优先"
-                    : "Qwen Audio 3.0 Flash · 速度优先"}
-                </option>
-              ))}
-            </select>
-
-            <label className="field-label" htmlFor="voice">
-              预设声音
-            </label>
-            <input
-              id="voice"
-              value={voice}
-              onChange={(event) => setVoice(event.target.value)}
-              placeholder="longanqian"
-              autoComplete="off"
-            />
-
-            <label className="field-label" htmlFor="microphone">
-              麦克风
-            </label>
-            <div className="field-with-action">
-              <select
-                id="microphone"
-                value={selectedMicrophoneId}
-                onChange={(event) => selectMicrophone(event.target.value)}
-              >
-                <option value="">浏览器默认</option>
-                {microphones.map((microphone) => (
-                  <option key={microphone.deviceId} value={microphone.deviceId}>
-                    {microphone.label}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => void authorizeAndRefreshMicrophones()}
-              >
-                刷新设备
-              </button>
-            </div>
-            <small className="field-hint">
-              {snapshot.microphoneLabel
-                ? `当前使用：${snapshot.microphoneLabel}`
-                : "若设备名称未显示，请刷新设备并允许麦克风权限。"}
-            </small>
-            {microphoneListError && (
-              <small className="field-error">{microphoneListError}</small>
-            )}
-
-            <label className="field-label" htmlFor="instructions">
-              角色设定
-            </label>
-            <textarea
-              id="instructions"
-              value={instructions}
-              onChange={(event) => setInstructions(event.target.value)}
-              rows={6}
-            />
-
-            <label className="check-field">
-              <input
-                type="checkbox"
-                checked={assistantStarts}
-                onChange={(event) => setAssistantStarts(event.target.checked)}
-              />
-              <span>
-                <strong>由角色先打招呼</strong>
-                <small>会话配置成功后注入开场请求并生成自然问候</small>
-              </span>
-            </label>
-          </fieldset>
-
-          <details className="diagnostic-section" open>
-            <summary>
-              <span>完整字幕</span>
-              <span className="count-chip">{history.length}</span>
-            </summary>
-            <div className="transcript-list">
-              {history.length === 0 ? (
-                <p className="empty-state">完成一句话后会显示在这里。</p>
-              ) : (
-                history.map((item) => (
-                  <article
-                    className={`transcript ${item.speaker}`}
-                    key={item.id}
-                  >
-                    <span>{item.speaker === "user" ? "你" : "角色"}</span>
-                    <p>{item.text}</p>
-                  </article>
-                ))
+                />
               )}
-            </div>
-          </details>
-
-          <details className="diagnostic-section event-section">
-            <summary>
-              <span>原始事件</span>
-              <span className="count-chip">{eventLog.length}</span>
-            </summary>
-            <div className="event-log">
-              {eventLog.length === 0 ? (
-                <p className="empty-state">DataChannel 事件会显示在这里。</p>
-              ) : (
-                [...eventLog].reverse().map((entry) => (
-                  <div className="event-entry" key={entry.id}>
-                    <span className={`direction ${entry.direction}`}>
-                      {entry.direction === "client" ? "发送" : "接收"}
-                    </span>
-                    <time>{entry.at}</time>
-                    <code>{entry.payload}</code>
-                  </div>
-                ))
+              {editor.status === "closed" && detail.status === "ready" && (
+                <CharacterDetail
+                  user={user}
+                  character={detail.character}
+                  busyAction={
+                    busyAction === detail.character.id ? "call" : busyAction
+                  }
+                  notice={notice}
+                  onBack={() => {
+                    setDetail({ status: "idle" });
+                    setNotice(null);
+                  }}
+                  onCall={() => void beginCall(detail.character.id)}
+                  onEdit={() => beginEdit(detail.character)}
+                  onCopy={() => void performDetailAction("copy")}
+                  onToggleVisibility={() => void performDetailAction("share")}
+                  onRestore={() => void performDetailAction("restore")}
+                  onDelete={() => void performDetailAction("delete")}
+                />
               )}
-            </div>
-          </details>
-        </aside>
-      </main>
-
-      {(updateAvailable || offlineReady) && (
-        <div className="pwa-toast">
-          <p>
-            {updateAvailable
-              ? "Meet 有新版本。当前通话不会被自动刷新。"
-              : "应用外壳已可离线打开；实时聊天仍需要联网。"}
-          </p>
-          {updateAvailable && (
-            <button
-              type="button"
-              disabled={hasClient}
-              onClick={() => void updateServiceWorkerRef.current?.(true)}
-            >
-              {hasClient ? "通话结束后更新" : "立即更新"}
-            </button>
+            </>
           )}
-          <button
-            className="toast-dismiss"
-            type="button"
-            onClick={() => {
-              setUpdateAvailable(false);
-              setOfflineReady(false);
-            }}
-          >
-            稍后
-          </button>
+          {(section === "history" || section === "memory") && (
+            <ComingSoon section={section} />
+          )}
+          {section === "profile" && <ProfilePage session={session} />}
         </div>
-      )}
-
-      <audio ref={audioRef} autoPlay playsInline className="remote-audio" />
+      </div>
+      <ProductBottomNav section={section} onNavigate={navigate} />
+      <PwaNotice
+        inCall={false}
+        updateAvailable={updateAvailable}
+        offlineReady={offlineReady}
+        onDismissUpdate={() => setUpdateAvailable(false)}
+        onDismissOffline={() => setOfflineReady(false)}
+        onUpdate={() => void updateServiceWorker?.(true)}
+      />
     </div>
   );
 }
 
-function getCaptionPlaceholder(snapshot: RealtimeClientSnapshot): string {
-  if (snapshot.connection === "active") {
-    if (snapshot.activity === "thinking") return "让我想一想…";
-    if (snapshot.activity === "assistant_speaking") return "…";
-    if (snapshot.inputMode === "push_to_talk") return "按住下方按钮开始说话。";
-    return "我在听，你可以直接说话。";
-  }
-  if (snapshot.connection === "connecting")
-    return "正在跨过网络，去见你的角色…";
-  if (snapshot.connection === "configuring") return "正在让角色准备好声音…";
-  return "设置一个角色，然后开始真正的实时对话。";
+function ProductSidebar({
+  section,
+  user,
+  onNavigate,
+}: {
+  section: ProductSection;
+  user: UserAccount;
+  onNavigate: (section: ProductSection) => void;
+}) {
+  return (
+    <aside className="product-sidebar">
+      <div className="product-brand">
+        <span className="brand-mark">M</span>
+        <span>
+          <strong>Meet</strong>
+          <small>家庭角色空间</small>
+        </span>
+      </div>
+      <ProductNav section={section} onNavigate={onNavigate} />
+      <button
+        className="sidebar-profile"
+        type="button"
+        onClick={() => onNavigate("profile")}
+      >
+        <span className="profile-initial">{getInitial(user.displayName)}</span>
+        <span>
+          <strong>{user.displayName}</strong>
+          <small>{accountTypeLabels[user.accountType]}</small>
+        </span>
+        <span aria-hidden="true">›</span>
+      </button>
+    </aside>
+  );
 }
 
-function createLocalId(): string {
-  return crypto.randomUUID();
+function ProductTopbar({ user }: { user: UserAccount }) {
+  return (
+    <header className="product-topbar">
+      <div className="mobile-brand">
+        <span className="brand-mark">M</span>
+        <strong>Meet</strong>
+      </div>
+      <div>
+        <span>你好，</span>
+        <strong>{user.displayName}</strong>
+      </div>
+    </header>
+  );
 }
+
+function ProductNav({
+  section,
+  onNavigate,
+}: {
+  section: ProductSection;
+  onNavigate: (section: ProductSection) => void;
+}) {
+  const items: { id: ProductSection; label: string; icon: string }[] = [
+    { id: "characters", label: "角色", icon: "◇" },
+    { id: "history", label: "历史", icon: "◷" },
+    { id: "memory", label: "记忆", icon: "◎" },
+    { id: "profile", label: "我的", icon: "○" },
+  ];
+  return (
+    <nav className="product-nav" aria-label="主要导航">
+      {items.map((item) => (
+        <button
+          key={item.id}
+          className={section === item.id ? "active" : ""}
+          type="button"
+          aria-current={section === item.id ? "page" : undefined}
+          onClick={() => onNavigate(item.id)}
+        >
+          <span aria-hidden="true">{item.icon}</span>
+          <span>{item.label}</span>
+          {item.id !== "characters" && item.id !== "profile" && (
+            <small>下一阶段</small>
+          )}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function ProductBottomNav({
+  section,
+  onNavigate,
+}: {
+  section: ProductSection;
+  onNavigate: (section: ProductSection) => void;
+}) {
+  return (
+    <div className="product-bottom-nav">
+      <ProductNav section={section} onNavigate={onNavigate} />
+    </div>
+  );
+}
+
+function ComingSoon({ section }: { section: "history" | "memory" }) {
+  const isHistory = section === "history";
+  return (
+    <div className="coming-soon page-frame">
+      <span aria-hidden="true">{isHistory ? "◷" : "◎"}</span>
+      <p className="product-eyebrow">NEXT STAGE</p>
+      <h1>{isHistory ? "通话历史" : "长期记忆"}</h1>
+      <p>
+        {isHistory
+          ? "下一阶段会在这里保存每个账号自己的通话记录，并支持继续上次关系。"
+          : "下一阶段会在这里管理明确事实与待确认建议；不同账号的私人记忆始终隔离。"}
+      </p>
+      <strong>角色通话闭环完成后继续建设</strong>
+    </div>
+  );
+}
+
+function ProfilePage({ session }: { session: AuthenticatedAppSession }) {
+  const user = session.user;
+  return (
+    <div className="profile-page page-frame">
+      <header>
+        <p className="product-eyebrow">MY SPACE</p>
+        <h1>我的</h1>
+        <p>管理当前账号与家庭空间入口。</p>
+      </header>
+      <section className="profile-card">
+        <span className="profile-large-initial">
+          {getInitial(user.displayName)}
+        </span>
+        <div>
+          <strong>{user.displayName}</strong>
+          <p>@{user.username}</p>
+          <span>{accountTypeLabels[user.accountType]}</span>
+        </div>
+      </section>
+      {session.logoutError && (
+        <div className="product-notice error" role="alert">
+          {session.logoutError}
+        </div>
+      )}
+      <section className="profile-actions">
+        {user.accountType === "admin" && (
+          <button type="button" onClick={session.openFamilyMembers}>
+            <span>
+              <strong>家庭成员</strong>
+              <small>创建账号、重置密码与儿童资料权限</small>
+            </span>
+            <span aria-hidden="true">→</span>
+          </button>
+        )}
+        <button
+          type="button"
+          disabled={session.logoutPending}
+          onClick={session.logout}
+        >
+          <span>
+            <strong>{session.logoutPending ? "正在退出…" : "退出登录"}</strong>
+            <small>切换家庭成员需要先退出当前账号</small>
+          </span>
+          <span aria-hidden="true">→</span>
+        </button>
+      </section>
+      <p className="profile-privacy-note">
+        对话、记忆和录音默认按账号隔离；管理员也不能读取成人账号的私人内容。
+      </p>
+    </div>
+  );
+}
+
+function PageLoading({ label }: { label: string }) {
+  return (
+    <div className="page-frame product-state page-loading" role="status">
+      <span className="product-spinner" aria-hidden="true" />
+      <strong>{label}</strong>
+    </div>
+  );
+}
+
+function PageError({
+  message,
+  onBack,
+  onRetry,
+}: {
+  message: string;
+  onBack: () => void;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="page-frame product-state page-loading error" role="alert">
+      <span className="state-symbol" aria-hidden="true">
+        !
+      </span>
+      <strong>没有打开角色卡</strong>
+      <p>{message}</p>
+      <div>
+        <button type="button" onClick={onBack}>
+          返回角色
+        </button>
+        <button type="button" onClick={onRetry}>
+          重试
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PwaNotice({
+  inCall,
+  updateAvailable,
+  offlineReady,
+  onDismissUpdate,
+  onDismissOffline,
+  onUpdate,
+}: {
+  inCall: boolean;
+  updateAvailable: boolean;
+  offlineReady: boolean;
+  onDismissUpdate: () => void;
+  onDismissOffline: () => void;
+  onUpdate: () => void;
+}) {
+  if (!updateAvailable && !offlineReady) return null;
+  return (
+    <div className="pwa-toast" role="status">
+      <p>
+        {updateAvailable
+          ? inCall
+            ? "Meet 有新版本。请先结束当前通话，再返回刷新。"
+            : "Meet 有新版本，可以刷新后使用。"
+          : "应用外壳已缓存；实时聊天仍需要联网。"}
+      </p>
+      {updateAvailable && !inCall && (
+        <button type="button" onClick={onUpdate}>
+          刷新
+        </button>
+      )}
+      <button
+        className="toast-dismiss"
+        type="button"
+        onClick={updateAvailable ? onDismissUpdate : onDismissOffline}
+      >
+        稍后
+      </button>
+    </div>
+  );
+}
+
+function handleUnauthorized(error: unknown, invalidate: () => void): boolean {
+  if (error instanceof CharacterApiError && error.status === 401) {
+    invalidate();
+    return true;
+  }
+  return false;
+}
+
+function blurActiveControl(): void {
+  if (document.activeElement instanceof HTMLElement) {
+    document.activeElement.blur();
+  }
+}
+
+function getInitial(displayName: string): string {
+  return Array.from(displayName.trim())[0] ?? "M";
+}
+
+const accountTypeLabels: Record<UserAccount["accountType"], string> = {
+  admin: "家庭管理员",
+  adult: "成人账号",
+  child: "儿童账号",
+};

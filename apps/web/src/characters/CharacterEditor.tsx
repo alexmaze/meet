@@ -1,0 +1,424 @@
+import type {
+  Character,
+  CreateCharacterRequest,
+  ProviderProfile,
+  UserAccount,
+  VoiceProfile,
+} from "@meet/protocol";
+import { useMemo, useState, type FormEvent, type ReactNode } from "react";
+
+import {
+  buildCreateCharacterRequest,
+  builtInAvatarChoices,
+  characterToForm,
+  createEmptyCharacterForm,
+  type CharacterFormValue,
+} from "./character-logic.js";
+
+type CharacterEditorProps = {
+  user: UserAccount;
+  character: Character | null;
+  providers: ProviderProfile[];
+  voices: VoiceProfile[];
+  saving: boolean;
+  serverError: string;
+  onCancel: () => void;
+  onSave: (request: CreateCharacterRequest) => void;
+};
+
+export default function CharacterEditor({
+  user,
+  character,
+  providers,
+  voices,
+  saving,
+  serverError,
+  onCancel,
+  onSave,
+}: CharacterEditorProps) {
+  const [form, setForm] = useState<CharacterFormValue>(() =>
+    character
+      ? characterToForm(character)
+      : createEmptyCharacterForm(providers, voices),
+  );
+  const [validationError, setValidationError] = useState("");
+  const matchingVoices = useMemo(
+    () =>
+      voices.filter(
+        (voice) => voice.providerProfileId === form.providerProfileId,
+      ),
+    [form.providerProfileId, voices],
+  );
+
+  const change = <K extends keyof CharacterFormValue>(
+    key: K,
+    value: CharacterFormValue[K],
+  ) => {
+    setForm((current) => ({ ...current, [key]: value }));
+    setValidationError("");
+  };
+
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const result = buildCreateCharacterRequest(form);
+    if (!result.ok) {
+      setValidationError(result.message);
+      return;
+    }
+    onSave(result.value);
+  };
+
+  const chooseAvatar = (choice: (typeof builtInAvatarChoices)[number]) => {
+    setForm((current) => ({
+      ...current,
+      avatarUrl: choice.value,
+      accentColor: choice.accentColor,
+      visualBackground: choice.background,
+    }));
+  };
+
+  return (
+    <div className="editor-page page-frame">
+      <button className="back-button" type="button" onClick={onCancel}>
+        ← 取消
+      </button>
+      <header className="editor-heading">
+        <div>
+          <p className="product-eyebrow">STRUCTURED CHARACTER CARD</p>
+          <h1>{character ? `编辑 ${character.name}` : "创建角色"}</h1>
+          <p>每一项都能查看和修改，保存后会共同组成角色的稳定人设。</p>
+        </div>
+        <span className="editor-owner-note">
+          {user.accountType === "admin"
+            ? "管理员创建后默认全家共享"
+            : "新角色默认仅自己可见"}
+        </span>
+      </header>
+
+      {character && character.visibility !== "private" && (
+        <div className="product-notice warning" role="status">
+          这是家庭共享角色。修改人设或声音后，会影响全家之后发起的通话。
+        </div>
+      )}
+      {(validationError || serverError) && (
+        <div className="product-notice error" role="alert">
+          {validationError || serverError}
+        </div>
+      )}
+
+      <form className="character-form" onSubmit={submit} aria-busy={saving}>
+        <fieldset disabled={saving}>
+          <EditorSection
+            eyebrow="IDENTITY"
+            title="角色身份"
+            description="先给角色一个清楚、容易记住的轮廓。"
+          >
+            <div className="form-grid two-columns">
+              <Field label="角色名称" htmlFor="character-name">
+                <input
+                  id="character-name"
+                  maxLength={80}
+                  value={form.name}
+                  onChange={(event) => change("name", event.target.value)}
+                />
+              </Field>
+              <Field label="一句话简介" htmlFor="character-description">
+                <input
+                  id="character-description"
+                  maxLength={600}
+                  value={form.description}
+                  onChange={(event) =>
+                    change("description", event.target.value)
+                  }
+                />
+              </Field>
+            </div>
+            <Field label="人物背景" htmlFor="character-background">
+              <textarea
+                id="character-background"
+                rows={4}
+                maxLength={4000}
+                value={form.background}
+                onChange={(event) => change("background", event.target.value)}
+              />
+            </Field>
+            <div className="form-grid two-columns">
+              <Field label="性格特点（每行一项）" htmlFor="character-traits">
+                <textarea
+                  id="character-traits"
+                  rows={4}
+                  value={form.personalityTraits}
+                  onChange={(event) =>
+                    change("personalityTraits", event.target.value)
+                  }
+                />
+              </Field>
+              <Field label="与用户的关系" htmlFor="character-relationship">
+                <textarea
+                  id="character-relationship"
+                  rows={4}
+                  maxLength={1000}
+                  value={form.relationship}
+                  onChange={(event) =>
+                    change("relationship", event.target.value)
+                  }
+                />
+              </Field>
+            </div>
+          </EditorSection>
+
+          <EditorSection
+            eyebrow="EXPRESSION"
+            title="表达方式"
+            description="决定角色怎么说、为什么说，以及说话时带着怎样的情绪。"
+          >
+            <div className="form-grid two-columns">
+              <Field label="说话习惯" htmlFor="character-speaking-style">
+                <textarea
+                  id="character-speaking-style"
+                  rows={4}
+                  maxLength={1000}
+                  value={form.speakingStyle}
+                  onChange={(event) =>
+                    change("speakingStyle", event.target.value)
+                  }
+                />
+              </Field>
+              <Field label="情绪风格" htmlFor="character-emotional-style">
+                <textarea
+                  id="character-emotional-style"
+                  rows={4}
+                  maxLength={1000}
+                  value={form.emotionalStyle}
+                  onChange={(event) =>
+                    change("emotionalStyle", event.target.value)
+                  }
+                />
+              </Field>
+              <Field label="对话目标（每行一项）" htmlFor="character-goals">
+                <textarea
+                  id="character-goals"
+                  rows={5}
+                  value={form.conversationGoals}
+                  onChange={(event) =>
+                    change("conversationGoals", event.target.value)
+                  }
+                />
+              </Field>
+              <Field label="示例台词（每行一句）" htmlFor="character-samples">
+                <textarea
+                  id="character-samples"
+                  rows={5}
+                  value={form.sampleLines}
+                  onChange={(event) =>
+                    change("sampleLines", event.target.value)
+                  }
+                />
+              </Field>
+            </div>
+            <details className="advanced-fields">
+              <summary>高级角色提示</summary>
+              <Field label="补充指令（选填）" htmlFor="character-advanced">
+                <textarea
+                  id="character-advanced"
+                  rows={5}
+                  maxLength={4000}
+                  value={form.advancedInstructions}
+                  onChange={(event) =>
+                    change("advancedInstructions", event.target.value)
+                  }
+                />
+              </Field>
+            </details>
+          </EditorSection>
+
+          <EditorSection
+            eyebrow="CONVERSATION"
+            title="开场与回复"
+            description="这些策略单独保存，不会藏在不可解释的提示词里。"
+          >
+            <Field label="自然开场白（选填）" htmlFor="character-opening">
+              <textarea
+                id="character-opening"
+                rows={3}
+                maxLength={500}
+                value={form.openingLine}
+                onChange={(event) => change("openingLine", event.target.value)}
+              />
+            </Field>
+            <div className="form-grid three-columns">
+              <Field label="接通后谁先说" htmlFor="character-first-speaker">
+                <select
+                  id="character-first-speaker"
+                  value={form.firstSpeaker}
+                  onChange={(event) =>
+                    change(
+                      "firstSpeaker",
+                      event.target.value as CharacterFormValue["firstSpeaker"],
+                    )
+                  }
+                >
+                  <option value="assistant">角色先打招呼</option>
+                  <option value="user">等待用户开口</option>
+                </select>
+              </Field>
+              <Field label="默认回复风格" htmlFor="character-response-style">
+                <select
+                  id="character-response-style"
+                  value={form.responseStyle}
+                  onChange={(event) =>
+                    change(
+                      "responseStyle",
+                      event.target.value as CharacterFormValue["responseStyle"],
+                    )
+                  }
+                >
+                  <option value="concise">简短自然</option>
+                  <option value="adaptive">根据语境调整</option>
+                  <option value="detailed">详细分步</option>
+                </select>
+              </Field>
+              <label className="checkbox-field">
+                <input
+                  type="checkbox"
+                  checked={form.silenceFollowUpEnabled}
+                  onChange={(event) =>
+                    change("silenceFollowUpEnabled", event.target.checked)
+                  }
+                />
+                <span>
+                  <strong>沉默时关心一次</strong>
+                  <small>约 12 秒后自然追问，之后安静等待</small>
+                </span>
+              </label>
+            </div>
+          </EditorSection>
+
+          <EditorSection
+            eyebrow="VOICE & LOOK"
+            title="声音与形象"
+            description="角色声音固定保存，共享角色在全家账号中保持一致。"
+          >
+            <div className="form-grid two-columns">
+              <Field label="实时能力" htmlFor="character-provider">
+                <select
+                  id="character-provider"
+                  value={form.providerProfileId}
+                  onChange={(event) => {
+                    const providerProfileId = event.target.value;
+                    const voice = voices.find(
+                      (candidate) =>
+                        candidate.providerProfileId === providerProfileId,
+                    );
+                    setForm((current) => ({
+                      ...current,
+                      providerProfileId,
+                      voiceProfileId: voice?.id ?? "",
+                    }));
+                  }}
+                >
+                  {providers.map((provider) => (
+                    <option key={provider.id} value={provider.id}>
+                      {provider.displayName}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="角色声音" htmlFor="character-voice">
+                <select
+                  id="character-voice"
+                  value={form.voiceProfileId}
+                  onChange={(event) =>
+                    change("voiceProfileId", event.target.value)
+                  }
+                >
+                  {matchingVoices.map((voice) => (
+                    <option key={voice.id} value={voice.id}>
+                      {voice.displayName}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+            <fieldset className="avatar-picker">
+              <legend>内置形象</legend>
+              <div className="avatar-choice-grid">
+                {builtInAvatarChoices.map((choice) => (
+                  <button
+                    key={choice.value}
+                    className={
+                      form.avatarUrl === choice.value ? "selected" : ""
+                    }
+                    type="button"
+                    aria-pressed={form.avatarUrl === choice.value}
+                    onClick={() => chooseAvatar(choice)}
+                  >
+                    <img src={choice.value} alt="" />
+                    <span>{choice.label}</span>
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+          </EditorSection>
+
+          <div className="editor-submit-row">
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={onCancel}
+            >
+              取消
+            </button>
+            <button
+              className="product-primary-button"
+              type="submit"
+              disabled={saving}
+            >
+              {saving ? "正在保存…" : character ? "保存角色" : "创建角色"}
+            </button>
+          </div>
+        </fieldset>
+      </form>
+    </div>
+  );
+}
+
+function EditorSection({
+  eyebrow,
+  title,
+  description,
+  children,
+}: {
+  eyebrow: string;
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="editor-section">
+      <header>
+        <p className="product-eyebrow">{eyebrow}</p>
+        <h2>{title}</h2>
+        <p>{description}</p>
+      </header>
+      <div className="editor-section-fields">{children}</div>
+    </section>
+  );
+}
+
+function Field({
+  label,
+  htmlFor,
+  children,
+}: {
+  label: string;
+  htmlFor: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className="character-field" htmlFor={htmlFor}>
+      <span>{label}</span>
+      {children}
+    </label>
+  );
+}

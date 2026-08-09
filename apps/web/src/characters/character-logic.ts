@@ -1,0 +1,284 @@
+import {
+  createCharacterRequestSchema,
+  qwenRealtimeModelSchema,
+  type Character,
+  type CharacterPermissions,
+  type CharacterRuntimeResponse,
+  type CreateCharacterRequest,
+  type ProviderProfile,
+  type QwenRealtimeModel,
+  type UserAccount,
+  type VisualProfile,
+  type VoiceProfile,
+} from "@meet/protocol";
+
+import { CharacterApiError } from "./character-api.js";
+
+export type CharacterActionVisibility = CharacterPermissions & {
+  canCreate: boolean;
+};
+
+export type CharacterFormValue = {
+  name: string;
+  description: string;
+  background: string;
+  personalityTraits: string;
+  relationship: string;
+  speakingStyle: string;
+  emotionalStyle: string;
+  conversationGoals: string;
+  sampleLines: string;
+  advancedInstructions: string;
+  openingLine: string;
+  firstSpeaker: "assistant" | "user";
+  responseStyle: "concise" | "adaptive" | "detailed";
+  silenceFollowUpEnabled: boolean;
+  providerProfileId: string;
+  voiceProfileId: string;
+  avatarUrl: string;
+  accentColor: string;
+  visualBackground: VisualProfile["background"];
+};
+
+export type RealtimeLaunchOptions = {
+  characterId: string;
+  voice: string;
+  instructions: string;
+  assistantStarts: boolean;
+};
+
+export type RuntimeLaunchMapping =
+  | {
+      ok: true;
+      value: RealtimeLaunchOptions;
+      model: QwenRealtimeModel;
+    }
+  | { ok: false; message: string };
+
+export const builtInAvatarChoices = [
+  {
+    value: "/avatars/star-shield-captain.svg",
+    label: "星盾蓝",
+    accentColor: "#2F6F78",
+    background: "aurora" as const,
+  },
+  {
+    value: "/avatars/teacher-lin.svg",
+    label: "书卷绿",
+    accentColor: "#657E71",
+    background: "classroom" as const,
+  },
+  {
+    value: "/avatars/zhixia.svg",
+    label: "暮色紫",
+    accentColor: "#936E83",
+    background: "sunset" as const,
+  },
+] as const;
+
+export function getCharacterActionVisibility(
+  user: UserAccount,
+  permissions: CharacterPermissions,
+): CharacterActionVisibility {
+  if (user.accountType === "child") {
+    return {
+      canCreate: false,
+      canEdit: false,
+      canDelete: false,
+      canCopy: false,
+      canShare: false,
+      canRestore: false,
+    };
+  }
+
+  return { canCreate: true, ...permissions };
+}
+
+export function canCreateCharacter(user: UserAccount): boolean {
+  return user.accountType !== "child";
+}
+
+export function createEmptyCharacterForm(
+  providers: ProviderProfile[],
+  voices: VoiceProfile[],
+): CharacterFormValue {
+  const provider = providers[0];
+  const voice = voices.find(
+    (candidate) => candidate.providerProfileId === provider?.id,
+  );
+  const avatar = builtInAvatarChoices[0];
+
+  return {
+    name: "",
+    description: "",
+    background: "",
+    personalityTraits: "",
+    relationship: "",
+    speakingStyle: "",
+    emotionalStyle: "",
+    conversationGoals: "",
+    sampleLines: "",
+    advancedInstructions: "",
+    openingLine: "",
+    firstSpeaker: "assistant",
+    responseStyle: "adaptive",
+    silenceFollowUpEnabled: true,
+    providerProfileId: provider?.id ?? "",
+    voiceProfileId: voice?.id ?? "",
+    avatarUrl: avatar.value,
+    accentColor: avatar.accentColor,
+    visualBackground: avatar.background,
+  };
+}
+
+export function characterToForm(character: Character): CharacterFormValue {
+  return {
+    name: character.name,
+    description: character.description,
+    background: character.persona.background,
+    personalityTraits: character.persona.personalityTraits.join("\n"),
+    relationship: character.persona.relationship,
+    speakingStyle: character.persona.speakingStyle,
+    emotionalStyle: character.persona.emotionalStyle,
+    conversationGoals: character.persona.conversationGoals.join("\n"),
+    sampleLines: character.persona.sampleLines.join("\n"),
+    advancedInstructions: character.persona.advancedInstructions ?? "",
+    openingLine: character.openingLine ?? "",
+    firstSpeaker: character.conversationPolicy.firstSpeaker,
+    responseStyle: character.conversationPolicy.responseStyle,
+    silenceFollowUpEnabled:
+      character.conversationPolicy.silenceFollowUp.enabled,
+    providerProfileId: character.providerProfile.id,
+    voiceProfileId: character.voiceProfile.id,
+    avatarUrl: character.visualProfile.avatarUrl,
+    accentColor: character.visualProfile.accentColor,
+    visualBackground: character.visualProfile.background,
+  };
+}
+
+export function buildCreateCharacterRequest(
+  form: CharacterFormValue,
+):
+  { ok: true; value: CreateCharacterRequest } | { ok: false; message: string } {
+  const advancedInstructions = form.advancedInstructions.trim();
+  const candidate = {
+    name: form.name,
+    description: form.description,
+    persona: {
+      background: form.background,
+      personalityTraits: splitLines(form.personalityTraits),
+      relationship: form.relationship,
+      speakingStyle: form.speakingStyle,
+      emotionalStyle: form.emotionalStyle,
+      conversationGoals: splitLines(form.conversationGoals),
+      sampleLines: splitLines(form.sampleLines),
+      ...(advancedInstructions ? { advancedInstructions } : {}),
+    },
+    openingLine: form.openingLine.trim() || null,
+    providerProfileId: form.providerProfileId,
+    voiceProfileId: form.voiceProfileId,
+    conversationPolicy: {
+      firstSpeaker: form.firstSpeaker,
+      responseStyle: form.responseStyle,
+      silenceFollowUp: {
+        enabled: form.silenceFollowUpEnabled,
+        delayMs: 12_000,
+        maxConsecutivePrompts: 1 as const,
+      },
+    },
+    visualProfile: {
+      avatarUrl: form.avatarUrl,
+      accentColor: form.accentColor,
+      background: form.visualBackground,
+      animationStyle: "subtle" as const,
+    },
+  };
+
+  const parsed = createCharacterRequestSchema.safeParse(candidate);
+  if (!parsed.success) {
+    return { ok: false, message: getCharacterFormError(form) };
+  }
+  return { ok: true, value: parsed.data };
+}
+
+export function mapRuntimeToLaunchOptions(
+  runtime: CharacterRuntimeResponse,
+): RuntimeLaunchMapping {
+  if (runtime.realtime.provider !== "qwen") {
+    return { ok: false, message: "当前浏览器暂不支持这个角色的实时模型。" };
+  }
+
+  const model = qwenRealtimeModelSchema.safeParse(runtime.realtime.model);
+  if (!model.success) {
+    return { ok: false, message: "这个角色的实时模型暂不可用。" };
+  }
+
+  return {
+    ok: true,
+    model: model.data,
+    value: {
+      characterId: runtime.character.id,
+      voice: runtime.realtime.voice,
+      instructions: runtime.realtime.instructions,
+      assistantStarts: runtime.realtime.firstSpeaker === "assistant",
+    },
+  };
+}
+
+export type CharacterOperation =
+  | "list"
+  | "detail"
+  | "save"
+  | "copy"
+  | "share"
+  | "restore"
+  | "delete"
+  | "runtime";
+
+export function presentCharacterError(
+  error: unknown,
+  operation: CharacterOperation,
+): string {
+  if (!(error instanceof CharacterApiError)) {
+    return "网络连接失败，请稍后重试。";
+  }
+
+  if (error.status === 403) return "你没有执行这个操作的权限。";
+  if (error.status === 404) return "这个角色不存在或你无法访问。";
+  if (error.status === 409) {
+    return operation === "save" || operation === "share"
+      ? "角色已在其他页面更新，请重新打开后再修改。"
+      : "角色状态已经变化，请刷新后重试。";
+  }
+  if (error.status === 503) return "角色服务暂时不可用，请稍后重试。";
+  if (error.code === "INVALID_CHARACTER_RESPONSE") {
+    return "角色服务返回的数据格式不正确。";
+  }
+  return operation === "list"
+    ? "暂时无法读取角色，请稍后重试。"
+    : "操作没有完成，请稍后重试。";
+}
+
+function splitLines(value: string): string[] {
+  return value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function getCharacterFormError(form: CharacterFormValue): string {
+  if (!form.name.trim()) return "请输入角色名称。";
+  if (!form.description.trim()) return "请输入角色简介。";
+  if (!form.background.trim()) return "请输入角色背景。";
+  if (!splitLines(form.personalityTraits).length)
+    return "请至少填写一个性格特点。";
+  if (!form.relationship.trim()) return "请描述角色与用户的关系。";
+  if (!form.speakingStyle.trim()) return "请描述角色的说话习惯。";
+  if (!form.emotionalStyle.trim()) return "请描述角色的情绪风格。";
+  if (!splitLines(form.conversationGoals).length)
+    return "请至少填写一个对话目标。";
+  if (!splitLines(form.sampleLines).length) return "请至少填写一句示例台词。";
+  if (!form.providerProfileId || !form.voiceProfileId)
+    return "请选择实时模型和角色声音。";
+  return "请检查角色卡中内容的长度和格式。";
+}

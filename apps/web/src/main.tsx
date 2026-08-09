@@ -12,8 +12,6 @@ if (!root) {
 
 createRoot(root).render(
   <StrictMode>
-    <AuthGate>
-      <App />
-    </AuthGate>
+    <AuthGate>{(session) => <App {...session} />}</AuthGate>
   </StrictMode>,
 );

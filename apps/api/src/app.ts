@@ -5,12 +5,16 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { PostgresAuthRepository } from "./auth/postgres-repository.js";
 import type { AuthRepository } from "./auth/repository.js";
 import { AuthService } from "./auth/service.js";
+import { PostgresCharacterRepository } from "./characters/postgres-repository.js";
+import type { CharacterRepository } from "./characters/repository.js";
+import { CharacterService } from "./characters/service.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import { PostgresMemberRepository } from "./members/postgres-repository.js";
 import type { AdminMemberRepository } from "./members/repository.js";
 import { MemberService } from "./members/service.js";
 import { registerAdminMemberRoutes } from "./routes/admin-members.js";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerCharacterRoutes } from "./routes/characters.js";
 import { registerRealtimeRoutes } from "./routes/realtime.js";
 
 type FetchFunction = typeof globalThis.fetch;
@@ -20,6 +24,7 @@ export type BuildAppOptions = {
   fetchFunction?: FetchFunction;
   authRepository?: AuthRepository | null;
   memberRepository?: AdminMemberRepository | null;
+  characterRepository?: CharacterRepository | null;
   databaseClient?: DatabaseClient | null;
   logger?: boolean;
 };
@@ -45,6 +50,12 @@ export async function buildApp(
         ? new PostgresMemberRepository(databaseClient.db)
         : null
       : options.memberRepository;
+  const characterRepository =
+    options.characterRepository === undefined
+      ? databaseClient
+        ? new PostgresCharacterRepository(databaseClient.db)
+        : null
+      : options.characterRepository;
   const app = Fastify({
     logger:
       options.logger === false
@@ -85,6 +96,7 @@ export async function buildApp(
   await app.register(fastifyCookie, { hook: "onRequest" });
   const auth = new AuthService(authRepository, config.auth.sessionTtlMs);
   const members = new MemberService(memberRepository);
+  const characters = new CharacterService(characterRepository);
 
   if (ownedDatabaseClient) {
     app.addHook("onClose", () => ownedDatabaseClient.close());
@@ -104,6 +116,13 @@ export async function buildApp(
 
   await registerAuthRoutes(app, config, auth);
   await registerAdminMemberRoutes(app, config, auth, members);
-  await registerRealtimeRoutes(app, config, auth, options.fetchFunction);
+  await registerCharacterRoutes(
+    app,
+    config,
+    auth,
+    characters,
+    options.fetchFunction,
+  );
+  await registerRealtimeRoutes(app, config, auth);
   return app;
 }

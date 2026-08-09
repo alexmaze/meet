@@ -20,6 +20,7 @@
     "db:migrate": "drizzle-kit migrate --config drizzle.config.ts"
   },
   "dependencies": {
+    "@meet/protocol": "workspace:*",
     "drizzle-orm": "0.45.1",
     "pg": "8.23.0"
   },

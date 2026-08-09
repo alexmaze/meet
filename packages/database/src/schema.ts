@@ -1,7 +1,15 @@
 import { sql } from "drizzle-orm";
+import type {
+  ConversationPolicy,
+  PersonaDefinition,
+  ProviderCapabilities,
+  VisualProfile,
+  VoiceStyle,
+} from "@meet/protocol";
 import {
   check,
   index,
+  integer,
   jsonb,
   pgEnum,
   pgTable,
@@ -51,6 +59,30 @@ export const accountSecurityEventTypeEnum = pgEnum(
     "password_reset",
     "sessions_revoked",
   ],
+);
+
+export const realtimeProviderEnum = pgEnum("realtime_provider", [
+  "qwen",
+  "doubao",
+  "openai",
+  "gemini",
+  "elevenlabs",
+]);
+
+export const voiceProfileTypeEnum = pgEnum("voice_profile_type", [
+  "preset",
+  "cloned",
+]);
+
+export const characterVisibilityEnum = pgEnum("character_visibility", [
+  "builtin",
+  "family",
+  "private",
+]);
+
+export const characterAuditEventTypeEnum = pgEnum(
+  "character_audit_event_type",
+  ["created", "updated", "visibility_changed", "copied", "deleted", "restored"],
 );
 
 export const userAccounts = pgTable(
@@ -217,6 +249,169 @@ export const accountSecurityAuditEvents = pgTable(
   ],
 );
 
+export const providerProfiles = pgTable(
+  "provider_profiles",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    systemKey: varchar("system_key", { length: 120 }).notNull(),
+    provider: realtimeProviderEnum("provider").notNull(),
+    model: varchar("model", { length: 120 }).notNull(),
+    displayName: varchar("display_name", { length: 120 }).notNull(),
+    capabilities: jsonb("capabilities").$type<ProviderCapabilities>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("provider_profiles_system_key_unique").on(table.systemKey),
+    uniqueIndex("provider_profiles_provider_model_unique").on(
+      table.provider,
+      table.model,
+    ),
+    check(
+      "provider_profiles_system_key_not_blank",
+      sql`length(btrim(${table.systemKey})) > 0`,
+    ),
+    check(
+      "provider_profiles_model_not_blank",
+      sql`length(btrim(${table.model})) > 0`,
+    ),
+  ],
+);
+
+export const voiceProfiles = pgTable(
+  "voice_profiles",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    systemKey: varchar("system_key", { length: 120 }).notNull(),
+    providerProfileId: uuid("provider_profile_id")
+      .notNull()
+      .references(() => providerProfiles.id, { onDelete: "restrict" }),
+    type: voiceProfileTypeEnum("type").notNull(),
+    providerVoiceId: varchar("provider_voice_id", { length: 120 }).notNull(),
+    displayName: varchar("display_name", { length: 120 }).notNull(),
+    style: jsonb("style").$type<VoiceStyle>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("voice_profiles_system_key_unique").on(table.systemKey),
+    uniqueIndex("voice_profiles_provider_voice_unique").on(
+      table.providerProfileId,
+      table.providerVoiceId,
+    ),
+    check(
+      "voice_profiles_system_key_not_blank",
+      sql`length(btrim(${table.systemKey})) > 0`,
+    ),
+    check(
+      "voice_profiles_provider_voice_not_blank",
+      sql`length(btrim(${table.providerVoiceId})) > 0`,
+    ),
+  ],
+);
+
+export const characters = pgTable(
+  "characters",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    systemKey: varchar("system_key", { length: 120 }),
+    systemVersion: integer("system_version"),
+    ownerUserId: uuid("owner_user_id").references(() => userAccounts.id, {
+      onDelete: "restrict",
+    }),
+    visibility: characterVisibilityEnum("visibility").notNull(),
+    name: varchar("name", { length: 80 }).notNull(),
+    description: varchar("description", { length: 600 }).notNull(),
+    persona: jsonb("persona").$type<PersonaDefinition>().notNull(),
+    openingLine: varchar("opening_line", { length: 500 }),
+    providerProfileId: uuid("provider_profile_id")
+      .notNull()
+      .references(() => providerProfiles.id, { onDelete: "restrict" }),
+    voiceProfileId: uuid("voice_profile_id")
+      .notNull()
+      .references(() => voiceProfiles.id, { onDelete: "restrict" }),
+    conversationPolicy: jsonb("conversation_policy")
+      .$type<ConversationPolicy>()
+      .notNull(),
+    visualProfile: jsonb("visual_profile").$type<VisualProfile>().notNull(),
+    revision: integer("revision").notNull().default(1),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("characters_system_key_unique").on(table.systemKey),
+    index("characters_owner_visibility_idx").on(
+      table.ownerUserId,
+      table.visibility,
+    ),
+    index("characters_visibility_active_idx")
+      .on(table.visibility, table.updatedAt)
+      .where(sql`${table.deletedAt} IS NULL`),
+    check("characters_revision_positive", sql`${table.revision} > 0`),
+    check("characters_name_not_blank", sql`length(btrim(${table.name})) > 0`),
+    check(
+      "characters_description_not_blank",
+      sql`length(btrim(${table.description})) > 0`,
+    ),
+    check(
+      "characters_system_fields_match",
+      sql`(
+        (${table.visibility} = 'builtin' AND ${table.systemKey} IS NOT NULL AND ${table.systemVersion} IS NOT NULL AND ${table.systemVersion} > 0 AND ${table.ownerUserId} IS NULL)
+        OR
+        (${table.visibility} <> 'builtin' AND ${table.systemKey} IS NULL AND ${table.systemVersion} IS NULL AND ${table.ownerUserId} IS NOT NULL)
+      )`,
+    ),
+    check(
+      "characters_builtin_not_deleted",
+      sql`${table.visibility} <> 'builtin' OR ${table.deletedAt} IS NULL`,
+    ),
+  ],
+);
+
+export const characterAuditEvents = pgTable(
+  "character_audit_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    eventType: characterAuditEventTypeEnum("event_type").notNull(),
+    actorUserId: uuid("actor_user_id").references(() => userAccounts.id, {
+      onDelete: "set null",
+    }),
+    characterId: uuid("character_id").references(() => characters.id, {
+      onDelete: "set null",
+    }),
+    details: jsonb("details")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("character_audit_character_created_idx").on(
+      table.characterId,
+      table.createdAt,
+    ),
+    index("character_audit_actor_created_idx").on(
+      table.actorUserId,
+      table.createdAt,
+    ),
+  ],
+);
+
 export type UserAccount = typeof userAccounts.$inferSelect;
 export type NewUserAccount = typeof userAccounts.$inferInsert;
 export type PasswordCredential = typeof passwordCredentials.$inferSelect;
@@ -227,3 +422,11 @@ export type AccountSecurityAuditEvent =
   typeof accountSecurityAuditEvents.$inferSelect;
 export type NewAccountSecurityAuditEvent =
   typeof accountSecurityAuditEvents.$inferInsert;
+export type ProviderProfileRecord = typeof providerProfiles.$inferSelect;
+export type NewProviderProfileRecord = typeof providerProfiles.$inferInsert;
+export type VoiceProfileRecord = typeof voiceProfiles.$inferSelect;
+export type NewVoiceProfileRecord = typeof voiceProfiles.$inferInsert;
+export type CharacterRecord = typeof characters.$inferSelect;
+export type NewCharacterRecord = typeof characters.$inferInsert;
+export type CharacterAuditEvent = typeof characterAuditEvents.$inferSelect;
+export type NewCharacterAuditEvent = typeof characterAuditEvents.$inferInsert;

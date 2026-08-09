@@ -15,6 +15,13 @@
       "when": 1786252961197,
       "tag": "0001_vengeful_newton_destine",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786255226378,
+      "tag": "0002_awesome_red_hulk",
+      "breakpoints": true
     }
   ]
 }
