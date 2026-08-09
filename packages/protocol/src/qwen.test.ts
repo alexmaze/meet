@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { parseQwenServerEvent, qwenSessionUpdateEventSchema } from "./qwen.js";
+import {
+  parseQwenServerEvent,
+  qwenResponseCreateEventSchema,
+  qwenSessionUpdateEventSchema,
+  qwenUserTextItemCreateEventSchema,
+} from "./qwen.js";
 
 describe("Qwen realtime protocol", () => {
   it("preserves provider-specific fields on server events", () => {
@@ -96,5 +101,31 @@ describe("Qwen realtime protocol", () => {
     });
 
     expect(result.success).toBe(false);
+  });
+
+  it("validates the synthetic user message used to trigger an opening", () => {
+    expect(
+      qwenUserTextItemCreateEventSchema.safeParse({
+        event_id: "event_opening_item",
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "请自然地向用户打招呼。",
+            },
+          ],
+        },
+      }).success,
+    ).toBe(true);
+
+    expect(
+      qwenResponseCreateEventSchema.safeParse({
+        event_id: "event_opening_response",
+        type: "response.create",
+      }).success,
+    ).toBe(true);
   });
 });

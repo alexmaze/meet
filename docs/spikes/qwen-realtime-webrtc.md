@@ -40,21 +40,23 @@ curl http://127.0.0.1:8787/api/health
 ## 已实现链路
 
 ```text
-浏览器获取麦克风
-  → 创建 RTCPeerConnection 和本地 audio track
-  → 暂时从 sender 移除 track
+浏览器获取麦克风，并立即将 audio track 设为 disabled
+  → 创建 RTCPeerConnection 和 audio sender
+  → 生成 offer 前通过 sender.replaceTrack(null) 暂时移除 track
   → 创建 bootstrap DataChannel 以触发 SDP 数据通道协商
   → 收集完整 ICE SDP offer
   → POST /api/realtime/qwen/sessions
   → Fastify 添加服务端 Authorization 并代理原始 SDP
   → 浏览器设置千问 SDP answer
   → 服务端创建名为 txt 的 DataChannel
-  → 从 txt 收到 session.created，并通过同一通道发送 session.update
-  → 收到 session.updated，恢复麦克风 track、应用本地 gate 并进入 active
+  → 从 txt 收到 session.created，先发送 session.update，随即重新挂载仍为 disabled 的 track
+  → 收到 session.updated，按免提或 PTT 本地 gate 启用发送并进入 active
   → 音频走 WebRTC，控制事件和字幕走 txt DataChannel
 ```
 
 浏览器永远拿不到 DashScope API Key。Fastify 只代理建立 WebRTC 所需的 SDP，不中继持续音频。
+
+重新挂载音轨与允许发送是两个独立阶段：`session.created` 时先发送 `session.update`，随后立即恢复 disabled track；`session.updated` 后才由本地 gate 决定是否启用。真实链路排障中，等到 `session.updated` 后才执行 `replaceTrack` 会出现上行 RTP 不可靠，因此不能把两个阶段合并。
 
 ## 会话配置
 
@@ -64,7 +66,7 @@ curl http://127.0.0.1:8787/api/health
 - 默认模型 `qwen-audio-3.0-realtime-plus`；
 - 云端系统音色，默认 `longanqian`；
 - `turn_detection.type: "smart_turn"`，由声学感知与语义理解共同判断轮次；
-- 可选在 `session.updated` 后发送一次 `response.create`，让角色先打招呼。
+- 可选在 `session.updated` 后先用 `conversation.item.create` 注入一条不展示的开场用户指令，再发送 `response.create` 让角色先打招呼；Qwen-Audio 在没有用户消息时会拒绝直接生成响应。
 
 可在页面中切换：
 
@@ -136,7 +138,7 @@ idle → requesting_microphone → connecting → configuring → active
 - 尚未在 iOS Safari、Android Chrome 和实际国内网络上完成矩阵测试；
 - 尚未接入豆包对照组；
 - 尚未接入 Omni 或独立视觉分析的图片回退路径；
-- 角色开场使用 `response.create`，仍需真实调用确认不同模型上的表达稳定性。
+- 角色开场使用隐藏的 `conversation.item.create` 用户指令配合 `response.create`，仍需真实调用确认不同模型上的表达稳定性。
 
 ## 官方资料
 

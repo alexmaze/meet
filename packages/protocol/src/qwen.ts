@@ -96,6 +96,32 @@ export type QwenSessionUpdateEvent = z.infer<
   typeof qwenSessionUpdateEventSchema
 >;
 
+export const qwenUserTextItemCreateEventSchema = z.object({
+  event_id: z.string().min(1),
+  type: z.literal("conversation.item.create"),
+  item: z
+    .object({
+      type: z.literal("message"),
+      role: z.literal("user"),
+      content: z.tuple([
+        z
+          .object({
+            type: z.literal("input_text"),
+            text: z.string().min(1),
+          })
+          .strict(),
+      ]),
+    })
+    .strict(),
+});
+
+export const qwenResponseCreateEventSchema = z
+  .object({
+    event_id: z.string().min(1),
+    type: z.literal("response.create"),
+  })
+  .strict();
+
 export function parseQwenServerEvent(input: string): QwenServerEvent {
   return qwenServerEventSchema.parse(JSON.parse(input) as unknown);
 }

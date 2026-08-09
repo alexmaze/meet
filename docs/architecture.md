@@ -109,7 +109,7 @@ interface MediaStore {
 
 千问 WebRTC 当前是白名单能力。部署者需要从阿里云商务获得专用 Endpoint，并以 `QWEN_REALTIME_ENDPOINT` 配置到服务端；不能从 Workspace ID 拼接或推导信令域名。服务端只接受商务提供的 hostname 或不带额外 path、query、hash、用户信息和非默认端口的 HTTPS origin，再自行追加 `/api/v1/webrtc/realtime?model=...`。API Key、Endpoint 和 SDP 鉴权请求均不下发浏览器。
 
-WebRTC 建连时，客户端先创建一个仅用于触发 SDP 数据通道协商的 bootstrap DataChannel；供应商服务端随后创建名为 `txt` 的 DataChannel。客户端在 `txt` 收到 `session.created` 后，必须通过同一通道发送 `session.update`；收到 `session.updated` 后才恢复麦克风音轨、应用本地 gate 并进入活动状态，确保首个音频包发送前已经配置 `smart_turn`。控制事件和供应商事件此后也都走 `txt` 通道。
+WebRTC 建连时，浏览器在 `getUserMedia` 后立即令 `microphoneTrack.enabled = false`，并在生成 offer 前通过 `sender.replaceTrack(null)` 暂时移除音轨；客户端同时创建一个仅用于触发 SDP 数据通道协商的 bootstrap DataChannel，供应商服务端随后创建名为 `txt` 的 DataChannel。客户端从 `txt` 收到 `session.created` 后，先通过同一通道发送 `session.update`，随后立即重新挂载仍为 disabled 的麦克风音轨；收到 `session.updated` 后才按免提或按住说话的本地 gate 启用发送并进入活动状态，确保首个音频包发送前已经配置 `smart_turn`。真实链路排障表明，延迟到 `session.updated` 后才挂载音轨会导致上行 RTP 不可靠，因此挂载与允许发送必须保持为两个阶段。控制事件和供应商事件此后也都走 `txt` 通道。
 
 这条 WebRTC 链路不支持 `turn_detection: null` 或 `input_audio_buffer.commit` 手动模式。界面的“按住说话”只启用或禁用本地 RTP 音轨，松开后仍由 `smart_turn` 收尾。有效插话由服务端自动取消当前响应，客户端收到 `input_audio_buffer.speech_started` 时不发送 `response.cancel`；只有用户点击手动停止时才显式发送取消事件。若 `speech_stopped.reason` 为 `turn_invalid`，前端在没有活动回复时回到聆听，有活动回复时恢复为角色说话状态。
 

@@ -1,7 +1,9 @@
 import {
   parseQwenServerEvent,
   qwenErrorEventSchema,
+  qwenResponseCreateEventSchema,
   qwenSessionUpdateEventSchema,
+  qwenUserTextItemCreateEventSchema,
   type QwenRealtimeModel,
   type QwenServerEvent,
   type RealtimeActivity,
@@ -24,6 +26,7 @@ export type QwenRealtimeOptions = {
   instructions: string;
   inputMode: InputMode;
   assistantStarts: boolean;
+  audioInputDeviceId?: string;
 };
 
 export type RealtimeClientSnapshot = {
@@ -33,6 +36,7 @@ export type RealtimeClientSnapshot = {
   userCaption: string;
   assistantCaption: string;
   microphoneMuted: boolean;
+  microphoneLabel: string;
   inputMode: InputMode;
 };
 
@@ -43,6 +47,7 @@ export const initialClientSnapshot: RealtimeClientSnapshot = {
   userCaption: "",
   assistantCaption: "",
   microphoneMuted: false,
+  microphoneLabel: "",
   inputMode: "hands_free",
 };
 
@@ -75,6 +80,7 @@ export class QwenRealtimeClient {
   private pushToTalkActive = false;
   private manuallyClosing = false;
   private seenEventIds = new Set<string>();
+  private mediaAttachPromise: Promise<void> | null = null;
 
   constructor(
     private readonly remoteAudio: HTMLAudioElement,
@@ -103,19 +109,29 @@ export class QwenRealtimeClient {
       }
 
       this.abortController = new AbortController();
+      const audioConstraints: MediaTrackConstraints = {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      };
+      if (options.audioInputDeviceId) {
+        audioConstraints.deviceId = { exact: options.audioInputDeviceId };
+      }
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
+        audio: audioConstraints,
         video: false,
       });
       this.microphoneTrack = this.mediaStream.getAudioTracks()[0] ?? null;
       if (!this.microphoneTrack) {
         throw new ClientError("NO_AUDIO_TRACK", "没有获得可用的麦克风音轨。");
       }
+      this.microphoneTrack.enabled = false;
+      this.snapshot = {
+        ...this.snapshot,
+        microphoneLabel: this.microphoneTrack.label || "已授权的麦克风",
+      };
+      this.emitSnapshot();
 
       this.updateConnection("connecting", "正在建立 WebRTC 连接");
       const peerConnection = new RTCPeerConnection({ iceServers: [] });
@@ -401,6 +417,13 @@ export class QwenRealtimeClient {
         },
       });
       this.sendClientEvent(event);
+
+      // 官方 WebRTC 时序要求先发送 session.update，再立即恢复 RTP sender。
+      // 音轨保持 disabled，直到 session.updated 确认配置后才真正发送语音。
+      this.mediaAttachPromise = this.microphoneSender.replaceTrack(
+        this.microphoneTrack,
+      );
+      await this.mediaAttachPromise;
     } catch (error) {
       const clientError = normalizeError(error);
       this.updateConnection("error", clientError.message);
@@ -423,22 +446,44 @@ export class QwenRealtimeClient {
         throw new ClientError("NO_AUDIO_TRACK", "麦克风音轨已经失效。");
       }
 
-      // turn_detection 只能在首个音频包前设置；等服务端确认配置后再恢复 RTP。
-      await this.microphoneSender.replaceTrack(this.microphoneTrack);
       if (this.manuallyClosing) {
         return;
       }
+      await this.mediaAttachPromise;
       this.mediaAttached = true;
       this.applyMicrophoneGate();
       this.sessionConfigured = true;
-      this.updateConnection("active", "已连接，可以开始说话");
+      this.updateConnection(
+        "active",
+        this.microphoneTrack.label
+          ? `已连接，麦克风：${this.microphoneTrack.label}`
+          : "已连接，可以开始说话",
+      );
 
       if (this.options?.assistantStarts && !this.initialResponseRequested) {
         this.initialResponseRequested = true;
-        this.sendClientEvent({
-          event_id: createEventId(),
-          type: "response.create",
-        });
+        this.sendClientEvent(
+          qwenUserTextItemCreateEventSchema.parse({
+            event_id: createEventId(),
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: "请根据角色设定主动、自然地向我打招呼并开始本次对话，不要提及这条指令。",
+                },
+              ],
+            },
+          }),
+        );
+        this.sendClientEvent(
+          qwenResponseCreateEventSchema.parse({
+            event_id: createEventId(),
+            type: "response.create",
+          }),
+        );
       }
     } catch (error) {
       const clientError = normalizeError(error);
@@ -553,6 +598,7 @@ export class QwenRealtimeClient {
     this.mediaStream = null;
     this.microphoneTrack = null;
     this.microphoneSender = null;
+    this.mediaAttachPromise = null;
     this.mediaAttached = false;
 
     this.remoteAudio.pause();
@@ -587,6 +633,15 @@ function normalizeError(error: unknown): ClientError {
     return new ClientError(
       "MICROPHONE_PERMISSION_DENIED",
       "麦克风权限被拒绝，请在浏览器设置中允许后重试。",
+    );
+  }
+  if (
+    error instanceof DOMException &&
+    (error.name === "NotFoundError" || error.name === "OverconstrainedError")
+  ) {
+    return new ClientError(
+      "MICROPHONE_UNAVAILABLE",
+      "选择的麦克风不可用，请刷新设备后重新选择。",
     );
   }
   if (error instanceof Error) {

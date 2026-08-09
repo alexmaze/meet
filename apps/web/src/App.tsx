@@ -6,6 +6,7 @@ import {
   type TranscriptSegment,
 } from "@meet/protocol";
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -26,6 +27,11 @@ type EventLogEntry = {
   at: string;
   direction: "client" | "server";
   payload: string;
+};
+
+type MicrophoneOption = {
+  deviceId: string;
+  label: string;
 };
 
 const connectionLabels: Record<RealtimeConnectionState, string> = {
@@ -74,11 +80,73 @@ export default function App() {
     const saved = window.localStorage.getItem("meet.inputMode");
     return saved === "push_to_talk" ? "push_to_talk" : "hands_free";
   });
+  const [microphones, setMicrophones] = useState<MicrophoneOption[]>([]);
+  const [selectedMicrophoneId, setSelectedMicrophoneId] = useState(
+    () => window.localStorage.getItem("meet.microphoneDeviceId") ?? "",
+  );
+  const [microphoneListError, setMicrophoneListError] = useState("");
   const [history, setHistory] = useState<TranscriptSegment[]>([]);
   const [eventLog, setEventLog] = useState<EventLogEntry[]>([]);
   const [errorMessage, setErrorMessage] = useState("");
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [offlineReady, setOfflineReady] = useState(false);
+
+  const refreshMicrophones = useCallback(async (): Promise<void> => {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      setMicrophoneListError("当前浏览器不支持列出麦克风设备。");
+      return;
+    }
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices
+        .filter(
+          (device) =>
+            device.kind === "audioinput" && device.deviceId !== "default",
+        )
+        .map((device, index) => ({
+          deviceId: device.deviceId,
+          label: device.label.trim() || `麦克风 ${index + 1}`,
+        }));
+
+      setMicrophones(audioInputs);
+      setSelectedMicrophoneId((current) => {
+        if (
+          !current ||
+          audioInputs.some(({ deviceId }) => deviceId === current)
+        ) {
+          return current;
+        }
+        window.localStorage.removeItem("meet.microphoneDeviceId");
+        return "";
+      });
+      setMicrophoneListError("");
+    } catch (error) {
+      setMicrophoneListError(
+        error instanceof Error ? error.message : "无法读取麦克风设备。",
+      );
+    }
+  }, []);
+
+  const authorizeAndRefreshMicrophones = async (): Promise<void> => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMicrophoneListError("当前浏览器不支持麦克风采集。");
+      return;
+    }
+
+    try {
+      const probeStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: false,
+      });
+      probeStream.getTracks().forEach((track) => track.stop());
+      await refreshMicrophones();
+    } catch (error) {
+      setMicrophoneListError(
+        error instanceof Error ? error.message : "麦克风授权失败。",
+      );
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -109,6 +177,19 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    const mediaDevices = navigator.mediaDevices;
+    const handleDeviceChange = (): void => {
+      void refreshMicrophones();
+    };
+
+    void refreshMicrophones();
+    mediaDevices?.addEventListener("devicechange", handleDeviceChange);
+    return () => {
+      mediaDevices?.removeEventListener("devicechange", handleDeviceChange);
+    };
+  }, [refreshMicrophones]);
 
   useEffect(() => {
     updateServiceWorkerRef.current = registerSW({
@@ -183,7 +264,9 @@ export default function App() {
         instructions: instructions.trim(),
         inputMode,
         assistantStarts,
+        audioInputDeviceId: selectedMicrophoneId || undefined,
       });
+      void refreshMicrophones();
     } catch {
       clientRef.current = null;
       setHasClient(false);
@@ -203,6 +286,15 @@ export default function App() {
     }
     setInputModeState(nextMode);
     window.localStorage.setItem("meet.inputMode", nextMode);
+  };
+
+  const selectMicrophone = (deviceId: string): void => {
+    setSelectedMicrophoneId(deviceId);
+    if (deviceId) {
+      window.localStorage.setItem("meet.microphoneDeviceId", deviceId);
+    } else {
+      window.localStorage.removeItem("meet.microphoneDeviceId");
+    }
   };
 
   const toggleMute = (): void => {
@@ -424,6 +516,38 @@ export default function App() {
               autoComplete="off"
             />
 
+            <label className="field-label" htmlFor="microphone">
+              麦克风
+            </label>
+            <div className="field-with-action">
+              <select
+                id="microphone"
+                value={selectedMicrophoneId}
+                onChange={(event) => selectMicrophone(event.target.value)}
+              >
+                <option value="">浏览器默认</option>
+                {microphones.map((microphone) => (
+                  <option key={microphone.deviceId} value={microphone.deviceId}>
+                    {microphone.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => void authorizeAndRefreshMicrophones()}
+              >
+                刷新设备
+              </button>
+            </div>
+            <small className="field-hint">
+              {snapshot.microphoneLabel
+                ? `当前使用：${snapshot.microphoneLabel}`
+                : "若设备名称未显示，请刷新设备并允许麦克风权限。"}
+            </small>
+            {microphoneListError && (
+              <small className="field-error">{microphoneListError}</small>
+            )}
+
             <label className="field-label" htmlFor="instructions">
               角色设定
             </label>
@@ -442,7 +566,7 @@ export default function App() {
               />
               <span>
                 <strong>由角色先打招呼</strong>
-                <small>会话配置成功后发送一次 response.create</small>
+                <small>会话配置成功后注入开场请求并生成自然问候</small>
               </span>
             </label>
           </fieldset>

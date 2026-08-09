@@ -71,6 +71,7 @@
 - 第一版只实现计算器工具，工具调用层应可扩展，但不要提前加入联网搜索、天气等工具。
 - 默认技术验证对象是 `qwen-audio-3.0-realtime-plus`：浏览器使用 WebRTC，免提默认使用 `smart_turn`，默认音色为 `longanqian`；其供应商上下文最多保留 50 轮、累计 300 秒音频。
 - 千问 WebRTC 是白名单能力，必须把商务提供的 Endpoint 配置为 `QWEN_REALTIME_ENDPOINT`，不能通过 Workspace ID 推导；服务端代理 SDP 时自行追加固定路径和模型参数。
+- 千问 WebRTC 音轨时序固定为：`getUserMedia` 后先令 `microphoneTrack.enabled = false`，生成 offer 前执行 `sender.replaceTrack(null)`；从 `txt` 收到 `session.created` 时先发送 `session.update`，随后立即重新挂载仍为 disabled 的音轨，收到 `session.updated` 后才按免提或 PTT gate 启用发送并进入活动状态。不得延迟到 `session.updated` 才挂载，否则上行 RTP 可能不可靠。
 - 千问 WebRTC 不支持 `turn_detection: null` 或 `input_audio_buffer.commit` 手动模式；界面“按住说话”只控制本地 RTP 音轨，松开后仍由 `smart_turn` 判断轮次。
 - Qwen-Audio 只支持文本和音频输入，不支持图片；图片与教学多模态流程保留 `qwen3.5-omni-plus-realtime` 或独立视觉分析回退，豆包 S2S-SC 仍是重点语音对照组。
 - 供应商 API 密钥不得进入浏览器代码、日志或版本库。
