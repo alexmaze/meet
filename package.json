@@ -1,0 +1,34 @@
+{
+  "name": "meet",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build:packages": "pnpm --filter @meet/protocol build",
+    "dev": "pnpm run build:packages && pnpm --parallel --filter @meet/api --filter @meet/web dev",
+    "dev:api": "pnpm run build:packages && pnpm --filter @meet/api dev",
+    "dev:web": "pnpm run build:packages && pnpm --filter @meet/web dev",
+    "build": "pnpm run build:packages && pnpm --filter @meet/api build && pnpm --filter @meet/web build",
+    "typecheck": "pnpm run build:packages && pnpm --filter @meet/api typecheck && pnpm --filter @meet/web typecheck",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "26.2.0",
+    "eslint": "10.8.1",
+    "globals": "17.9.0",
+    "prettier": "3.9.6",
+    "tsx": "4.23.11",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.66.0",
+    "vitest": "4.1.10"
+  }
+}

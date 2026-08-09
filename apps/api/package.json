@@ -1,0 +1,17 @@
+{
+  "name": "@meet/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@meet/protocol": "workspace:*",
+    "fastify": "5.11.3",
+    "zod": "4.4.3"
+  }
+}
