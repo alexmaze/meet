@@ -458,7 +458,6 @@ export default function FamilyMembersPanel({
                   id="member-create-password"
                   name="new-password"
                   type="password"
-                  minLength={15}
                   maxLength={256}
                   autoComplete="new-password"
                   value={createForm.password}
@@ -471,7 +470,7 @@ export default function FamilyMembersPanel({
                   }}
                 />
                 <small className="member-field-hint">
-                  至少 15 个字符，不会自动移除首尾空格。
+                  不限制密码强度，也不会自动移除首尾空格。
                 </small>
 
                 <label htmlFor="member-create-password-confirmation">
@@ -481,7 +480,6 @@ export default function FamilyMembersPanel({
                   id="member-create-password-confirmation"
                   name="new-password-confirmation"
                   type="password"
-                  minLength={15}
                   maxLength={256}
                   autoComplete="new-password"
                   value={createForm.passwordConfirmation}
@@ -595,7 +593,7 @@ function MemberCard({
 
       {isAdmin ? (
         <p className="member-readonly-note">
-          管理员账号只读；密码请使用服务器命令重置。
+          成员管理中不能重置管理员密码；忘记密码时请使用服务器命令。
         </p>
       ) : (
         <div className="member-card-actions">
@@ -649,7 +647,6 @@ function MemberCard({
             <input
               id={`member-reset-password-${member.id}`}
               type="password"
-              minLength={15}
               maxLength={256}
               autoComplete="new-password"
               value={resetPassword}
@@ -661,7 +658,6 @@ function MemberCard({
             <input
               id={`member-reset-confirmation-${member.id}`}
               type="password"
-              minLength={15}
               maxLength={256}
               autoComplete="new-password"
               value={resetConfirmation}

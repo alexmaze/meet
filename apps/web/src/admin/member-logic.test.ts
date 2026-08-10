@@ -42,17 +42,18 @@ describe("validateCreateMember", () => {
     expect(result.ok && result.value.guardianHistoryAccess).toBe("denied");
   });
 
-  it("拒绝过短或两次不一致的密码", () => {
+  it("接受任意非空密码，但拒绝空密码或两次输入不一致", () => {
     expect(
       validateCreateMember({
         username: "child",
         displayName: "小朋友",
-        password: "too-short",
-        passwordConfirmation: "too-short",
+        password: "1",
+        passwordConfirmation: "1",
         accountType: "child",
         guardianHistoryAccess: "allowed",
       }),
-    ).toMatchObject({ ok: false });
+    ).toMatchObject({ ok: true });
+    expect(validatePasswordReset("", "")).toMatchObject({ ok: false });
 
     expect(validatePasswordReset("123456789012345", "123456789012346")).toEqual(
       { ok: false, message: "两次输入的新密码不一致。" },

@@ -13,6 +13,7 @@ import {
 } from "react";
 
 import FamilyMembersPanel from "../admin/FamilyMembersPanel.js";
+import PasswordChangePanel from "./PasswordChangePanel.js";
 import {
   getAuthErrorPresentation,
   type AuthErrorPresentation,
@@ -24,6 +25,7 @@ export type AuthenticatedAppSession = {
   logoutPending: boolean;
   logoutError: string;
   openFamilyMembers: () => void;
+  openPasswordChange: () => void;
   logout: () => void;
   invalidateSession: () => void;
 };
@@ -57,9 +59,11 @@ export default function AuthGate({ children }: AuthGateProps) {
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState("");
   const [membersOpen, setMembersOpen] = useState(false);
+  const [passwordChangeOpen, setPasswordChangeOpen] = useState(false);
 
   const invalidateSession = useCallback(() => {
     setMembersOpen(false);
+    setPasswordChangeOpen(false);
     setLogoutError("");
     setSession({
       status: "signed_out",
@@ -114,6 +118,7 @@ export default function AuthGate({ children }: AuthGateProps) {
 
   const handleLogout = async (): Promise<void> => {
     setMembersOpen(false);
+    setPasswordChangeOpen(false);
     setLogoutPending(true);
     setLogoutError("");
 
@@ -165,7 +170,14 @@ export default function AuthGate({ children }: AuthGateProps) {
         user: session.user,
         logoutPending,
         logoutError,
-        openFamilyMembers: () => setMembersOpen(true),
+        openFamilyMembers: () => {
+          setPasswordChangeOpen(false);
+          setMembersOpen(true);
+        },
+        openPasswordChange: () => {
+          setMembersOpen(false);
+          setPasswordChangeOpen(true);
+        },
         logout: () => void handleLogout(),
         invalidateSession,
       })}
@@ -176,6 +188,11 @@ export default function AuthGate({ children }: AuthGateProps) {
           onClose={() => setMembersOpen(false)}
         />
       )}
+      <PasswordChangePanel
+        open={passwordChangeOpen}
+        onClose={() => setPasswordChangeOpen(false)}
+        onSessionInvalid={invalidateSession}
+      />
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  changePasswordRequestSchema,
   createMemberRequestSchema,
   loginRequestSchema,
   passwordSchema,
@@ -16,11 +17,25 @@ describe("auth protocol", () => {
     ).toEqual({ username: "alex", password: "secret" });
   });
 
-  it("enforces the password policy only when setting a password", () => {
-    expect(passwordSchema.safeParse("short").success).toBe(false);
-    expect(passwordSchema.parse("long-enough-password")).toBe(
-      "long-enough-password",
-    );
+  it("设置密码时不施加强度约束，但拒绝空密码", () => {
+    expect(passwordSchema.parse("1")).toBe("1");
+    expect(passwordSchema.safeParse("").success).toBe(false);
+    expect(passwordSchema.safeParse("a".repeat(257)).success).toBe(false);
+  });
+
+  it("修改密码需要当前密码和新密码", () => {
+    expect(
+      changePasswordRequestSchema.parse({
+        currentPassword: "old",
+        newPassword: "1",
+      }),
+    ).toEqual({ currentPassword: "old", newPassword: "1" });
+    expect(
+      changePasswordRequestSchema.safeParse({
+        currentPassword: "",
+        newPassword: "1",
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects private credential fields from the public account shape", () => {

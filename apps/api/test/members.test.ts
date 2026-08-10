@@ -430,6 +430,19 @@ class MemoryAccountRepository implements AuthRepository, AdminMemberRepository {
     return user && passwordHash ? { user: { ...user }, passwordHash } : null;
   }
 
+  async findCredentialBySessionTokenHash(
+    tokenHash: string,
+    now: Date,
+  ): Promise<CredentialRecord | null> {
+    const session = this.sessions.get(tokenHash);
+    if (!session || session.revokedAt || session.expiresAt <= now) return null;
+    const user = this.members.find(
+      (candidate) => candidate.id === session.userId,
+    );
+    const passwordHash = user ? this.passwordHashes.get(user.id) : undefined;
+    return user && passwordHash ? { user: { ...user }, passwordHash } : null;
+  }
+
   async createLoginSessionIfCredentialCurrent(
     session: LoginSessionRecord,
     expectedPasswordHash: string,
@@ -463,6 +476,10 @@ class MemoryAccountRepository implements AuthRepository, AdminMemberRepository {
   async revokeLoginSession(tokenHash: string, revokedAt: Date): Promise<void> {
     const session = this.sessions.get(tokenHash);
     if (session) session.revokedAt = revokedAt;
+  }
+
+  async changeOwnPassword() {
+    return { kind: "invalid_session" as const };
   }
 
   async listMembers(): Promise<AuthUserRecord[]> {

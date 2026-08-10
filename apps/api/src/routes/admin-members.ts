@@ -120,7 +120,7 @@ export async function registerAdminMemberRoutes(
       if (!params.success || !input.success) {
         return reply.code(400).send({
           code: "INVALID_REQUEST",
-          message: "请输入符合要求的新密码。",
+          message: "请输入有效的新密码。",
         });
       }
 

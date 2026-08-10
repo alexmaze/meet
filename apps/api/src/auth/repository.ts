@@ -28,6 +28,11 @@ export type LoginSessionRecord = {
   createdAt: Date;
 };
 
+export type ChangeOwnPasswordResult =
+  | { kind: "changed"; revokedSessionCount: number }
+  | { kind: "invalid_session" }
+  | { kind: "credential_changed" };
+
 export type InitialAdminInput = {
   id: string;
   username: string;
@@ -38,6 +43,10 @@ export type InitialAdminInput = {
 
 export interface AuthRepository {
   findCredentialByUsername(username: string): Promise<CredentialRecord | null>;
+  findCredentialBySessionTokenHash(
+    tokenHash: string,
+    now: Date,
+  ): Promise<CredentialRecord | null>;
   createLoginSessionIfCredentialCurrent(
     session: LoginSessionRecord,
     expectedPasswordHash: string,
@@ -47,6 +56,13 @@ export interface AuthRepository {
     now: Date,
   ): Promise<AuthUserRecord | null>;
   revokeLoginSession(tokenHash: string, revokedAt: Date): Promise<void>;
+  changeOwnPassword(input: {
+    userId: string;
+    currentSessionTokenHash: string;
+    expectedPasswordHash: string;
+    newPasswordHash: string;
+    changedAt: Date;
+  }): Promise<ChangeOwnPasswordResult>;
 }
 
 export interface AdminAccountRepository extends AuthRepository {

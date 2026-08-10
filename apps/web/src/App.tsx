@@ -552,6 +552,13 @@ function ProfilePage({ session }: { session: AuthenticatedAppSession }) {
         </div>
       )}
       <section className="profile-actions">
+        <button type="button" onClick={session.openPasswordChange}>
+          <span>
+            <strong>修改密码</strong>
+            <small>验证当前密码后设置新密码</small>
+          </span>
+          <span aria-hidden="true">→</span>
+        </button>
         {user.accountType === "admin" && (
           <button type="button" onClick={session.openFamilyMembers}>
             <span>

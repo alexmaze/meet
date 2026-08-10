@@ -402,6 +402,9 @@ function authRepository(): AuthRepository {
     async findCredentialByUsername() {
       return null;
     },
+    async findCredentialBySessionTokenHash() {
+      return null;
+    },
     async createLoginSessionIfCredentialCurrent(_session: LoginSessionRecord) {
       return true;
     },
@@ -409,6 +412,9 @@ function authRepository(): AuthRepository {
       return users.get(tokenHash) ?? null;
     },
     async revokeLoginSession() {},
+    async changeOwnPassword() {
+      return { kind: "invalid_session" };
+    },
   };
 }
 

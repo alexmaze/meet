@@ -1,4 +1,7 @@
-import { loginRequestSchema } from "@meet/protocol";
+import {
+  changePasswordRequestSchema,
+  loginRequestSchema,
+} from "@meet/protocol";
 import type { FastifyInstance } from "fastify";
 
 import {
@@ -74,6 +77,42 @@ export async function registerAuthRoutes(
       await auth.logout(sessionToken);
       return { ok: true };
     } catch (error) {
+      return sendAuthError(reply, error);
+    }
+  });
+
+  app.post("/api/auth/change-password", async (request, reply) => {
+    reply.header("Cache-Control", "no-store");
+    const input = changePasswordRequestSchema.safeParse(request.body);
+    if (!input.success) {
+      return reply.code(400).send({
+        code: "INVALID_REQUEST",
+        message: "请输入当前密码和新密码。",
+      });
+    }
+
+    const rateLimitKey = `${request.ip}:change-password`;
+    const rateLimit = loginRateLimiter.consume(rateLimitKey);
+    if (!rateLimit.allowed) {
+      reply.header("Retry-After", String(rateLimit.retryAfterSeconds));
+      return reply.code(429).send({
+        code: "RATE_LIMITED",
+        message: "密码验证尝试过于频繁，请稍后再试。",
+      });
+    }
+
+    try {
+      const revokedSessionCount = await auth.changePassword(
+        getSessionToken(request, config),
+        input.data.currentPassword,
+        input.data.newPassword,
+      );
+      loginRateLimiter.reset(rateLimitKey);
+      return { ok: true, revokedSessionCount };
+    } catch (error) {
+      if (error instanceof AuthError && error.statusCode === 401) {
+        clearSessionCookie(reply, config);
+      }
       return sendAuthError(reply, error);
     }
   });

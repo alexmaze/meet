@@ -44,7 +44,7 @@ export function validateCreateMember(
   if (!password.success) {
     return {
       ok: false,
-      message: "密码需为 15–256 个字符，开头和结尾的空格也会计入密码。",
+      message: "请输入密码，密码不能超过 256 个字符。",
     };
   }
 
@@ -74,7 +74,7 @@ export function validatePasswordReset(
   if (!result.success) {
     return {
       ok: false,
-      message: "新密码需为 15–256 个字符，开头和结尾的空格也会计入密码。",
+      message: "请输入新密码，新密码不能超过 256 个字符。",
     };
   }
 

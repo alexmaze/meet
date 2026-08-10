@@ -1,5 +1,6 @@
 import {
   canonicalizeUsername,
+  changeOwnPassword,
   createLoginSessionIfCredentialCurrent,
   initializeFirstAdmin,
   loginSessions,
@@ -14,6 +15,7 @@ import { and, eq, gt, isNull } from "drizzle-orm";
 import type {
   AdminAccountRepository,
   AuthUserRecord,
+  ChangeOwnPasswordResult,
   CredentialRecord,
   InitialAdminInput,
   LoginSessionRecord,
@@ -36,6 +38,35 @@ export class PostgresAuthRepository implements AdminAccountRepository {
         eq(passwordCredentials.userId, userAccounts.id),
       )
       .where(eq(userAccounts.usernameCanonical, canonicalizeUsername(username)))
+      .limit(1);
+
+    return result
+      ? { user: toAuthUser(result.user), passwordHash: result.passwordHash }
+      : null;
+  }
+
+  async findCredentialBySessionTokenHash(
+    tokenHash: string,
+    now: Date,
+  ): Promise<CredentialRecord | null> {
+    const [result] = await this.db
+      .select({
+        user: userAccounts,
+        passwordHash: passwordCredentials.passwordHash,
+      })
+      .from(loginSessions)
+      .innerJoin(userAccounts, eq(userAccounts.id, loginSessions.userId))
+      .innerJoin(
+        passwordCredentials,
+        eq(passwordCredentials.userId, userAccounts.id),
+      )
+      .where(
+        and(
+          eq(loginSessions.tokenHash, tokenHash),
+          isNull(loginSessions.revokedAt),
+          gt(loginSessions.expiresAt, now),
+        ),
+      )
       .limit(1);
 
     return result
@@ -83,6 +114,16 @@ export class PostgresAuthRepository implements AdminAccountRepository {
           isNull(loginSessions.revokedAt),
         ),
       );
+  }
+
+  async changeOwnPassword(input: {
+    userId: string;
+    currentSessionTokenHash: string;
+    expectedPasswordHash: string;
+    newPasswordHash: string;
+    changedAt: Date;
+  }): Promise<ChangeOwnPasswordResult> {
+    return changeOwnPassword(this.db, input);
   }
 
   async createInitialAdmin(input: InitialAdminInput): Promise<AuthUserRecord> {

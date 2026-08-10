@@ -100,7 +100,7 @@ pnpm admin:init --username admin --display-name 家庭管理员
 pnpm dev
 ```
 
-运行迁移前，先在 PostgreSQL 中创建空数据库，并在 `.env` 中填写对应的 `DATABASE_URL`。`admin:init` 只允许在没有任何账号的数据库中执行，密码通过终端遮罩输入两次，至少 15 个字符，不会进入命令历史。管理员忘记密码时可在服务器执行：
+运行迁移前，先在 PostgreSQL 中创建空数据库，并在 `.env` 中填写对应的 `DATABASE_URL`。`admin:init` 只允许在没有任何账号的数据库中执行，密码通过终端遮罩输入两次，不会进入命令历史。Meet 不对密码施加长度或组成强度要求，但不接受空密码。管理员忘记密码时可在服务器执行：
 
 ```bash
 pnpm admin:reset-password --username admin
@@ -110,7 +110,7 @@ pnpm admin:reset-password --username admin
 
 示例配置为了本地 HTTP 开发使用 `AUTH_COOKIE_SECURE=false`；生产环境启用 HTTPS 后必须改为 `AUTH_COOKIE_SECURE=true`。
 
-管理员登录后可以从“我的”页进入家庭成员管理，创建成人或儿童账号、重置成员密码，并单独配置管理员能否查看每个儿童账号的历史、记忆和已保留录音。管理员账号本身不能通过 Web 重置密码，仍需使用上面的服务器命令。账号停用与恢复的产品方式仍待确认，本版没有提前实现。
+所有已登录账号都可以从“我的”页验证当前密码后修改自己的密码；修改成功会撤销该账号的其他有效登录会话，当前设备保持登录。管理员还可以从“我的”页进入家庭成员管理，创建成人或儿童账号、重置成员密码，并单独配置管理员能否查看每个儿童账号的历史、记忆和已保留录音。管理员忘记密码时仍需使用上面的服务器命令重置。账号停用与恢复的产品方式仍待确认，本版没有提前实现。
 
 登录后的角色首页会直接显示星盾队长、林老师和知夏三个家庭预置角色。点击角色卡的“通话”按钮会使用该角色已经保存的人设、声音和开场策略进入实时通话，点击卡片其他区域可以查看结构化角色卡。管理员和成人可以创建、编辑、复制与删除自己的角色；管理员创建的角色默认全家共享，成人创建的角色默认私有并可主动共享，儿童只能查看和使用家庭公共角色。预置角色只能由管理员修改和恢复，恢复不会删除任何成员与该角色的会话或记忆。
 
@@ -127,7 +127,7 @@ DASHSCOPE_API_KEY=在服务端填写真实值
 QWEN_REALTIME_ENDPOINT=商务提供的Endpoint主机名
 ```
 
-Endpoint 推荐填写纯 hostname；也接受不带路径、查询参数或端口的 HTTPS origin。服务端默认自行连接 `/api-ws/v1/realtime?model=...`，不能通过 Workspace ID 推导接入地址。然后访问 `http://localhost:5173`，API 默认监听 `http://127.0.0.1:8787`。API Key 和 Endpoint 只由 API 读取，不会返回浏览器。
+Endpoint 推荐填写纯 hostname；也接受不带路径、查询参数或端口的 HTTPS origin。服务端默认自行连接 `/api-ws/v1/realtime?model=...`，不能通过 Workspace ID 推导接入地址。执行 `pnpm dev` 后，Web 默认监听 `0.0.0.0:5173`，API 默认监听 `0.0.0.0:8787`；本机可访问 `http://localhost:5173`，同一局域网设备可通过开发机 IP 和 5173 端口访问。API Key 和 Endpoint 只由 API 读取，不会返回浏览器。
 
 摘要与长期记忆 Worker 默认复用 `DASHSCOPE_API_KEY`，并使用北京地域兼容接口与 `qwen-plus`：
 

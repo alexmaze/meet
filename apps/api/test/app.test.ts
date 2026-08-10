@@ -56,6 +56,9 @@ const authRepository: AuthRepository = {
   async findCredentialByUsername() {
     return null;
   },
+  async findCredentialBySessionTokenHash() {
+    return null;
+  },
   async createLoginSessionIfCredentialCurrent(_session: LoginSessionRecord) {
     return true;
   },
@@ -63,6 +66,9 @@ const authRepository: AuthRepository = {
     return tokenHash === hashSessionToken(sessionToken) ? testUser : null;
   },
   async revokeLoginSession() {},
+  async changeOwnPassword() {
+    return { kind: "invalid_session" };
+  },
 };
 const authHeaders = { cookie: `meet_session=${sessionToken}` };
 const testConversationId = "9172f06d-c71a-47b3-94fe-35e1204b5b55";
@@ -690,6 +696,11 @@ describe("Meet API", () => {
     expect(() => loadConfig({ AUTH_COOKIE_SECURE: "auto" })).toThrow(
       /AUTH_COOKIE_SECURE/,
     );
+  });
+
+  it("binds the API to all IPv4 interfaces by default", () => {
+    expect(loadConfig({}).server.host).toBe("0.0.0.0");
+    expect(loadConfig({ API_HOST: "127.0.0.1" }).server.host).toBe("127.0.0.1");
   });
 
   it("resolves the private media directory outside public web assets", () => {

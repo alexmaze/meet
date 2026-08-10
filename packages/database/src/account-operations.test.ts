@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  changeOwnPassword,
   createLoginSessionIfCredentialCurrent,
   resetPasswordAndRevokeSessions,
 } from "./account-operations.js";
@@ -133,6 +134,123 @@ describe("account database operations", () => {
       "select:user_accounts",
       "lock:update",
       "update:password_credentials",
+    ]);
+  });
+
+  it("修改自己的密码时保留当前会话并记录安全审计", async () => {
+    const events: string[] = [];
+    const updates: Array<{ table: unknown; value: unknown }> = [];
+    const inserts: Array<{ table: unknown; value: unknown }> = [];
+    const tx = {
+      select() {
+        return {
+          from(table: unknown) {
+            if (table === userAccounts) {
+              events.push("select:user_accounts");
+              return {
+                where() {
+                  return {
+                    for(mode: string) {
+                      events.push(`lock:${mode}`);
+                      return { limit: async () => [{ status: "active" }] };
+                    },
+                  };
+                },
+              };
+            }
+            if (table === loginSessions) {
+              events.push("select:login_sessions");
+              return {
+                where() {
+                  return { limit: async () => [{ id: sessionId }] };
+                },
+              };
+            }
+            events.push("select:password_credentials");
+            return {
+              where() {
+                return {
+                  limit: async () => [
+                    { passwordHash: "verified-password-hash" },
+                  ],
+                };
+              },
+            };
+          },
+        };
+      },
+      update(table: unknown) {
+        return {
+          set(value: unknown) {
+            updates.push({ table, value });
+            return {
+              where() {
+                return {
+                  returning: async () =>
+                    table === passwordCredentials
+                      ? [{ userId }]
+                      : [{ id: "other-session-1" }, { id: "other-session-2" }],
+                };
+              },
+            };
+          },
+        };
+      },
+      insert(table: unknown) {
+        return {
+          values(value: unknown) {
+            inserts.push({ table, value });
+            return Promise.resolve();
+          },
+        };
+      },
+    };
+
+    const result = await changeOwnPassword(fakeDatabase(tx, events), {
+      userId,
+      currentSessionTokenHash: "session-token-hash",
+      expectedPasswordHash: "verified-password-hash",
+      newPasswordHash: "new-password-hash",
+      changedAt: createdAt,
+    });
+
+    expect(result).toEqual({ kind: "changed", revokedSessionCount: 2 });
+    expect(events).toEqual([
+      "transaction",
+      "select:user_accounts",
+      "lock:update",
+      "select:login_sessions",
+      "select:password_credentials",
+    ]);
+    expect(updates).toEqual([
+      {
+        table: passwordCredentials,
+        value: {
+          passwordHash: "new-password-hash",
+          passwordChangedAt: createdAt,
+          updatedAt: createdAt,
+        },
+      },
+      {
+        table: loginSessions,
+        value: {
+          revokedAt: createdAt,
+          revocationReason: "password_reset",
+        },
+      },
+    ]);
+    expect(inserts).toEqual([
+      {
+        table: accountSecurityAuditEvents,
+        value: {
+          eventType: "password_changed",
+          actorType: "user",
+          actorUserId: userId,
+          targetUserId: userId,
+          details: { revokedSessionCount: 2 },
+          createdAt,
+        },
+      },
     ]);
   });
 });

@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, gt, isNull, ne, sql } from "drizzle-orm";
 
 import type { Database } from "./client.js";
 import {
@@ -149,6 +149,115 @@ export async function createLoginSessionIfCredentialCurrent(
       createdAt: input.createdAt,
     });
     return true;
+  });
+}
+
+export type ChangeOwnPasswordInput = {
+  userId: string;
+  currentSessionTokenHash: string;
+  expectedPasswordHash: string;
+  newPasswordHash: string;
+  changedAt?: Date;
+};
+
+export type ChangeOwnPasswordResult =
+  | { kind: "changed"; revokedSessionCount: number }
+  | { kind: "invalid_session" }
+  | { kind: "credential_changed" };
+
+/**
+ * Replaces the authenticated user's password while retaining the session that
+ * submitted the request. The account lock serializes this operation with
+ * administrator resets and login-session creation.
+ */
+export async function changeOwnPassword(
+  db: Database,
+  input: ChangeOwnPasswordInput,
+): Promise<ChangeOwnPasswordResult> {
+  const changedAt = input.changedAt ?? new Date();
+
+  return db.transaction(async (tx) => {
+    const [account] = await tx
+      .select({ status: userAccounts.status })
+      .from(userAccounts)
+      .where(eq(userAccounts.id, input.userId))
+      .for("update")
+      .limit(1);
+
+    if (!account || account.status !== "active") {
+      return { kind: "invalid_session" };
+    }
+
+    const [currentSession] = await tx
+      .select({ id: loginSessions.id })
+      .from(loginSessions)
+      .where(
+        and(
+          eq(loginSessions.userId, input.userId),
+          eq(loginSessions.tokenHash, input.currentSessionTokenHash),
+          isNull(loginSessions.revokedAt),
+          gt(loginSessions.expiresAt, changedAt),
+        ),
+      )
+      .limit(1);
+    if (!currentSession) return { kind: "invalid_session" };
+
+    const [credential] = await tx
+      .select({ passwordHash: passwordCredentials.passwordHash })
+      .from(passwordCredentials)
+      .where(eq(passwordCredentials.userId, input.userId))
+      .limit(1);
+    if (!credential || credential.passwordHash !== input.expectedPasswordHash) {
+      return { kind: "credential_changed" };
+    }
+
+    const updatedCredentials = await tx
+      .update(passwordCredentials)
+      .set({
+        passwordHash: input.newPasswordHash,
+        passwordChangedAt: changedAt,
+        updatedAt: changedAt,
+      })
+      .where(
+        and(
+          eq(passwordCredentials.userId, input.userId),
+          eq(passwordCredentials.passwordHash, input.expectedPasswordHash),
+        ),
+      )
+      .returning({ userId: passwordCredentials.userId });
+    if (updatedCredentials.length !== 1) {
+      return { kind: "credential_changed" };
+    }
+
+    const revokedSessions = await tx
+      .update(loginSessions)
+      .set({
+        revokedAt: changedAt,
+        revocationReason: "password_reset",
+      })
+      .where(
+        and(
+          eq(loginSessions.userId, input.userId),
+          ne(loginSessions.tokenHash, input.currentSessionTokenHash),
+          isNull(loginSessions.revokedAt),
+          gt(loginSessions.expiresAt, changedAt),
+        ),
+      )
+      .returning({ id: loginSessions.id });
+
+    await tx.insert(accountSecurityAuditEvents).values({
+      eventType: "password_changed",
+      actorType: "user",
+      actorUserId: input.userId,
+      targetUserId: input.userId,
+      details: { revokedSessionCount: revokedSessions.length },
+      createdAt: changedAt,
+    });
+
+    return {
+      kind: "changed",
+      revokedSessionCount: revokedSessions.length,
+    };
   });
 }
 

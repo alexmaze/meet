@@ -5,6 +5,7 @@ import { hashPassword } from "../src/auth/password.js";
 import type {
   AuthRepository,
   AuthUserRecord,
+  ChangeOwnPasswordResult,
   CredentialRecord,
   LoginSessionRecord,
 } from "../src/auth/repository.js";
@@ -173,6 +174,110 @@ describe("authentication routes", () => {
     await app.close();
   });
 
+  it("修改密码后保留当前会话并撤销其他会话", async () => {
+    const repository = new MemoryAuthRepository([
+      { user: admin, passwordHash },
+    ]);
+    const app = await buildApp({
+      config,
+      authRepository: repository,
+      logger: false,
+    });
+
+    const firstLogin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { username: "admin", password: "correct-password" },
+    });
+    const secondLogin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { username: "admin", password: "correct-password" },
+    });
+    const firstCookie = extractCookie(firstLogin.headers["set-cookie"]);
+    const secondCookie = extractCookie(secondLogin.headers["set-cookie"]);
+
+    const changed = await app.inject({
+      method: "POST",
+      url: "/api/auth/change-password",
+      headers: { cookie: firstCookie },
+      payload: { currentPassword: "correct-password", newPassword: "1" },
+    });
+    expect(changed.statusCode).toBe(200);
+    expect(changed.json()).toEqual({ ok: true, revokedSessionCount: 1 });
+    expect(changed.headers["cache-control"]).toBe("no-store");
+
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/api/auth/me",
+          headers: { cookie: firstCookie },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/api/auth/me",
+          headers: { cookie: secondCookie },
+        })
+      ).statusCode,
+    ).toBe(401);
+
+    const oldPassword = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { username: "admin", password: "correct-password" },
+    });
+    expect(oldPassword.statusCode).toBe(401);
+    const newPassword = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { username: "admin", password: "1" },
+    });
+    expect(newPassword.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it("修改密码时校验当前密码和登录状态", async () => {
+    const repository = new MemoryAuthRepository([
+      { user: admin, passwordHash },
+    ]);
+    const app = await buildApp({
+      config,
+      authRepository: repository,
+      logger: false,
+    });
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { username: "admin", password: "correct-password" },
+    });
+    const cookie = extractCookie(login.headers["set-cookie"]);
+
+    const incorrect = await app.inject({
+      method: "POST",
+      url: "/api/auth/change-password",
+      headers: { cookie },
+      payload: { currentPassword: "wrong", newPassword: "1" },
+    });
+    expect(incorrect.statusCode).toBe(400);
+    expect(incorrect.json()).toEqual({
+      code: "INVALID_CURRENT_PASSWORD",
+      message: "当前密码不正确。",
+    });
+
+    const unauthenticated = await app.inject({
+      method: "POST",
+      url: "/api/auth/change-password",
+      payload: { currentPassword: "correct-password", newPassword: "1" },
+    });
+    expect(unauthenticated.statusCode).toBe(401);
+    await app.close();
+  });
+
   it("reports auth as unavailable when no database is configured", async () => {
     const app = await buildApp({ config, logger: false });
     const response = await app.inject({
@@ -237,6 +342,15 @@ class MemoryAuthRepository implements AuthRepository {
     return this.credentials.get(username) ?? null;
   }
 
+  async findCredentialBySessionTokenHash(
+    tokenHash: string,
+    now: Date,
+  ): Promise<CredentialRecord | null> {
+    const session = this.sessions.get(tokenHash);
+    if (!session || session.revokedAt || session.expiresAt <= now) return null;
+    return this.credentialsByUserId.get(session.userId) ?? null;
+  }
+
   async createLoginSessionIfCredentialCurrent(
     session: LoginSessionRecord,
     expectedPasswordHash: string,
@@ -276,6 +390,48 @@ class MemoryAuthRepository implements AuthRepository {
   async revokeLoginSession(tokenHash: string, revokedAt: Date): Promise<void> {
     const session = this.sessions.get(tokenHash);
     if (session) session.revokedAt = revokedAt;
+  }
+
+  async changeOwnPassword(input: {
+    userId: string;
+    currentSessionTokenHash: string;
+    expectedPasswordHash: string;
+    newPasswordHash: string;
+    changedAt: Date;
+  }): Promise<ChangeOwnPasswordResult> {
+    const currentSession = this.sessions.get(input.currentSessionTokenHash);
+    if (
+      !currentSession ||
+      currentSession.userId !== input.userId ||
+      currentSession.revokedAt ||
+      currentSession.expiresAt <= input.changedAt
+    ) {
+      return { kind: "invalid_session" };
+    }
+    const credential = this.credentialsByUserId.get(input.userId);
+    if (!credential || credential.passwordHash !== input.expectedPasswordHash) {
+      return { kind: "credential_changed" };
+    }
+
+    const changedCredential = {
+      ...credential,
+      passwordHash: input.newPasswordHash,
+    };
+    this.credentialsByUserId.set(input.userId, changedCredential);
+    this.credentials.set(credential.user.username, changedCredential);
+    let revokedSessionCount = 0;
+    for (const [tokenHash, session] of this.sessions) {
+      if (
+        tokenHash !== input.currentSessionTokenHash &&
+        session.userId === input.userId &&
+        !session.revokedAt &&
+        session.expiresAt > input.changedAt
+      ) {
+        session.revokedAt = input.changedAt;
+        revokedSessionCount += 1;
+      }
+    }
+    return { kind: "changed", revokedSessionCount };
   }
 }
 

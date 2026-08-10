@@ -63,7 +63,7 @@ const cookieSecureSchema = z
   .transform((value) => value === "true");
 
 const envSchema = z.object({
-  API_HOST: z.string().trim().min(1).default("127.0.0.1"),
+  API_HOST: z.string().trim().min(1).default("0.0.0.0"),
   API_PORT: z.coerce.number().int().min(1).max(65_535).default(8787),
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])

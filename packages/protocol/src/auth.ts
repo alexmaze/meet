@@ -14,8 +14,8 @@ export type GuardianHistoryAccess = z.infer<typeof guardianHistoryAccessSchema>;
 
 export const usernameSchema = z.string().trim().min(1).max(64);
 
-// Meet 第一版没有 MFA；新设密码遵循当前无 MFA 账号至少 15 个字符的基线。
-export const passwordSchema = z.string().min(15).max(256);
+// 密码不做长度或组成强度要求；仅拒绝空值，并保留请求大小上限。
+export const passwordSchema = z.string().min(1).max(256);
 
 export const userAccountSchema = z.object({
   id: z.uuid(),
@@ -49,6 +49,24 @@ export type AuthenticatedUserResponse = z.infer<
 export const logoutResponseSchema = z.object({
   ok: z.literal(true),
 });
+
+export const changePasswordRequestSchema = z
+  .object({
+    currentPassword: z.string().min(1).max(256),
+    newPassword: passwordSchema,
+  })
+  .strict();
+
+export type ChangePasswordRequest = z.infer<typeof changePasswordRequestSchema>;
+
+export const changePasswordResponseSchema = z.object({
+  ok: z.literal(true),
+  revokedSessionCount: z.number().int().nonnegative(),
+});
+
+export type ChangePasswordResponse = z.infer<
+  typeof changePasswordResponseSchema
+>;
 
 export const apiErrorSchema = z.object({
   code: z.string().min(1),
