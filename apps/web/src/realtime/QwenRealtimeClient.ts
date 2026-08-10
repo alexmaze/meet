@@ -1,8 +1,13 @@
 import {
   parseQwenServerEvent,
+  qwenAssistantTranscriptDeltaSchema,
   qwenErrorEventSchema,
+  qwenResponseCreatedEventSchema,
+  qwenResponseDoneEventSchema,
   qwenResponseCreateEventSchema,
   qwenSessionUpdateEventSchema,
+  qwenSpeechStartedEventSchema,
+  qwenSpeechStoppedEventSchema,
   qwenUserTextItemCreateEventSchema,
   type QwenServerEvent,
   type RealtimeActivity,
@@ -81,6 +86,29 @@ export class QwenRealtimeClient {
   private manuallyClosing = false;
   private seenEventIds = new Set<string>();
   private mediaAttachPromise: Promise<void> | null = null;
+  private pendingSpeechIds = new Set<string>();
+  private manualAudioSuppressed = false;
+  private confirmedInterruptSuppressed = false;
+  private cancelRequested = false;
+  private remoteAudioTrack: MediaStreamTrack | null = null;
+  private playbackAudioTrack: MediaStreamTrack | null = null;
+  private playbackAttempt = 0;
+  private awaitingFreshResponseAudio = false;
+  private freshResponseId: string | null = null;
+  private activeResponseId: string | null = null;
+  private interruptedResponseId: string | null = null;
+  private validInterruptPending = false;
+  private audioDrainContext: AudioContext | null = null;
+  private audioDrainGain: GainNode | null = null;
+  private audioDrainSource: MediaStreamAudioSourceNode | null = null;
+  private audioDrainStream: MediaStream | null = null;
+  private audioDrainPreparationAttempted = false;
+  private audioDrainResumePromise: Promise<void> | null = null;
+  private audioDrainResumeAttempt = 0;
+  private audioDrainFailureReported = false;
+  private audioDrainVisibilityListener: EventListener | null = null;
+  private audioDrainRetryListener: EventListener | null = null;
+  private playbackRetryListener: EventListener | null = null;
 
   constructor(
     private readonly remoteAudio: HTMLAudioElement,
@@ -89,6 +117,9 @@ export class QwenRealtimeClient {
 
   async start(options: QwenRealtimeOptions): Promise<void> {
     this.teardown();
+    // start() 由用户点击触发；在首次 await 前创建并恢复 AudioContext，
+    // 让移动浏览器授予这条静音 drain 管线播放权限。
+    this.prepareRemoteAudioDrain();
     this.manuallyClosing = false;
     this.options = options;
     this.projection = { ...initialQwenProjection };
@@ -242,21 +273,25 @@ export class QwenRealtimeClient {
   }
 
   interrupt(): void {
-    if (!this.projection.responseActive || !this.isCommandChannelOpen()) {
+    this.manualAudioSuppressed = true;
+    this.awaitingFreshResponseAudio = true;
+    this.freshResponseId = null;
+    this.interruptedResponseId ??= this.activeResponseId;
+    this.syncRemoteAudioPlayback();
+
+    if (
+      !this.projection.responseActive ||
+      !this.isCommandChannelOpen() ||
+      this.cancelRequested
+    ) {
       return;
     }
 
-    this.remoteAudio.muted = true;
     this.sendClientEvent({
       event_id: createEventId(),
       type: "response.cancel",
     });
-    this.projection = {
-      ...this.projection,
-      responseActive: false,
-      activity: "listening",
-    };
-    this.syncProjectionToSnapshot();
+    this.cancelRequested = true;
   }
 
   private bindPeerConnection(peerConnection: RTCPeerConnection): void {
@@ -267,19 +302,12 @@ export class QwenRealtimeClient {
       this.attachEventChannel(channel);
     };
 
-    peerConnection.ontrack = ({ track, streams }) => {
+    peerConnection.ontrack = ({ track }) => {
       if (track.kind !== "audio") {
         return;
       }
 
-      this.remoteAudio.srcObject = streams[0] ?? new MediaStream([track]);
-      void this.remoteAudio.play().catch(() => {
-        this.callbacks.onError?.({
-          code: "AUDIO_PLAYBACK_BLOCKED",
-          message: "浏览器阻止了声音播放，请再次点击页面后重试。",
-          recoverable: true,
-        });
-      });
+      this.acceptRemoteAudioTrack(track);
     };
 
     peerConnection.onconnectionstatechange = () => {
@@ -362,11 +390,94 @@ export class QwenRealtimeClient {
       void this.configureSession();
     }
 
+    const speechStarted = qwenSpeechStartedEventSchema.safeParse(event);
+    if (speechStarted.success) {
+      // smart_turn 仍负责判断这是不是有效插话；客户端立即销毁当前
+      // 播放管线，让已经排队的旧 RTP 音频不能在下一次恢复时重放。
+      this.pendingSpeechIds.add(speechStarted.data.item_id);
+      this.awaitingFreshResponseAudio = true;
+      this.freshResponseId = null;
+      this.interruptedResponseId ??= this.activeResponseId;
+      this.syncRemoteAudioPlayback();
+    }
+
+    const speechStopped = qwenSpeechStoppedEventSchema.safeParse(event);
+    if (speechStopped.success) {
+      this.pendingSpeechIds.delete(speechStopped.data.item_id);
+      if (speechStopped.data.reason !== "turn_invalid") {
+        this.confirmedInterruptSuppressed = true;
+        this.validInterruptPending = true;
+      } else if (
+        this.pendingSpeechIds.size === 0 &&
+        !this.manualAudioSuppressed &&
+        !this.confirmedInterruptSuppressed &&
+        !this.validInterruptPending &&
+        this.freshResponseId === null
+      ) {
+        // 无效附和不会产生新响应，直接从当前远端音轨的实时位置
+        // 重建播放管线，不能等待不存在的 response.created。
+        this.awaitingFreshResponseAudio = false;
+        this.freshResponseId = null;
+        this.interruptedResponseId = null;
+      }
+      this.syncRemoteAudioPlayback();
+    }
+
+    const responseDone = qwenResponseDoneEventSchema.safeParse(event);
+    if (
+      responseDone.success &&
+      responseDone.data.response.status === "cancelled" &&
+      responseDone.data.response.status_details.reason === "turn_detected" &&
+      this.awaitingFreshResponseAudio &&
+      this.freshResponseId === null &&
+      (this.interruptedResponseId === null ||
+        this.interruptedResponseId === responseDone.data.response.id)
+    ) {
+      this.confirmedInterruptSuppressed = true;
+      this.validInterruptPending = true;
+      this.awaitingFreshResponseAudio = true;
+      this.syncRemoteAudioPlayback();
+    }
+    if (
+      responseDone.success &&
+      this.activeResponseId === responseDone.data.response.id
+    ) {
+      this.cancelRequested = false;
+      this.activeResponseId = null;
+    }
+
     const result = projectQwenEvent(this.projection, event);
     this.projection = result.state;
 
-    if (event.type === "response.created") {
-      this.remoteAudio.muted = false;
+    const responseCreated = qwenResponseCreatedEventSchema.safeParse(event);
+    if (responseCreated.success) {
+      this.activeResponseId = responseCreated.data.response.id;
+      this.manualAudioSuppressed = false;
+      this.confirmedInterruptSuppressed = false;
+      this.cancelRequested = false;
+      if (this.awaitingFreshResponseAudio) {
+        this.freshResponseId = responseCreated.data.response.id;
+      }
+      // response.created 只表示推理开始。远端 RTP 与 DataChannel 是
+      // 独立链路，此时恢复会重新放出旧 RTP 尾音，因此继续关闸。
+      this.syncRemoteAudioPlayback();
+    }
+
+    const assistantTranscriptDelta =
+      qwenAssistantTranscriptDeltaSchema.safeParse(event);
+    if (
+      assistantTranscriptDelta.success &&
+      this.awaitingFreshResponseAudio &&
+      this.freshResponseId === assistantTranscriptDelta.data.response_id &&
+      !this.isRemoteAudioSuppressed()
+    ) {
+      // 同一新响应已经开始产生音频字幕，才从仍在实时推进的 receiver
+      // track 建立一个全新的播放 clone，跳过旧元素中的解码缓冲。
+      this.awaitingFreshResponseAudio = false;
+      this.freshResponseId = null;
+      this.interruptedResponseId = null;
+      this.validInterruptPending = false;
+      this.syncRemoteAudioPlayback();
     }
 
     for (const transcript of result.commits) {
@@ -511,6 +622,329 @@ export class QwenRealtimeClient {
     return this.commandChannel?.readyState === "open";
   }
 
+  private acceptRemoteAudioTrack(track: MediaStreamTrack): void {
+    if (this.remoteAudioTrack !== track) {
+      this.detachRemoteAudioPlayback();
+      this.remoteAudioTrack = track;
+      this.connectRemoteAudioDrain(track);
+    }
+    this.ensureAudioDrainRunning();
+    this.syncRemoteAudioPlayback();
+  }
+
+  private prepareRemoteAudioDrain(): void {
+    this.audioDrainPreparationAttempted = true;
+    const audioWindow = window as typeof window & {
+      webkitAudioContext?: typeof AudioContext;
+    };
+    const AudioContextConstructor =
+      audioWindow.AudioContext ?? audioWindow.webkitAudioContext;
+    if (!AudioContextConstructor) {
+      return;
+    }
+
+    try {
+      const context = new AudioContextConstructor();
+      const gain = context.createGain();
+      gain.gain.value = 0;
+      gain.connect(context.destination);
+      this.audioDrainContext = context;
+      this.audioDrainGain = gain;
+      this.registerAudioDrainVisibilityListener();
+      this.ensureAudioDrainRunning();
+    } catch {
+      this.audioDrainContext = null;
+      this.audioDrainGain = null;
+    }
+  }
+
+  private ensureAudioDrainRunning(): void {
+    const context = this.audioDrainContext;
+    if (!context) {
+      if (this.audioDrainPreparationAttempted && this.remoteAudioTrack) {
+        this.reportAudioDrainFailure();
+      }
+      return;
+    }
+    if (context.state === "running") {
+      if (this.remoteAudioTrack && !this.audioDrainSource) {
+        this.reportAudioDrainFailure();
+        return;
+      }
+      this.audioDrainFailureReported = false;
+      this.clearAudioDrainRetryListener();
+      return;
+    }
+    if (context.state === "closed") {
+      return;
+    }
+    // Web Audio 允许未获用户激活的 resume() 永久 pending；只要仍未运行，
+    // 就预先挂一次点击兜底，不能等待 Promise reject 后才提供恢复入口。
+    this.scheduleAudioDrainRetry();
+    if (this.audioDrainResumePromise) {
+      return;
+    }
+
+    let resumePromise: Promise<void>;
+    const attempt = ++this.audioDrainResumeAttempt;
+    try {
+      resumePromise = context.resume();
+    } catch {
+      this.reportAudioDrainFailure();
+      return;
+    }
+    this.audioDrainResumePromise = resumePromise;
+    void resumePromise
+      .then(() => {
+        if (
+          this.audioDrainContext !== context ||
+          this.audioDrainResumeAttempt !== attempt
+        ) {
+          return;
+        }
+        if (context.state === "running") {
+          if (this.remoteAudioTrack && !this.audioDrainSource) {
+            this.reportAudioDrainFailure();
+          } else {
+            this.audioDrainFailureReported = false;
+            this.clearAudioDrainRetryListener();
+          }
+        } else {
+          this.reportAudioDrainFailure();
+        }
+      })
+      .catch(() => {
+        if (
+          this.audioDrainContext === context &&
+          this.audioDrainResumeAttempt === attempt &&
+          context.state !== "running"
+        ) {
+          this.reportAudioDrainFailure();
+        }
+      })
+      .finally(() => {
+        if (this.audioDrainResumePromise === resumePromise) {
+          this.audioDrainResumePromise = null;
+        }
+      });
+  }
+
+  private reportAudioDrainFailure(): void {
+    if (this.audioDrainFailureReported || !this.remoteAudioTrack) {
+      return;
+    }
+    this.audioDrainFailureReported = true;
+    this.scheduleAudioDrainRetry();
+    this.callbacks.onError?.({
+      code: "AUDIO_DRAIN_UNAVAILABLE",
+      message: "浏览器无法保持音频清理通道，请点击页面恢复后再试。",
+      recoverable: true,
+    });
+  }
+
+  private scheduleAudioDrainRetry(): void {
+    if (this.audioDrainRetryListener || typeof document === "undefined") {
+      return;
+    }
+    const retry: EventListener = () => {
+      this.audioDrainRetryListener = null;
+      this.audioDrainFailureReported = false;
+      this.audioDrainResumeAttempt += 1;
+      this.audioDrainResumePromise = null;
+      if (!this.audioDrainContext) {
+        this.prepareRemoteAudioDrain();
+      }
+      if (this.remoteAudioTrack && !this.audioDrainSource) {
+        this.connectRemoteAudioDrain(this.remoteAudioTrack);
+      }
+      this.ensureAudioDrainRunning();
+    };
+    this.audioDrainRetryListener = retry;
+    document.addEventListener("pointerdown", retry, {
+      capture: true,
+      once: true,
+    });
+  }
+
+  private clearAudioDrainRetryListener(): void {
+    if (!this.audioDrainRetryListener || typeof document === "undefined") {
+      this.audioDrainRetryListener = null;
+      return;
+    }
+    document.removeEventListener("pointerdown", this.audioDrainRetryListener, {
+      capture: true,
+    });
+    this.audioDrainRetryListener = null;
+  }
+
+  private registerAudioDrainVisibilityListener(): void {
+    if (this.audioDrainVisibilityListener || typeof document === "undefined") {
+      return;
+    }
+    const listener: EventListener = () => {
+      if (document.visibilityState === "visible") {
+        this.ensureAudioDrainRunning();
+      }
+    };
+    this.audioDrainVisibilityListener = listener;
+    document.addEventListener("visibilitychange", listener);
+  }
+
+  private clearAudioDrainVisibilityListener(): void {
+    if (!this.audioDrainVisibilityListener || typeof document === "undefined") {
+      this.audioDrainVisibilityListener = null;
+      return;
+    }
+    document.removeEventListener(
+      "visibilitychange",
+      this.audioDrainVisibilityListener,
+    );
+    this.audioDrainVisibilityListener = null;
+  }
+
+  private connectRemoteAudioDrain(track: MediaStreamTrack): void {
+    this.audioDrainSource?.disconnect();
+    this.audioDrainSource = null;
+    this.audioDrainStream = null;
+    if (!this.audioDrainContext || !this.audioDrainGain) {
+      if (this.audioDrainPreparationAttempted) {
+        this.reportAudioDrainFailure();
+      }
+      return;
+    }
+
+    let source: MediaStreamAudioSourceNode | null = null;
+    try {
+      const stream = new MediaStream([track]);
+      source = this.audioDrainContext.createMediaStreamSource(stream);
+      source.connect(this.audioDrainGain);
+      this.audioDrainStream = stream;
+      this.audioDrainSource = source;
+    } catch {
+      source?.disconnect();
+      this.audioDrainSource = null;
+      this.audioDrainStream = null;
+      this.reportAudioDrainFailure();
+    }
+  }
+
+  private isRemoteAudioSuppressed(): boolean {
+    return (
+      this.pendingSpeechIds.size > 0 ||
+      this.manualAudioSuppressed ||
+      this.confirmedInterruptSuppressed
+    );
+  }
+
+  private syncRemoteAudioPlayback(): void {
+    if (this.isRemoteAudioSuppressed() || this.awaitingFreshResponseAudio) {
+      this.detachRemoteAudioPlayback();
+      return;
+    }
+    this.attachRemoteAudioPlayback();
+  }
+
+  private detachRemoteAudioPlayback(): void {
+    this.remoteAudio.muted = true;
+    if (!this.playbackAudioTrack && !this.remoteAudio.srcObject) {
+      return;
+    }
+
+    this.playbackAttempt += 1;
+    this.remoteAudio.pause();
+    this.remoteAudio.srcObject = null;
+    try {
+      this.remoteAudio.load();
+    } catch {
+      // 部分移动浏览器会在 MediaStream 已解绑时抛出；srcObject=null
+      // 已经完成关键的播放管线断开，继续清理播放 clone。
+    }
+    this.playbackAudioTrack?.stop();
+    this.playbackAudioTrack = null;
+  }
+
+  private attachRemoteAudioPlayback(): void {
+    this.ensureAudioDrainRunning();
+    if (
+      !this.remoteAudioTrack ||
+      this.playbackAudioTrack ||
+      this.remoteAudio.srcObject
+    ) {
+      if (this.playbackAudioTrack) {
+        this.remoteAudio.muted = false;
+      }
+      return;
+    }
+
+    const playbackTrack = this.remoteAudioTrack.clone();
+    const playbackStream = new MediaStream([playbackTrack]);
+    const attempt = ++this.playbackAttempt;
+    this.playbackAudioTrack = playbackTrack;
+    this.remoteAudio.srcObject = playbackStream;
+    this.remoteAudio.muted = false;
+    this.clearPlaybackRetryListener();
+
+    let playPromise: Promise<void>;
+    try {
+      playPromise = this.remoteAudio.play();
+    } catch (error) {
+      this.handleRemotePlaybackFailure(error, attempt);
+      return;
+    }
+    void playPromise.catch((error: unknown) => {
+      this.handleRemotePlaybackFailure(error, attempt);
+    });
+  }
+
+  private handleRemotePlaybackFailure(error: unknown, attempt: number): void {
+    if (attempt !== this.playbackAttempt) {
+      return;
+    }
+
+    this.awaitingFreshResponseAudio = true;
+    this.freshResponseId = null;
+    this.detachRemoteAudioPlayback();
+    this.schedulePlaybackRetry();
+    this.callbacks.onError?.({
+      code: "AUDIO_PLAYBACK_BLOCKED",
+      message: "浏览器阻止了声音播放，请再次点击页面后重试。",
+      recoverable: true,
+    });
+  }
+
+  private schedulePlaybackRetry(): void {
+    if (this.playbackRetryListener || typeof document === "undefined") {
+      return;
+    }
+
+    const retry: EventListener = () => {
+      this.playbackRetryListener = null;
+      this.ensureAudioDrainRunning();
+      if (this.isRemoteAudioSuppressed()) {
+        return;
+      }
+      this.awaitingFreshResponseAudio = false;
+      this.freshResponseId = null;
+      this.syncRemoteAudioPlayback();
+    };
+    this.playbackRetryListener = retry;
+    document.addEventListener("pointerdown", retry, {
+      capture: true,
+      once: true,
+    });
+  }
+
+  private clearPlaybackRetryListener(): void {
+    if (!this.playbackRetryListener || typeof document === "undefined") {
+      this.playbackRetryListener = null;
+      return;
+    }
+    document.removeEventListener("pointerdown", this.playbackRetryListener, {
+      capture: true,
+    });
+    this.playbackRetryListener = null;
+  }
+
   private applyMicrophoneGate(): void {
     if (!this.microphoneTrack) {
       return;
@@ -582,6 +1016,8 @@ export class QwenRealtimeClient {
     this.abortController = null;
 
     for (const channel of this.eventChannels) {
+      channel.onmessage = null;
+      channel.onclose = null;
       channel.close();
     }
     this.eventChannels.clear();
@@ -604,9 +1040,33 @@ export class QwenRealtimeClient {
     this.mediaAttachPromise = null;
     this.mediaAttached = false;
 
-    this.remoteAudio.pause();
-    this.remoteAudio.srcObject = null;
+    this.pendingSpeechIds.clear();
+    this.manualAudioSuppressed = false;
+    this.confirmedInterruptSuppressed = false;
+    this.cancelRequested = false;
+    this.awaitingFreshResponseAudio = false;
+    this.freshResponseId = null;
+    this.activeResponseId = null;
+    this.interruptedResponseId = null;
+    this.validInterruptPending = false;
+    this.clearPlaybackRetryListener();
+    this.clearAudioDrainRetryListener();
+    this.clearAudioDrainVisibilityListener();
+    this.detachRemoteAudioPlayback();
+    this.remoteAudioTrack = null;
     this.remoteAudio.muted = false;
+    this.audioDrainSource?.disconnect();
+    this.audioDrainGain?.disconnect();
+    const audioDrainContext = this.audioDrainContext;
+    this.audioDrainSource = null;
+    this.audioDrainGain = null;
+    this.audioDrainStream = null;
+    this.audioDrainContext = null;
+    this.audioDrainPreparationAttempted = false;
+    this.audioDrainResumePromise = null;
+    this.audioDrainResumeAttempt += 1;
+    this.audioDrainFailureReported = false;
+    void audioDrainContext?.close().catch(() => undefined);
 
     this.options = null;
     this.sessionConfigurationStarted = false;

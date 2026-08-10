@@ -86,6 +86,7 @@ Meet 是一个私有部署、供家庭内部使用的 AI 实时语音角色扮�
 - [实时语音模型调研](docs/research/realtime-models-2026-08-08.md)
 - [已确认的产品与模型决策](docs/decisions/0001-product-and-model-strategy.md)
 - [业务开发与第一版默认实时模型决策](docs/decisions/0025-business-development-and-default-realtime-model.md)
+- [Qwen WebSocket PCM 与确定性打断决策](docs/decisions/0026-qwen-websocket-pcm-playback.md)
 
 ## 本地运行
 

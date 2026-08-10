@@ -1,0 +1,921 @@
+import {
+  parseQwenServerEvent,
+  qwenErrorEventSchema,
+  qwenInputAudioBufferCommittedEventSchema,
+  qwenResponseAudioDeltaEventSchema,
+  qwenResponseCreateEventSchema,
+  qwenResponseCreatedEventSchema,
+  qwenResponseDoneEventSchema,
+  qwenSessionUpdateEventSchema,
+  qwenSpeechStartedEventSchema,
+  qwenSpeechStoppedEventSchema,
+  qwenUserTextItemCreateEventSchema,
+  type QwenServerEvent,
+  type RealtimeError,
+} from "@meet/protocol";
+
+import {
+  AudioWorkletMicrophoneCapture,
+  AudioWorkletPcmPlayback,
+  BrowserAudioError,
+  type BrowserPcmError,
+  type MicrophonePcmCaptureOptions,
+  type PcmMicrophoneCapture,
+  type PcmPlaybackOutput,
+} from "./browser-pcm-audio.js";
+import { InterruptiblePcmPlayback } from "./interruptible-pcm-playback.js";
+import type {
+  GenerationPcmSink,
+  TaggedPcmChunk,
+} from "./interruptible-pcm-playback.js";
+import {
+  decodePcm16Base64,
+  encodePcm16Base64,
+  resamplePcm16,
+} from "./pcm-codec.js";
+import {
+  initialQwenProjection,
+  projectQwenEvent,
+  type QwenConversationProjection,
+} from "./qwen-event-state.js";
+import {
+  initialClientSnapshot,
+  type QwenRealtimeCallbacks,
+  type QwenRealtimeOptions,
+  type RealtimeClientSnapshot,
+} from "./QwenRealtimeClient.js";
+
+export type {
+  InputMode,
+  QwenRealtimeCallbacks,
+  QwenRealtimeOptions,
+  RealtimeClientSnapshot,
+} from "./QwenRealtimeClient.js";
+
+const SOCKET_OPEN = 1;
+const DEFAULT_MAX_SOCKET_BUFFERED_BYTES = 512 * 1024;
+const PROVIDER_OUTPUT_SAMPLE_RATE = 24_000;
+
+export type QwenWebSocketClientDependencies = {
+  createSocket?: (url: string) => WebSocket;
+  createPlayback?: (
+    onError: (error: BrowserPcmError) => void,
+  ) => PcmPlaybackOutput;
+  createMicrophone?: (
+    options: MicrophonePcmCaptureOptions,
+  ) => PcmMicrophoneCapture;
+  getLocationHref?: () => string;
+  maxSocketBufferedBytes?: number;
+};
+
+type RelayControlFrame = {
+  type: string;
+  code?: string;
+  message?: string;
+  status?: number;
+};
+
+/**
+ * Qwen WebSocket client with application-owned PCM playback. Unlike the WebRTC
+ * receiver track, each output chunk remains tagged with response_id until it is
+ * consumed, so an interruption can atomically invalidate every old chunk.
+ */
+export class QwenWebSocketRealtimeClient {
+  private socket: WebSocket | null = null;
+  private microphone: PcmMicrophoneCapture | null = null;
+  private playback: PcmPlaybackOutput | null = null;
+  private responseAudio: InterruptiblePcmPlayback | null = null;
+  private projection: QwenConversationProjection = initialQwenProjection;
+  private snapshot: RealtimeClientSnapshot = initialClientSnapshot;
+  private options: QwenRealtimeOptions | null = null;
+  private lifecycle = 0;
+  private manuallyClosing = false;
+  private relayReady = false;
+  private configurationSent = false;
+  private sessionConfigured = false;
+  private initialResponseRequested = false;
+  private responseCreatePending = false;
+  private pushToTalkActive = false;
+  private pendingSpeechIds = new Set<string>();
+  private awaitingCommittedSpeechIds = new Set<string>();
+  private committedSpeechIds = new Set<string>();
+  private seenEventIds = new Set<string>();
+  private socketBackpressureReported = false;
+
+  constructor(
+    private readonly legacyRemoteAudio: HTMLAudioElement,
+    private readonly callbacks: QwenRealtimeCallbacks = {},
+    private readonly dependencies: QwenWebSocketClientDependencies = {},
+  ) {}
+
+  async start(options: QwenRealtimeOptions): Promise<void> {
+    this.teardown();
+    const lifecycle = this.lifecycle;
+    this.manuallyClosing = false;
+    this.options = options;
+    this.projection = { ...initialQwenProjection };
+    this.snapshot = {
+      ...initialClientSnapshot,
+      inputMode: options.inputMode,
+      connection: "requesting_microphone",
+      detail: "正在请求麦克风权限",
+    };
+    this.clearLegacyRemoteAudio();
+    this.emitSnapshot();
+
+    const onAudioError = (error: BrowserPcmError): void => {
+      if (lifecycle !== this.lifecycle) {
+        return;
+      }
+      this.reportError(error.code, error.message);
+    };
+    const playback =
+      this.dependencies.createPlayback?.(onAudioError) ??
+      new AudioWorkletPcmPlayback({ onError: onAudioError });
+    const microphoneOptions: MicrophonePcmCaptureOptions = {
+      deviceId: options.audioInputDeviceId,
+      packetDurationMs: 20,
+      onPacket: (samples) => {
+        if (lifecycle === this.lifecycle) {
+          this.sendMicrophonePacket(samples);
+        }
+      },
+      onError: onAudioError,
+    };
+    const microphone =
+      this.dependencies.createMicrophone?.(microphoneOptions) ??
+      new AudioWorkletMicrophoneCapture(microphoneOptions);
+    this.playback = playback;
+    this.microphone = microphone;
+
+    try {
+      // Both operations are started before awaiting. In particular, playback
+      // resumes its AudioContext while start() still has the call-button gesture.
+      const playbackStart = playback.start();
+      const microphoneStart = microphone.start();
+      await Promise.all([playbackStart, microphoneStart]);
+      if (lifecycle !== this.lifecycle) {
+        return;
+      }
+
+      const resamplingSink = new ProviderOutputPcmSink(playback);
+      this.responseAudio = new InterruptiblePcmPlayback(resamplingSink);
+      this.snapshot = {
+        ...this.snapshot,
+        microphoneLabel: microphone.microphoneLabel,
+      };
+      this.emitSnapshot();
+      this.updateConnection("connecting", "正在建立实时语音连接");
+
+      const url = getCharacterRealtimeWebSocketUrl(
+        options.characterId,
+        this.dependencies.getLocationHref?.(),
+      );
+      const socket =
+        this.dependencies.createSocket?.(url) ?? new WebSocket(url);
+      this.socket = socket;
+      this.bindSocket(socket, lifecycle);
+    } catch (error) {
+      if (lifecycle !== this.lifecycle) {
+        return;
+      }
+      const clientError = normalizeError(error);
+      this.teardown();
+      this.snapshot = {
+        ...this.snapshot,
+        connection: "error",
+        activity: "idle",
+        detail: clientError.message,
+      };
+      this.emitSnapshot();
+      this.callbacks.onError?.({
+        code: clientError.code,
+        message: clientError.message,
+        recoverable: true,
+      });
+      throw clientError;
+    }
+  }
+
+  async close(): Promise<void> {
+    this.manuallyClosing = true;
+    const inputMode = this.snapshot.inputMode;
+    this.teardown();
+    this.snapshot = {
+      ...initialClientSnapshot,
+      connection: "closed",
+      detail: "通话已结束",
+      inputMode,
+    };
+    this.emitSnapshot();
+  }
+
+  setMicrophoneMuted(muted: boolean): void {
+    this.snapshot = { ...this.snapshot, microphoneMuted: muted };
+    this.applyMicrophoneGate();
+    this.emitSnapshot();
+  }
+
+  setPushToTalkActive(active: boolean): void {
+    if (this.snapshot.inputMode !== "push_to_talk") {
+      return;
+    }
+    if (active === this.pushToTalkActive) {
+      return;
+    }
+    if (
+      active &&
+      (this.snapshot.connection !== "active" || this.snapshot.microphoneMuted)
+    ) {
+      return;
+    }
+    this.pushToTalkActive = active;
+    this.applyMicrophoneGate();
+  }
+
+  interrupt(): void {
+    const expectPendingResponse =
+      this.projection.responseActive ||
+      this.responseCreatePending ||
+      this.projection.activity === "thinking" ||
+      this.projection.activity === "user_speaking";
+    const interruptedResponseId =
+      this.responseAudio?.manualInterrupt(expectPendingResponse) ?? null;
+    this.projection = {
+      ...this.projection,
+      activity: "listening",
+      responseActive: false,
+      activeResponseId: null,
+    };
+    this.syncProjectionToSnapshot();
+    if (interruptedResponseId) {
+      this.sendResponseCancel();
+    }
+  }
+
+  sendText(text: string): void {
+    const normalized = text.trim();
+    if (!normalized) {
+      return;
+    }
+    this.sendClientEvent(
+      qwenUserTextItemCreateEventSchema.parse({
+        event_id: createEventId(),
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: normalized }],
+        },
+      }),
+    );
+    try {
+      this.sendClientEvent(
+        qwenResponseCreateEventSchema.parse({
+          event_id: createEventId(),
+          type: "response.create",
+        }),
+      );
+      this.responseCreatePending = true;
+    } catch (error) {
+      this.responseCreatePending = false;
+      throw error;
+    }
+  }
+
+  private bindSocket(socket: WebSocket, lifecycle: number): void {
+    socket.onopen = () => {
+      if (!this.isCurrentSocket(socket, lifecycle)) {
+        return;
+      }
+      this.updateConnection("connecting", "服务端已连接，正在连接千问实时模型");
+    };
+    socket.onmessage = (message) => {
+      if (!this.isCurrentSocket(socket, lifecycle)) {
+        return;
+      }
+      if (typeof message.data !== "string") {
+        this.reportError("INVALID_REALTIME_FRAME", "收到非文本的实时控制帧。");
+        return;
+      }
+      this.handleSocketMessage(message.data);
+    };
+    socket.onerror = () => {
+      if (!this.isCurrentSocket(socket, lifecycle)) {
+        return;
+      }
+      this.responseCreatePending = false;
+      this.reportError("REALTIME_SOCKET_ERROR", "实时语音连接发生网络错误。");
+    };
+    socket.onclose = (event) => {
+      if (!this.isCurrentSocket(socket, lifecycle) || this.manuallyClosing) {
+        return;
+      }
+      this.microphone?.setEnabled(false);
+      this.responseAudio?.reset();
+      this.responseCreatePending = false;
+      if (event.code === 4401 || event.code === 4403) {
+        this.callbacks.onUnauthorized?.();
+      }
+      const detail = event.reason || "实时语音连接已断开，请结束后重新连接。";
+      this.snapshot = {
+        ...this.snapshot,
+        connection: "paused",
+        activity: "idle",
+        detail,
+      };
+      this.emitSnapshot();
+      this.reportError("REALTIME_SOCKET_CLOSED", detail);
+    };
+  }
+
+  private handleSocketMessage(input: string): void {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(input) as unknown;
+    } catch {
+      this.reportError(
+        "INVALID_PROVIDER_EVENT",
+        "收到无法解析的千问实时事件。",
+      );
+      return;
+    }
+
+    const relayFrame = readRelayControlFrame(raw);
+    if (relayFrame) {
+      this.handleRelayControlFrame(relayFrame);
+      return;
+    }
+
+    try {
+      this.handleProviderEvent(parseQwenServerEvent(input));
+    } catch {
+      this.reportError(
+        "INVALID_PROVIDER_EVENT",
+        "收到无法解析的千问实时事件。",
+      );
+    }
+  }
+
+  private handleRelayControlFrame(frame: RelayControlFrame): void {
+    if (frame.type === "relay.ready") {
+      if (!this.relayReady) {
+        this.relayReady = true;
+        this.configureSession();
+      }
+      return;
+    }
+    if (frame.type === "relay.error") {
+      this.responseCreatePending = false;
+      if (frame.status === 401 || frame.status === 403) {
+        this.callbacks.onUnauthorized?.();
+      }
+      this.reportError(
+        frame.code ?? "REALTIME_RELAY_ERROR",
+        frame.message ?? "实时语音中继连接失败。",
+      );
+    }
+    // relay.* frames are local transport control and intentionally never enter
+    // the provider parser, transcript projection, or diagnostics callback.
+  }
+
+  private configureSession(): void {
+    if (this.configurationSent || !this.options || !this.relayReady) {
+      return;
+    }
+    this.configurationSent = true;
+    this.updateConnection("configuring", "正在应用角色和声音设置");
+    this.sendClientEvent(
+      qwenSessionUpdateEventSchema.parse({
+        event_id: createEventId(),
+        type: "session.update",
+        session: {
+          modalities: ["text", "audio"],
+          voice: this.options.voice,
+          input_audio_format: "pcm",
+          output_audio_format: "pcm",
+          instructions: this.options.instructions,
+          max_history_turns: 50,
+          turn_detection: { type: "smart_turn" },
+        },
+      }),
+    );
+  }
+
+  private handleProviderEvent(event: QwenServerEvent): void {
+    if (event.event_id && this.seenEventIds.has(event.event_id)) {
+      return;
+    }
+    if (event.event_id) {
+      this.rememberEventId(event.event_id);
+    }
+
+    this.callbacks.onProviderEvent?.(
+      "server",
+      summarizeAudioEventForDiagnostics(event),
+    );
+
+    let shouldProjectEvent = true;
+
+    const speechStarted = qwenSpeechStartedEventSchema.safeParse(event);
+    if (speechStarted.success) {
+      this.pendingSpeechIds.add(speechStarted.data.item_id);
+      if (this.pendingSpeechIds.size === 1) {
+        this.responseAudio?.speechStarted();
+      }
+      // Audio has already been invalidated. Preserve the draft accumulated up
+      // to the interruption, but reject all later transcript events until the
+      // response admission state selects an id again.
+      this.projection = {
+        ...this.projection,
+        responseActive: false,
+        activeResponseId: null,
+      };
+    }
+
+    const speechStopped = qwenSpeechStoppedEventSchema.safeParse(event);
+    if (speechStopped.success) {
+      if (speechStopped.data.reason !== "turn_invalid") {
+        this.awaitingCommittedSpeechIds.add(speechStopped.data.item_id);
+      } else {
+        this.awaitingCommittedSpeechIds.delete(speechStopped.data.item_id);
+        this.committedSpeechIds.delete(speechStopped.data.item_id);
+      }
+      this.pendingSpeechIds.delete(speechStopped.data.item_id);
+      if (
+        this.pendingSpeechIds.size === 0 &&
+        this.awaitingCommittedSpeechIds.size === 0
+      ) {
+        const restoredResponseId =
+          this.responseAudio?.resumeAfterInvalidTurn() ?? null;
+        if (restoredResponseId) {
+          this.projection = {
+            ...this.projection,
+            responseActive: true,
+            activeResponseId: restoredResponseId,
+          };
+        }
+      }
+      this.tryCommitSpeechBoundary();
+    }
+
+    const speechCommitted =
+      qwenInputAudioBufferCommittedEventSchema.safeParse(event);
+    if (speechCommitted.success) {
+      const itemId = speechCommitted.data.item_id;
+      if (
+        this.pendingSpeechIds.has(itemId) ||
+        this.awaitingCommittedSpeechIds.has(itemId)
+      ) {
+        this.committedSpeechIds.add(itemId);
+        this.tryCommitSpeechBoundary();
+      }
+    }
+
+    const responseCreated = qwenResponseCreatedEventSchema.safeParse(event);
+    if (responseCreated.success) {
+      this.responseCreatePending = false;
+      const admission = this.responseAudio?.beginResponse(
+        responseCreated.data.response.id,
+      );
+      if (!admission?.accepted) {
+        shouldProjectEvent = false;
+      }
+      if (admission?.shouldCancel) {
+        this.sendResponseCancel();
+      }
+    }
+
+    const audioDelta = readResponseAudioDelta(event);
+    if (audioDelta) {
+      try {
+        const samples = decodePcm16Base64(audioDelta.delta);
+        const result = this.responseAudio?.enqueue(
+          audioDelta.responseId,
+          samples,
+        );
+        if (result?.shouldCancel) {
+          this.sendResponseCancel();
+        }
+        this.playback?.ensureRunning();
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "千问返回了无效的 PCM 音频。";
+        this.reportError("INVALID_PROVIDER_AUDIO", message);
+      }
+    }
+
+    const responseDone = qwenResponseDoneEventSchema.safeParse(event);
+    if (responseDone.success) {
+      this.responseAudio?.responseDone(
+        responseDone.data.response.id,
+        responseDone.data.response.status === "cancelled",
+        responseDone.data.response.status === "cancelled"
+          ? responseDone.data.response.status_details.reason
+          : undefined,
+      );
+    }
+
+    const transcriptResponseId = readTranscriptResponseId(event);
+    if (
+      transcriptResponseId &&
+      this.responseAudio?.currentResponseId !== transcriptResponseId
+    ) {
+      shouldProjectEvent = false;
+    }
+
+    const result = shouldProjectEvent
+      ? projectQwenEvent(this.projection, event)
+      : { state: this.projection, commits: [] };
+    this.projection = result.state;
+    for (const transcript of result.commits) {
+      this.callbacks.onTranscript?.(transcript);
+    }
+
+    if (event.type === "session.updated") {
+      this.activateConfiguredSession();
+    }
+
+    const providerError = qwenErrorEventSchema.safeParse(event);
+    if (providerError.success) {
+      this.responseCreatePending = false;
+      const error = providerError.data.error;
+      this.reportError(
+        error?.code ?? error?.type ?? "QWEN_REALTIME_ERROR",
+        error?.message ?? "千问实时会话返回错误。",
+      );
+    }
+
+    this.syncProjectionToSnapshot();
+  }
+
+  private activateConfiguredSession(): void {
+    if (this.sessionConfigured || !this.relayReady) {
+      return;
+    }
+    this.sessionConfigured = true;
+    this.updateConnection(
+      "active",
+      this.microphone?.microphoneLabel
+        ? `已连接，麦克风：${this.microphone.microphoneLabel}`
+        : "已连接，可以开始说话",
+    );
+    this.applyMicrophoneGate();
+
+    if (this.options?.assistantStarts && !this.initialResponseRequested) {
+      this.initialResponseRequested = true;
+      this.sendText(
+        "请根据角色设定主动、自然地向我打招呼并开始本次对话，不要提及这条指令。",
+      );
+    }
+  }
+
+  private tryCommitSpeechBoundary(): void {
+    if (
+      this.pendingSpeechIds.size > 0 ||
+      this.awaitingCommittedSpeechIds.size === 0
+    ) {
+      return;
+    }
+    for (const itemId of this.awaitingCommittedSpeechIds) {
+      if (!this.committedSpeechIds.has(itemId)) {
+        return;
+      }
+    }
+
+    this.responseAudio?.confirmSpeechInterruption();
+    this.responseAudio?.commitSpeechTurn();
+    for (const itemId of this.awaitingCommittedSpeechIds) {
+      this.committedSpeechIds.delete(itemId);
+    }
+    this.awaitingCommittedSpeechIds.clear();
+  }
+
+  private sendMicrophonePacket(samples: Int16Array): void {
+    const socket = this.socket;
+    if (
+      !socket ||
+      socket.readyState !== SOCKET_OPEN ||
+      !this.relayReady ||
+      !this.sessionConfigured
+    ) {
+      return;
+    }
+
+    const maximumBufferedBytes =
+      this.dependencies.maxSocketBufferedBytes ??
+      DEFAULT_MAX_SOCKET_BUFFERED_BYTES;
+    if (socket.bufferedAmount >= maximumBufferedBytes) {
+      if (!this.socketBackpressureReported) {
+        this.socketBackpressureReported = true;
+        this.reportError(
+          "MICROPHONE_SOCKET_BACKPRESSURE",
+          "网络发送积压，已丢弃过时的麦克风音频。",
+        );
+      }
+      return;
+    }
+    if (
+      this.socketBackpressureReported &&
+      socket.bufferedAmount < maximumBufferedBytes / 2
+    ) {
+      this.socketBackpressureReported = false;
+    }
+
+    const event = {
+      event_id: createEventId(),
+      type: "input_audio_buffer.append",
+      audio: encodePcm16Base64(samples),
+    };
+    const payload = JSON.stringify(event);
+    if (socket.bufferedAmount + payload.length >= maximumBufferedBytes) {
+      if (!this.socketBackpressureReported) {
+        this.socketBackpressureReported = true;
+        this.reportError(
+          "MICROPHONE_SOCKET_BACKPRESSURE",
+          "网络发送积压，已丢弃过时的麦克风音频。",
+        );
+      }
+      return;
+    }
+    try {
+      socket.send(payload);
+    } catch {
+      this.reportError(
+        "MICROPHONE_SEND_FAILED",
+        "麦克风音频发送失败，请检查网络连接。",
+      );
+    }
+  }
+
+  private sendClientEvent(event: unknown): void {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== SOCKET_OPEN || !this.relayReady) {
+      throw new QwenWebSocketClientError(
+        "REALTIME_SOCKET_NOT_READY",
+        "实时语音连接尚未就绪。",
+      );
+    }
+    socket.send(JSON.stringify(event));
+    this.callbacks.onProviderEvent?.("client", event);
+  }
+
+  private sendResponseCancel(): void {
+    if (!this.isSocketOpen() || !this.relayReady) {
+      return;
+    }
+    try {
+      this.sendClientEvent({
+        event_id: createEventId(),
+        type: "response.cancel",
+      });
+    } catch {
+      this.reportError(
+        "RESPONSE_CANCEL_FAILED",
+        "停止角色发言失败，请检查实时连接。",
+      );
+    }
+  }
+
+  private isSocketOpen(): boolean {
+    return this.socket?.readyState === SOCKET_OPEN;
+  }
+
+  private isCurrentSocket(socket: WebSocket, lifecycle: number): boolean {
+    return this.socket === socket && this.lifecycle === lifecycle;
+  }
+
+  private applyMicrophoneGate(): void {
+    const modeAllowsAudio =
+      this.snapshot.inputMode === "hands_free" || this.pushToTalkActive;
+    this.microphone?.setEnabled(
+      this.sessionConfigured &&
+        this.snapshot.connection === "active" &&
+        !this.snapshot.microphoneMuted &&
+        modeAllowsAudio,
+    );
+  }
+
+  private syncProjectionToSnapshot(): void {
+    this.snapshot = {
+      ...this.snapshot,
+      activity: this.projection.activity,
+      userCaption: this.projection.userDraft,
+      assistantCaption: this.projection.assistantDraft,
+    };
+    this.emitSnapshot();
+  }
+
+  private updateConnection(
+    connection: RealtimeClientSnapshot["connection"],
+    detail: string,
+  ): void {
+    this.snapshot = { ...this.snapshot, connection, detail };
+    this.emitSnapshot();
+  }
+
+  private emitSnapshot(): void {
+    this.callbacks.onSnapshot?.({ ...this.snapshot });
+  }
+
+  private reportError(code: string, message: string): void {
+    const error: RealtimeError = { code, message, recoverable: true };
+    this.callbacks.onError?.(error);
+  }
+
+  private rememberEventId(eventId: string): void {
+    this.seenEventIds.add(eventId);
+    if (this.seenEventIds.size > 256) {
+      const oldest = this.seenEventIds.values().next().value;
+      if (oldest) {
+        this.seenEventIds.delete(oldest);
+      }
+    }
+  }
+
+  private clearLegacyRemoteAudio(): void {
+    this.legacyRemoteAudio.muted = true;
+    this.legacyRemoteAudio.pause();
+    this.legacyRemoteAudio.srcObject = null;
+  }
+
+  private teardown(): void {
+    this.lifecycle += 1;
+    this.microphone?.setEnabled(false);
+    void this.microphone?.stop();
+    this.microphone = null;
+
+    this.responseAudio?.reset();
+    this.responseAudio = null;
+    void this.playback?.stop();
+    this.playback = null;
+
+    if (this.socket) {
+      this.socket.onopen = null;
+      this.socket.onmessage = null;
+      this.socket.onerror = null;
+      this.socket.onclose = null;
+      if (
+        this.socket.readyState === 0 ||
+        this.socket.readyState === SOCKET_OPEN
+      ) {
+        this.socket.close(1000, "client closing");
+      }
+    }
+    this.socket = null;
+    this.clearLegacyRemoteAudio();
+
+    this.options = null;
+    this.projection = { ...initialQwenProjection };
+    this.relayReady = false;
+    this.configurationSent = false;
+    this.sessionConfigured = false;
+    this.initialResponseRequested = false;
+    this.responseCreatePending = false;
+    this.pushToTalkActive = false;
+    this.pendingSpeechIds.clear();
+    this.awaitingCommittedSpeechIds.clear();
+    this.committedSpeechIds.clear();
+    this.seenEventIds.clear();
+    this.socketBackpressureReported = false;
+  }
+}
+
+class ProviderOutputPcmSink implements GenerationPcmSink {
+  constructor(private readonly output: PcmPlaybackOutput) {}
+
+  reset(generation: number): void {
+    this.output.reset(generation);
+  }
+
+  enqueue(chunk: TaggedPcmChunk): boolean {
+    return this.output.enqueue({
+      ...chunk,
+      samples: resamplePcm16(
+        chunk.samples,
+        PROVIDER_OUTPUT_SAMPLE_RATE,
+        this.output.outputSampleRate,
+      ),
+    });
+  }
+}
+
+export function getCharacterRealtimeWebSocketUrl(
+  characterId: string,
+  locationHref = typeof window === "undefined"
+    ? "http://localhost/"
+    : window.location.href,
+): string {
+  const url = new URL(
+    `/api/characters/${encodeURIComponent(characterId)}/realtime/websocket`,
+    locationHref,
+  );
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
+}
+
+function readRelayControlFrame(input: unknown): RelayControlFrame | null {
+  if (!isRecord(input) || typeof input.type !== "string") {
+    return null;
+  }
+  if (!input.type.startsWith("relay.")) {
+    return null;
+  }
+  return {
+    type: input.type,
+    code: typeof input.code === "string" ? input.code : undefined,
+    message: typeof input.message === "string" ? input.message : undefined,
+    status: typeof input.status === "number" ? input.status : undefined,
+  };
+}
+
+function readResponseAudioDelta(
+  event: QwenServerEvent,
+): { responseId: string; delta: string } | null {
+  const parsed = qwenResponseAudioDeltaEventSchema.safeParse(event);
+  if (!parsed.success) {
+    return null;
+  }
+  return {
+    responseId: parsed.data.response_id,
+    delta: parsed.data.delta,
+  };
+}
+
+function readTranscriptResponseId(event: QwenServerEvent): string | null {
+  if (
+    (event.type === "response.audio_transcript.delta" ||
+      event.type === "response.audio_transcript.done") &&
+    typeof event.response_id === "string"
+  ) {
+    return event.response_id;
+  }
+  return null;
+}
+
+function summarizeAudioEventForDiagnostics(event: QwenServerEvent): unknown {
+  const audio = readResponseAudioDelta(event);
+  if (!audio) {
+    return event;
+  }
+  return {
+    ...event,
+    delta: `[PCM16 base64 ${audio.delta.length} chars]`,
+  };
+}
+
+function isRecord(input: unknown): input is Record<string, unknown> {
+  return typeof input === "object" && input !== null;
+}
+
+function createEventId(): string {
+  return `event_${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
+class QwenWebSocketClientError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "QwenWebSocketClientError";
+  }
+}
+
+function normalizeError(error: unknown): QwenWebSocketClientError {
+  if (error instanceof QwenWebSocketClientError) {
+    return error;
+  }
+  if (error instanceof BrowserAudioError) {
+    return new QwenWebSocketClientError(error.code, error.message);
+  }
+  if (
+    typeof DOMException !== "undefined" &&
+    error instanceof DOMException &&
+    error.name === "NotAllowedError"
+  ) {
+    return new QwenWebSocketClientError(
+      "MICROPHONE_PERMISSION_DENIED",
+      "麦克风权限被拒绝，请在浏览器设置中允许后重试。",
+    );
+  }
+  if (
+    typeof DOMException !== "undefined" &&
+    error instanceof DOMException &&
+    (error.name === "NotFoundError" || error.name === "OverconstrainedError")
+  ) {
+    return new QwenWebSocketClientError(
+      "MICROPHONE_UNAVAILABLE",
+      "选择的麦克风不可用，请刷新设备后重新选择。",
+    );
+  }
+  if (error instanceof Error) {
+    return new QwenWebSocketClientError("REALTIME_CLIENT_ERROR", error.message);
+  }
+  return new QwenWebSocketClientError(
+    "REALTIME_CLIENT_ERROR",
+    "实时会话发生未知错误。",
+  );
+}

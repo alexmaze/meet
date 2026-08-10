@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { once } from "node:events";
+import WebSocket, { WebSocketServer } from "ws";
 import {
   BUILTIN_CHARACTER_PRESETS,
   BUILTIN_VOICE_PROFILES,
@@ -96,6 +98,7 @@ const characterRepository = {
   },
 } satisfies CharacterRepository;
 const characterSessionUrl = `/api/characters/${testCharacter.character.id}/realtime/sessions`;
+const characterWebSocketUrl = `/api/characters/${testCharacter.character.id}/realtime/websocket`;
 
 describe("Meet API", () => {
   it("returns authenticated realtime config without secrets", async () => {
@@ -171,6 +174,297 @@ describe("Meet API", () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain("application/sdp");
     expect(response.body).toBe(answer);
+    await app.close();
+  });
+
+  it("authenticates and relays Qwen WebSocket events without exposing the API key", async () => {
+    const upstreamServer = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await once(upstreamServer, "listening");
+    const address = upstreamServer.address();
+    if (typeof address === "string" || address === null) {
+      throw new Error("测试 WebSocket 服务未监听 TCP 端口。");
+    }
+
+    let resolveUpstreamConnection!: (socket: WebSocket) => void;
+    const upstreamConnection = new Promise<WebSocket>((resolve) => {
+      resolveUpstreamConnection = resolve;
+    });
+    let authorization: string | undefined;
+    upstreamServer.once("connection", (socket, request) => {
+      authorization = request.headers.authorization;
+      resolveUpstreamConnection(socket);
+    });
+
+    const qwenWebSocketFactory = vi.fn((url: string, options) => {
+      expect(url).toBe(
+        "wss://realtime.example.com/api-ws/v1/realtime?model=qwen-audio-3.0-realtime-plus",
+      );
+      return new WebSocket(`ws://127.0.0.1:${address.port}`, options);
+    });
+    const app = await buildApp({
+      config,
+      authRepository,
+      characterRepository,
+      qwenWebSocketFactory,
+      logger: false,
+    });
+    await app.ready();
+    const runtimeResponse = await app.inject({
+      method: "GET",
+      url: `/api/characters/${testCharacter.character.id}/runtime`,
+      headers: authHeaders,
+    });
+    const runtime = runtimeResponse.json<{
+      realtime: { voice: string; instructions: string };
+    }>().realtime;
+
+    let resolveReady!: () => void;
+    const relayReady = new Promise<void>((resolve) => {
+      resolveReady = resolve;
+    });
+    let resolveRelayedResponse!: (event: Record<string, unknown>) => void;
+    const relayedResponse = new Promise<Record<string, unknown>>((resolve) => {
+      resolveRelayedResponse = resolve;
+    });
+    let resolveRelayError!: (event: Record<string, unknown>) => void;
+    const relayError = new Promise<Record<string, unknown>>((resolve) => {
+      resolveRelayError = resolve;
+    });
+    const client = await app.injectWS(
+      characterWebSocketUrl,
+      {
+        headers: {
+          ...authHeaders,
+          host: "meet.test",
+          origin: "http://meet.test",
+        },
+      },
+      {
+        onInit(socket) {
+          socket.on("message", (data) => {
+            const event = JSON.parse(data.toString()) as Record<
+              string,
+              unknown
+            >;
+            if (event.type === "relay.ready") resolveReady();
+            if (event.type === "response.audio.delta") {
+              resolveRelayedResponse(event);
+            }
+            if (event.type === "relay.error") resolveRelayError(event);
+          });
+        },
+      },
+    );
+    const upstream = await withTimeout(
+      upstreamConnection,
+      "upstream connection",
+    );
+    await withTimeout(relayReady, "relay ready");
+
+    const sessionUpdate = JSON.stringify({
+      event_id: "event-session",
+      type: "session.update",
+      session: {
+        modalities: ["text", "audio"],
+        voice: runtime.voice,
+        input_audio_format: "pcm",
+        output_audio_format: "pcm",
+        instructions: runtime.instructions,
+        max_history_turns: 50,
+        turn_detection: { type: "smart_turn" },
+      },
+    });
+    const upstreamSessionUpdate = once(upstream, "message");
+    client.send(sessionUpdate);
+    const [forwardedSessionUpdate] = await withTimeout(
+      upstreamSessionUpdate,
+      "session update relay",
+    );
+    expect(forwardedSessionUpdate.toString()).toBe(sessionUpdate);
+
+    const clientEvent = JSON.stringify({
+      event_id: "event-1",
+      type: "input_audio_buffer.append",
+      audio: "AQIDBA==",
+    });
+    const upstreamMessage = once(upstream, "message");
+    client.send(clientEvent);
+    const [forwarded] = await withTimeout(
+      upstreamMessage,
+      "client event relay",
+    );
+    expect(forwarded.toString()).toBe(clientEvent);
+
+    upstream.send(
+      JSON.stringify({
+        type: "response.audio.delta",
+        response_id: "response-1",
+        delta: "base64-response-audio",
+      }),
+    );
+    await expect(
+      withTimeout(relayedResponse, "upstream event relay"),
+    ).resolves.toMatchObject({
+      type: "response.audio.delta",
+      response_id: "response-1",
+      delta: "base64-response-audio",
+    });
+    expect(authorization).toBe("Bearer never-return-this-key");
+    expect(qwenWebSocketFactory).toHaveBeenCalledTimes(1);
+
+    const clientClosed = once(client, "close");
+    const upstreamClosed = once(upstream, "close");
+    // Session identity (voice/instructions/turn mode) is immutable for this
+    // relay; a second update is a policy violation rather than a way to mutate
+    // the provider session after authentication.
+    client.send(sessionUpdate);
+    await expect(
+      withTimeout(relayError, "relay policy error"),
+    ).resolves.toMatchObject({
+      type: "relay.error",
+      code: "INVALID_CLIENT_EVENT",
+    });
+    await withTimeout(clientClosed, "client policy close");
+    await withTimeout(upstreamClosed, "linked upstream close");
+    await app.close();
+    await closeWebSocketServer(upstreamServer);
+  });
+
+  it("rejects cross-origin Qwen WebSocket upgrades before opening upstream", async () => {
+    const qwenWebSocketFactory = vi.fn();
+    const app = await buildApp({
+      config,
+      authRepository,
+      characterRepository,
+      qwenWebSocketFactory,
+      logger: false,
+    });
+    await app.ready();
+
+    await expect(
+      app.injectWS(characterWebSocketUrl, {
+        headers: {
+          ...authHeaders,
+          host: "meet.test",
+          origin: "https://evil.example",
+        },
+      }),
+    ).rejects.toThrow("Unexpected server response: 403");
+    expect(qwenWebSocketFactory).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("rejects anonymous Qwen WebSocket upgrades before opening upstream", async () => {
+    const qwenWebSocketFactory = vi.fn();
+    const app = await buildApp({
+      config,
+      authRepository,
+      characterRepository,
+      qwenWebSocketFactory,
+      logger: false,
+    });
+    await app.ready();
+
+    await expect(
+      app.injectWS(characterWebSocketUrl, {
+        headers: { host: "meet.test", origin: "http://meet.test" },
+      }),
+    ).rejects.toThrow("Unexpected server response: 401");
+    expect(qwenWebSocketFactory).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("checks character visibility before opening the Qwen WebSocket", async () => {
+    const qwenWebSocketFactory = vi.fn();
+    const hiddenCharacterRepository = {
+      ...characterRepository,
+      async findVisible() {
+        return null;
+      },
+    } satisfies CharacterRepository;
+    const app = await buildApp({
+      config,
+      authRepository,
+      characterRepository: hiddenCharacterRepository,
+      qwenWebSocketFactory,
+      logger: false,
+    });
+    await app.ready();
+
+    await expect(
+      app.injectWS(characterWebSocketUrl, {
+        headers: {
+          ...authHeaders,
+          host: "meet.test",
+          origin: "http://meet.test",
+        },
+      }),
+    ).rejects.toThrow("Unexpected server response: 404");
+    expect(qwenWebSocketFactory).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("rejects a character model outside the Qwen Audio allowlist", async () => {
+    const qwenWebSocketFactory = vi.fn();
+    const invalidModelCharacter = {
+      ...testCharacter,
+      providerProfile: {
+        ...testCharacter.providerProfile,
+        model: "qwen3.5-omni-plus-realtime",
+      },
+    };
+    const invalidModelRepository = {
+      ...characterRepository,
+      async findVisible() {
+        return invalidModelCharacter;
+      },
+    } satisfies CharacterRepository;
+    const app = await buildApp({
+      config,
+      authRepository,
+      characterRepository: invalidModelRepository,
+      qwenWebSocketFactory,
+      logger: false,
+    });
+    await app.ready();
+
+    await expect(
+      app.injectWS(characterWebSocketUrl, {
+        headers: {
+          ...authHeaders,
+          host: "meet.test",
+          origin: "http://meet.test",
+        },
+      }),
+    ).rejects.toThrow("Unexpected server response: 409");
+    expect(qwenWebSocketFactory).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("rejects Qwen WebSocket upgrades when provider credentials are missing", async () => {
+    const qwenWebSocketFactory = vi.fn();
+    const app = await buildApp({
+      config: {
+        ...config,
+        qwen: { ...config.qwen, apiKey: undefined },
+      },
+      authRepository,
+      characterRepository,
+      qwenWebSocketFactory,
+      logger: false,
+    });
+    await app.ready();
+
+    await expect(
+      app.injectWS(characterWebSocketUrl, {
+        headers: {
+          ...authHeaders,
+          host: "meet.test",
+          origin: "http://meet.test",
+        },
+      }),
+    ).rejects.toThrow("Unexpected server response: 503");
+    expect(qwenWebSocketFactory).not.toHaveBeenCalled();
     await app.close();
   });
 
@@ -315,4 +609,27 @@ function aggregateFromPreset(): CharacterAggregate {
     },
     voiceProfile: { ...voice, createdAt: timestamp, updatedAt: timestamp },
   };
+}
+
+async function closeWebSocketServer(server: WebSocketServer): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+async function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`等待 ${label} 超时。`)),
+          1_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }

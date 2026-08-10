@@ -2,6 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AppConfig } from "../src/config.js";
 import {
+  buildQwenRealtimeWebSocketUrl,
+  isAllowedQwenClientEvent,
+  isAllowedWebSocketOrigin,
+  QWEN_RELAY_MAX_AUDIO_BASE64_CHARACTERS,
+} from "../src/qwen-websocket.js";
+import {
   buildQwenRealtimeUrl,
   exchangeQwenOffer,
   normalizeQwenRealtimeEndpoint,
@@ -95,5 +101,138 @@ describe("Qwen WebRTC gateway", () => {
         fetchFunction,
       ),
     ).resolves.toBe(answer);
+  });
+});
+
+describe("Qwen WebSocket relay", () => {
+  const runtime = { voice: "longanqian", instructions: "测试" };
+
+  it("constructs the allowlisted upstream WebSocket endpoint", () => {
+    expect(
+      buildQwenRealtimeWebSocketUrl(
+        "https://realtime.example.com/",
+        "qwen-audio-3.0-realtime-plus",
+      ).toString(),
+    ).toBe(
+      "wss://realtime.example.com/api-ws/v1/realtime?model=qwen-audio-3.0-realtime-plus",
+    );
+  });
+
+  it("accepts the page origin when it exactly matches the request host", () => {
+    expect(
+      isAllowedWebSocketOrigin({
+        origin: "https://meet.example.com",
+        host: "meet.example.com",
+        remoteAddress: "203.0.113.20",
+        cookieSecure: true,
+      }),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["http://localhost:5173", "127.0.0.1"],
+    ["http://127.0.0.1:5173", "::1"],
+    ["http://192.168.1.20:5173", "::ffff:127.0.0.1"],
+  ])("allows a local Vite proxy origin (%s)", (origin, remoteAddress) => {
+    expect(
+      isAllowedWebSocketOrigin({
+        origin,
+        host: "127.0.0.1:8787",
+        remoteAddress,
+        cookieSecure: false,
+      }),
+    ).toBe(true);
+  });
+
+  it.each([
+    {
+      origin: undefined,
+      host: "meet.example.com",
+      remoteAddress: "127.0.0.1",
+      cookieSecure: false,
+    },
+    {
+      origin: "https://evil.example",
+      host: "meet.example.com",
+      remoteAddress: "203.0.113.20",
+      cookieSecure: true,
+    },
+    {
+      origin: "https://evil.example",
+      host: "127.0.0.1:8787",
+      remoteAddress: "127.0.0.1",
+      cookieSecure: false,
+    },
+    {
+      origin: "http://192.168.1.20:5173",
+      host: "127.0.0.1:8787",
+      remoteAddress: "127.0.0.1",
+      cookieSecure: true,
+    },
+  ])("rejects an unsafe WebSocket origin: $origin", (input) => {
+    expect(isAllowedWebSocketOrigin(input)).toBe(false);
+  });
+
+  it.each([
+    {
+      event_id: "event-session",
+      type: "session.update",
+      session: {
+        modalities: ["audio", "text"],
+        voice: "longanqian",
+        input_audio_format: "pcm",
+        output_audio_format: "pcm",
+        instructions: "测试",
+        max_history_turns: 20,
+        turn_detection: { type: "smart_turn" },
+      },
+    },
+    {
+      event_id: "event-audio",
+      type: "input_audio_buffer.append",
+      audio: "AQIDBA==",
+    },
+    {
+      event_id: "event-text",
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "你好" }],
+      },
+    },
+    { event_id: "event-create", type: "response.create" },
+    { event_id: "event-cancel", type: "response.cancel" },
+  ])("accepts an allowlisted client event: $type", (event) => {
+    expect(
+      isAllowedQwenClientEvent(Buffer.from(JSON.stringify(event)), runtime),
+    ).toBe(true);
+  });
+
+  it.each([
+    { event_id: "event-unknown", type: "session.delete" },
+    { event_id: "event-cancel", type: "response.cancel", extra: true },
+    {
+      event_id: "event-session",
+      type: "session.update",
+      session: {
+        modalities: ["audio", "text"],
+        voice: "unauthorized-voice",
+        input_audio_format: "pcm",
+        output_audio_format: "pcm",
+        instructions: "测试",
+        max_history_turns: 20,
+        turn_detection: { type: "smart_turn" },
+      },
+    },
+    {
+      event_id: "event-audio",
+      type: "input_audio_buffer.append",
+      audio: "A".repeat(QWEN_RELAY_MAX_AUDIO_BASE64_CHARACTERS + 4),
+    },
+  ])("rejects a non-allowlisted client event", (event) => {
+    expect(
+      isAllowedQwenClientEvent(Buffer.from(JSON.stringify(event)), runtime),
+    ).toBe(false);
   });
 });

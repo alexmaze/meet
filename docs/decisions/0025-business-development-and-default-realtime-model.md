@@ -1,8 +1,10 @@
 # ADR-0025：启动业务开发并确定第一版默认实时模型
 
-- 状态：Accepted
+- 状态：部分由 ADR-0026 修订
 - 日期：2026-08-09
 - 修订：ADR-0023、ADR-0024 的验证门槛、Provider Adapter 实施顺序与默认模型确定时点
+
+说明：ADR-0026 将第 2 项中 Qwen-Audio 的默认传输从浏览器直连 WebRTC 改为服务端 WebSocket PCM 中继，以提供可按响应清空的播放队列；默认模型、业务开发顺序与 Provider Adapter 边界继续有效。
 
 ## 背景
 

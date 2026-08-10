@@ -23,6 +23,11 @@ import {
   type CharacterService,
 } from "../characters/service.js";
 import type { AppConfig } from "../config.js";
+import {
+  isAllowedWebSocketOrigin,
+  relayQwenWebSocket,
+  type QwenWebSocketFactory,
+} from "../qwen-websocket.js";
 import { exchangeQwenOffer, QwenGatewayError } from "../qwen.js";
 
 type FetchFunction = typeof globalThis.fetch;
@@ -33,8 +38,17 @@ export async function registerCharacterRoutes(
   auth: AuthService,
   characterService: CharacterService,
   fetchFunction?: FetchFunction,
+  qwenWebSocketFactory?: QwenWebSocketFactory,
 ): Promise<void> {
   const realtimeHandshakeRateLimiter = new LoginRateLimiter(20, 60_000);
+  const websocketContexts = new WeakMap<
+    FastifyRequest,
+    {
+      model: ReturnType<typeof qwenRealtimeModelSchema.parse>;
+      voice: string;
+      instructions: string;
+    }
+  >();
   app.get("/api/characters", async (request, reply) => {
     noStore(reply);
     const actor = await authenticateActor(request, reply, config, auth);
@@ -295,6 +309,107 @@ export async function registerCharacterRoutes(
         }
         return sendCharacterError(reply, error);
       }
+    },
+  );
+
+  app.get(
+    "/api/characters/:characterId/realtime/websocket",
+    {
+      websocket: true,
+      preValidation: async (request, reply) => {
+        noStore(reply);
+        if (
+          !isAllowedWebSocketOrigin({
+            origin: request.headers.origin,
+            host: request.headers.host,
+            remoteAddress: request.raw.socket?.remoteAddress,
+            cookieSecure: config.auth.cookieSecure,
+          })
+        ) {
+          return reply.code(403).send({
+            code: "ORIGIN_FORBIDDEN",
+            message: "实时连接来源无效。",
+          });
+        }
+
+        const actor = await authenticateActor(request, reply, config, auth);
+        if (!actor) return;
+        const params = characterIdParamsSchema.safeParse(request.params);
+        if (!params.success) return invalidCharacterRequest(reply);
+
+        try {
+          // 角色可见性检查必须早于传输参数检查，避免枚举私人角色。
+          const runtime = await characterService.runtime(
+            actor,
+            params.data.characterId,
+          );
+          if (
+            Object.keys((request.query ?? {}) as Record<string, unknown>)
+              .length > 0
+          ) {
+            return invalidCharacterRequest(reply);
+          }
+          const model = qwenRealtimeModelSchema.safeParse(
+            runtime.realtime.model,
+          );
+          if (runtime.realtime.provider !== "qwen" || !model.success) {
+            throw new CharacterServiceError(
+              "CHARACTER_REALTIME_UNAVAILABLE",
+              "该角色当前没有可用的千问实时模型。",
+              409,
+            );
+          }
+          if (!config.qwen.enabled) {
+            return reply.code(503).send({
+              code: "REALTIME_SPIKE_DISABLED",
+              message: "千问实时服务未启用。",
+            });
+          }
+          if (!config.qwen.apiKey || !config.qwen.endpoint) {
+            return reply.code(503).send({
+              code: "QWEN_NOT_CONFIGURED",
+              message: "服务端尚未配置千问实时服务。",
+            });
+          }
+
+          const rateLimit = realtimeHandshakeRateLimiter.consume(
+            `${actor.id}:${request.ip}`,
+          );
+          if (!rateLimit.allowed) {
+            reply.header("Retry-After", String(rateLimit.retryAfterSeconds));
+            return reply.code(429).send({
+              code: "RATE_LIMITED",
+              message: "实时连接尝试过于频繁，请稍后再试。",
+            });
+          }
+
+          websocketContexts.set(request, {
+            model: model.data,
+            voice: runtime.realtime.voice,
+            instructions: runtime.realtime.instructions,
+          });
+        } catch (error) {
+          return sendCharacterError(reply, error);
+        }
+      },
+    },
+    (socket, request) => {
+      const context = websocketContexts.get(request);
+      websocketContexts.delete(request);
+      if (!context) {
+        socket.close(1011, "Realtime context missing");
+        return;
+      }
+      relayQwenWebSocket({
+        client: socket,
+        config: config.qwen,
+        model: context.model,
+        runtime: {
+          voice: context.voice,
+          instructions: context.instructions,
+        },
+        webSocketFactory: qwenWebSocketFactory,
+      });
     },
   );
 }

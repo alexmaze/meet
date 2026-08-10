@@ -3,6 +3,9 @@ import {
   qwenAssistantTranscriptDoneSchema,
   qwenInputTranscriptionCompletedSchema,
   qwenInputTranscriptionDeltaSchema,
+  qwenResponseCreatedEventSchema,
+  qwenResponseDoneEventSchema,
+  qwenSpeechStoppedEventSchema,
   type QwenServerEvent,
   type RealtimeActivity,
 } from "@meet/protocol";
@@ -15,6 +18,7 @@ export type PendingTranscript = {
 export type QwenConversationProjection = {
   activity: RealtimeActivity;
   responseActive: boolean;
+  activeResponseId: string | null;
   userDraft: string;
   assistantDraft: string;
 };
@@ -27,6 +31,7 @@ export type ProjectionResult = {
 export const initialQwenProjection: QwenConversationProjection = {
   activity: "idle",
   responseActive: false,
+  activeResponseId: null,
   userDraft: "",
   assistantDraft: "",
 };
@@ -46,20 +51,35 @@ export function projectQwenEvent(
       state.activity = "user_speaking";
       state.userDraft = "";
       break;
-    case "input_audio_buffer.speech_stopped":
+    case "input_audio_buffer.speech_stopped": {
+      const speechStopped = qwenSpeechStoppedEventSchema.safeParse(event);
       state.activity =
-        event.reason === "turn_invalid"
+        speechStopped.success && speechStopped.data.reason === "turn_invalid"
           ? state.responseActive
             ? "assistant_speaking"
             : "listening"
           : "thinking";
       break;
-    case "response.created":
-      state.responseActive = true;
-      state.activity = "assistant_speaking";
-      state.assistantDraft = "";
+    }
+    case "response.created": {
+      const responseCreated = qwenResponseCreatedEventSchema.safeParse(event);
+      if (responseCreated.success) {
+        state.responseActive = true;
+        state.activeResponseId = responseCreated.data.response.id;
+        state.activity = "assistant_speaking";
+        state.assistantDraft = "";
+      }
       break;
-    case "response.done":
+    }
+    case "response.done": {
+      const responseDone = qwenResponseDoneEventSchema.safeParse(event);
+      if (
+        !responseDone.success ||
+        !state.activeResponseId ||
+        responseDone.data.response.id !== state.activeResponseId
+      ) {
+        break;
+      }
       if (state.assistantDraft.trim()) {
         commits.push({
           speaker: "assistant",
@@ -68,10 +88,12 @@ export function projectQwenEvent(
       }
       state.assistantDraft = "";
       state.responseActive = false;
+      state.activeResponseId = null;
       if (state.activity !== "user_speaking") {
         state.activity = "listening";
       }
       break;
+    }
     case "error":
       state.activity = "idle";
       break;
@@ -95,12 +117,21 @@ export function projectQwenEvent(
   }
 
   const assistantDelta = qwenAssistantTranscriptDeltaSchema.safeParse(event);
-  if (assistantDelta.success) {
+  if (
+    assistantDelta.success &&
+    state.responseActive &&
+    state.activeResponseId === assistantDelta.data.response_id
+  ) {
     state.assistantDraft += assistantDelta.data.delta;
   }
 
   const assistantDone = qwenAssistantTranscriptDoneSchema.safeParse(event);
-  if (assistantDone.success && assistantDone.data.transcript) {
+  if (
+    assistantDone.success &&
+    state.responseActive &&
+    state.activeResponseId === assistantDone.data.response_id &&
+    assistantDone.data.transcript
+  ) {
     state.assistantDraft = assistantDone.data.transcript;
   }
 

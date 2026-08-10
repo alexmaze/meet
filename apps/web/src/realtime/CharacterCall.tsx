@@ -17,10 +17,10 @@ import {
 import { mapRuntimeToLaunchOptions } from "../characters/character-logic.js";
 import {
   initialClientSnapshot,
-  QwenRealtimeClient,
   type InputMode,
   type RealtimeClientSnapshot,
 } from "./QwenRealtimeClient.js";
+import { QwenWebSocketRealtimeClient } from "./QwenWebSocketRealtimeClient.js";
 
 type EventLogEntry = {
   id: string;
@@ -63,7 +63,7 @@ export default function CharacterCall({
   onUnauthorized,
 }: CharacterCallProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
-  const clientRef = useRef<QwenRealtimeClient | null>(null);
+  const clientRef = useRef<QwenWebSocketRealtimeClient | null>(null);
   const [snapshot, setSnapshot] = useState<RealtimeClientSnapshot>(
     initialClientSnapshot,
   );
@@ -189,7 +189,7 @@ export default function CharacterCall({
     setHistory([]);
     setEventLog([]);
 
-    const client = new QwenRealtimeClient(audioRef.current, {
+    const client = new QwenWebSocketRealtimeClient(audioRef.current, {
       onSnapshot: setSnapshot,
       onTranscript: ({ speaker, text }) => {
         setHistory((current) => [

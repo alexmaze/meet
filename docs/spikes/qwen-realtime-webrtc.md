@@ -83,7 +83,9 @@ curl http://127.0.0.1:8787/api/health
 - `response.created`、`response.audio_transcript.delta`、`response.audio_transcript.done`、`response.done`；
 - `error`。
 
-`smart_turn` 判定用户进行了有效插话时，服务端自动取消当前角色响应。客户端收到 `input_audio_buffer.speech_started` 时只进入用户说话状态，不发送 `response.cancel`，避免把“嗯”“啊”等无效附和误当成需要客户端强制取消的插话。只有用户点击手动停止按钮时，客户端才发送 `response.cancel` 并停止当前角色发言。
+`smart_turn` 判定用户进行了有效插话时，服务端自动取消当前角色响应。远端原始 receiver track 始终连接到一个 `GainNode(0)` 的静音 Web Audio drain，让浏览器在插话期间继续消费 RTP；可听输出则使用独立的 track clone。客户端收到 `input_audio_buffer.speech_started` 时立即断开 `<audio>`、停止当前播放 clone 并以 `srcObject = null`、`load()` 重置媒体元素，但不发送 `response.cancel`，避免把“嗯”“啊”等无效附和强制取消为有效插话。页面从后台恢复或用户再次点击页面时必须恢复被浏览器挂起的 `AudioContext`，恢复失败要产生可诊断错误，不能静默失去 drain。
+
+若随后收到 `speech_stopped.reason: "turn_invalid"`，客户端从仍在实时推进的 receiver track 创建新 clone 并恢复输出；有效插话则继续关闭播放管线。`response.created` 只表示新一轮推理开始，客户端必须记录其 `response.id`，等同一响应的首个 `response.audio_transcript.delta` 到达后才重建播放流，不能在 `response.created` 上直接放音。迟到且 ID 不匹配的旧 `response.done` 不得覆盖新响应状态或再次关闭新播放流。只有用户点击手动停止按钮时，客户端才显式发送 `response.cancel`；即使供应商已经结束生成但浏览器仍有缓冲音频，按钮也必须先立即重置本地播放。
 
 `input_audio_buffer.speech_stopped.reason` 为 `turn_invalid` 时，本次声音不构成有效轮次：没有活动角色回复则回到 `listening`，原回复仍活动时恢复为 `assistant_speaking`。其他结束原因进入思考状态，等待服务端创建新响应。
 

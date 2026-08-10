@@ -1,4 +1,5 @@
 import fastifyCookie from "@fastify/cookie";
+import fastifyWebsocket from "@fastify/websocket";
 import { createDatabaseClient, type DatabaseClient } from "@meet/database";
 import Fastify, { type FastifyInstance } from "fastify";
 
@@ -12,6 +13,10 @@ import { loadConfig, type AppConfig } from "./config.js";
 import { PostgresMemberRepository } from "./members/postgres-repository.js";
 import type { AdminMemberRepository } from "./members/repository.js";
 import { MemberService } from "./members/service.js";
+import {
+  QWEN_RELAY_CLIENT_MAX_MESSAGE_BYTES,
+  type QwenWebSocketFactory,
+} from "./qwen-websocket.js";
 import { registerAdminMemberRoutes } from "./routes/admin-members.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerCharacterRoutes } from "./routes/characters.js";
@@ -26,6 +31,7 @@ export type BuildAppOptions = {
   memberRepository?: AdminMemberRepository | null;
   characterRepository?: CharacterRepository | null;
   databaseClient?: DatabaseClient | null;
+  qwenWebSocketFactory?: QwenWebSocketFactory;
   logger?: boolean;
 };
 
@@ -94,6 +100,12 @@ export async function buildApp(
   });
 
   await app.register(fastifyCookie, { hook: "onRequest" });
+  await app.register(fastifyWebsocket, {
+    options: {
+      maxPayload: QWEN_RELAY_CLIENT_MAX_MESSAGE_BYTES,
+      perMessageDeflate: false,
+    },
+  });
   const auth = new AuthService(authRepository, config.auth.sessionTtlMs);
   const members = new MemberService(memberRepository);
   const characters = new CharacterService(characterRepository);
@@ -122,6 +134,7 @@ export async function buildApp(
     auth,
     characters,
     options.fetchFunction,
+    options.qwenWebSocketFactory,
   );
   await registerRealtimeRoutes(app, config, auth);
   return app;

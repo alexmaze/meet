@@ -1,0 +1,491 @@
+import { describe, expect, it, vi } from "vitest";
+
+import type {
+  MicrophonePcmCaptureOptions,
+  PcmMicrophoneCapture,
+  PcmPlaybackOutput,
+} from "./browser-pcm-audio.js";
+import type { TaggedPcmChunk } from "./interruptible-pcm-playback.js";
+import { encodePcm16Base64 } from "./pcm-codec.js";
+import {
+  QwenWebSocketRealtimeClient,
+  type QwenWebSocketClientDependencies,
+  type RealtimeClientSnapshot,
+} from "./QwenWebSocketRealtimeClient.js";
+
+class FakeSocket {
+  readyState = 0;
+  bufferedAmount = 0;
+  sent: string[] = [];
+  onopen: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
+
+  send(payload: string): void {
+    this.sent.push(payload);
+  }
+
+  close(): void {
+    this.readyState = 3;
+  }
+
+  open(): void {
+    this.readyState = 1;
+    this.onopen?.(new Event("open"));
+  }
+
+  receive(value: unknown): void {
+    this.onmessage?.(
+      new MessageEvent("message", { data: JSON.stringify(value) }),
+    );
+  }
+}
+
+class FakeMicrophone implements PcmMicrophoneCapture {
+  readonly microphoneLabel = "测试麦克风";
+  enabled = false;
+  stopped = false;
+
+  constructor(private readonly options: MicrophonePcmCaptureOptions) {}
+
+  async start(): Promise<void> {}
+
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+  }
+
+  emit(samples: Int16Array): void {
+    if (this.enabled) {
+      this.options.onPacket(samples);
+    }
+  }
+}
+
+class FakePlayback implements PcmPlaybackOutput {
+  readonly outputSampleRate = 24_000;
+  generation = 0;
+  chunks: TaggedPcmChunk[] = [];
+
+  async start(): Promise<void> {}
+
+  reset(generation: number): void {
+    this.generation = generation;
+    this.chunks = [];
+  }
+
+  enqueue(chunk: TaggedPcmChunk): boolean {
+    if (chunk.generation !== this.generation) {
+      return false;
+    }
+    this.chunks.push({ ...chunk, samples: chunk.samples.slice() });
+    return true;
+  }
+
+  ensureRunning(): void {}
+
+  async stop(): Promise<void> {}
+}
+
+function createHarness(maxSocketBufferedBytes = 1024): {
+  client: QwenWebSocketRealtimeClient;
+  sockets: FakeSocket[];
+  microphones: FakeMicrophone[];
+  playbacks: FakePlayback[];
+  providerEvents: unknown[];
+  errors: string[];
+  snapshots: RealtimeClientSnapshot[];
+} {
+  const sockets: FakeSocket[] = [];
+  const microphones: FakeMicrophone[] = [];
+  const playbacks: FakePlayback[] = [];
+  const providerEvents: unknown[] = [];
+  const errors: string[] = [];
+  const snapshots: RealtimeClientSnapshot[] = [];
+  const dependencies: QwenWebSocketClientDependencies = {
+    createSocket: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+    createPlayback: () => {
+      const playback = new FakePlayback();
+      playbacks.push(playback);
+      return playback;
+    },
+    createMicrophone: (options) => {
+      const microphone = new FakeMicrophone(options);
+      microphones.push(microphone);
+      return microphone;
+    },
+    getLocationHref: () => "https://meet.example.test/call",
+    maxSocketBufferedBytes,
+  };
+  const audio = {
+    muted: false,
+    srcObject: null,
+    pause: vi.fn(),
+  } as unknown as HTMLAudioElement;
+  const client = new QwenWebSocketRealtimeClient(
+    audio,
+    {
+      onProviderEvent: (_direction, event) => providerEvents.push(event),
+      onError: (error) => errors.push(error.code),
+      onSnapshot: (snapshot) => snapshots.push(snapshot),
+    },
+    dependencies,
+  );
+  return {
+    client,
+    sockets,
+    microphones,
+    playbacks,
+    providerEvents,
+    errors,
+    snapshots,
+  };
+}
+
+async function startClient(
+  client: QwenWebSocketRealtimeClient,
+  assistantStarts = false,
+): Promise<void> {
+  await client.start({
+    characterId: "character/one",
+    voice: "longanqian",
+    instructions: "保持自然、简短。",
+    inputMode: "hands_free",
+    assistantStarts,
+  });
+}
+
+describe("QwenWebSocketRealtimeClient", () => {
+  it("waits for relay.ready before session.update and excludes relay frames from provider events", async () => {
+    const harness = createHarness();
+    await startClient(harness.client);
+    const socket = harness.sockets[0];
+    const microphone = harness.microphones[0];
+    expect(socket).toBeDefined();
+    expect(microphone).toBeDefined();
+
+    socket?.open();
+    expect(socket?.sent).toEqual([]);
+    socket?.receive({ type: "relay.ready" });
+
+    expect(JSON.parse(socket?.sent[0] ?? "{}")).toMatchObject({
+      type: "session.update",
+      session: { input_audio_format: "pcm", output_audio_format: "pcm" },
+    });
+    expect(harness.providerEvents).not.toContainEqual({ type: "relay.ready" });
+    expect(microphone?.enabled).toBe(false);
+
+    socket?.receive({ type: "session.updated" });
+    expect(microphone?.enabled).toBe(true);
+  });
+
+  it("ignores messages from a socket replaced by a newer start", async () => {
+    const harness = createHarness();
+    await startClient(harness.client);
+    const staleSocket = harness.sockets[0];
+    const staleMessageHandler = staleSocket?.onmessage;
+
+    await startClient(harness.client);
+    const currentSocket = harness.sockets[1];
+    currentSocket?.open();
+    staleMessageHandler?.(
+      new MessageEvent("message", {
+        data: JSON.stringify({ type: "relay.ready" }),
+      }),
+    );
+
+    expect(staleSocket?.sent).toEqual([]);
+    expect(currentSocket?.sent).toEqual([]);
+    currentSocket?.receive({ type: "relay.ready" });
+    expect(currentSocket?.sent).toHaveLength(1);
+  });
+
+  it("drops stale microphone packets while WebSocket bufferedAmount is over the limit", async () => {
+    const harness = createHarness(128);
+    await startClient(harness.client);
+    const socket = harness.sockets[0];
+    const microphone = harness.microphones[0];
+    socket?.open();
+    socket?.receive({ type: "relay.ready" });
+    socket?.receive({ type: "session.updated" });
+    const controlFrameCount = socket?.sent.length ?? 0;
+
+    if (socket) {
+      socket.bufferedAmount = 128;
+    }
+    microphone?.emit(new Int16Array(320).fill(1000));
+    expect(socket?.sent).toHaveLength(controlFrameCount);
+    expect(harness.errors).toContain("MICROPHONE_SOCKET_BACKPRESSURE");
+
+    if (socket) {
+      socket.bufferedAmount = 0;
+    }
+    microphone?.emit(new Int16Array([1000]));
+    const append = JSON.parse(socket?.sent.at(-1) ?? "{}");
+    expect(append).toMatchObject({ type: "input_audio_buffer.append" });
+  });
+
+  it("routes only response B PCM after a speech interruption clears response A", async () => {
+    const harness = createHarness();
+    await startClient(harness.client);
+    const socket = harness.sockets[0];
+    const playback = harness.playbacks[0];
+    socket?.open();
+    socket?.receive({ type: "relay.ready" });
+    socket?.receive({ type: "session.updated" });
+
+    const responseA = encodePcm16Base64(new Int16Array([1000, 1000]));
+    const responseB = encodePcm16Base64(new Int16Array([-1000, -1000]));
+    socket?.receive({
+      type: "response.created",
+      response: { id: "response-a", status: "in_progress" },
+    });
+    socket?.receive({
+      type: "response.audio.delta",
+      response_id: "response-a",
+      item_id: "item-a",
+      output_index: 0,
+      content_index: 0,
+      delta: responseA,
+    });
+    socket?.receive({
+      type: "input_audio_buffer.speech_started",
+      item_id: "speech-1",
+    });
+    socket?.receive({
+      type: "response.audio.delta",
+      response_id: "response-a",
+      item_id: "item-a",
+      output_index: 0,
+      content_index: 0,
+      delta: responseA,
+    });
+    // A response id first observed before the matching commit is ambiguous and
+    // permanently blocked, even if it looks like a replacement.
+    socket?.receive({
+      type: "response.created",
+      response: { id: "response-before-boundary", status: "in_progress" },
+    });
+    socket?.receive({
+      type: "response.audio.delta",
+      response_id: "response-before-boundary",
+      item_id: "item-before-boundary",
+      output_index: 0,
+      content_index: 0,
+      delta: responseB,
+    });
+
+    expect(playback?.chunks).toEqual([]);
+    socket?.receive({
+      type: "input_audio_buffer.speech_stopped",
+      item_id: "speech-1",
+    });
+    expect(playback?.chunks).toEqual([]);
+    socket?.receive({
+      type: "input_audio_buffer.committed",
+      item_id: "speech-1",
+      previous_item_id: "previous-item",
+    });
+    socket?.receive({
+      type: "response.created",
+      response: { id: "response-b", status: "in_progress" },
+    });
+    socket?.receive({
+      type: "response.audio.delta",
+      response_id: "response-b",
+      item_id: "item-b",
+      output_index: 0,
+      content_index: 0,
+      delta: responseB,
+    });
+    socket?.receive({
+      type: "response.audio.delta",
+      response_id: "response-a",
+      item_id: "item-a",
+      output_index: 0,
+      content_index: 0,
+      delta: responseA,
+    });
+
+    expect(playback?.chunks).toHaveLength(1);
+    expect(playback?.chunks[0]?.responseId).toBe("response-b");
+    expect([...(playback?.chunks[0]?.samples ?? [])]).toEqual([-1000, -1000]);
+  });
+
+  it("requires committed and valid speech_stopped for every pending speech item", async () => {
+    const harness = createHarness();
+    await startClient(harness.client);
+    const socket = harness.sockets[0];
+    const playback = harness.playbacks[0];
+    socket?.open();
+    socket?.receive({ type: "relay.ready" });
+    socket?.receive({ type: "session.updated" });
+    const oldAudio = encodePcm16Base64(new Int16Array([1000]));
+    const freshAudio = encodePcm16Base64(new Int16Array([-1000]));
+
+    socket?.receive({
+      type: "input_audio_buffer.speech_started",
+      item_id: "speech-1",
+    });
+    socket?.receive({
+      type: "input_audio_buffer.speech_started",
+      item_id: "speech-2",
+    });
+    // committed arrives before stopped for speech-1; it must not open playback.
+    socket?.receive({
+      type: "input_audio_buffer.committed",
+      item_id: "speech-1",
+    });
+    socket?.receive({
+      type: "response.created",
+      response: { id: "response-old", status: "in_progress" },
+    });
+    socket?.receive({
+      type: "response.audio.delta",
+      response_id: "response-old",
+      item_id: "item-old",
+      output_index: 0,
+      content_index: 0,
+      delta: oldAudio,
+    });
+    socket?.receive({
+      type: "input_audio_buffer.speech_stopped",
+      item_id: "speech-1",
+    });
+    socket?.receive({
+      type: "input_audio_buffer.speech_stopped",
+      item_id: "speech-2",
+    });
+    expect(playback?.chunks).toEqual([]);
+
+    socket?.receive({
+      type: "input_audio_buffer.committed",
+      item_id: "speech-2",
+    });
+    socket?.receive({
+      type: "response.created",
+      response: { id: "response-fresh", status: "in_progress" },
+    });
+    socket?.receive({
+      type: "response.audio.delta",
+      response_id: "response-fresh",
+      item_id: "item-fresh",
+      output_index: 0,
+      content_index: 0,
+      delta: freshAudio,
+    });
+    expect(playback?.chunks.map((entry) => entry.responseId)).toEqual([
+      "response-fresh",
+    ]);
+  });
+
+  it("manual stop while thinking waits for the unknown response id before cancelling", async () => {
+    const harness = createHarness();
+    await startClient(harness.client);
+    const socket = harness.sockets[0];
+    const playback = harness.playbacks[0];
+    socket?.open();
+    socket?.receive({ type: "relay.ready" });
+    socket?.receive({ type: "session.updated" });
+    socket?.receive({
+      type: "input_audio_buffer.speech_started",
+      item_id: "speech-thinking",
+    });
+    socket?.receive({
+      type: "input_audio_buffer.speech_stopped",
+      item_id: "speech-thinking",
+    });
+    const cancelsBeforeStop = socket?.sent.filter(
+      (payload) => JSON.parse(payload).type === "response.cancel",
+    ).length;
+
+    harness.client.interrupt();
+    expect(
+      socket?.sent.filter(
+        (payload) => JSON.parse(payload).type === "response.cancel",
+      ),
+    ).toHaveLength(cancelsBeforeStop ?? 0);
+
+    socket?.receive({
+      type: "response.created",
+      response: { id: "response-old", status: "in_progress" },
+    });
+    expect(
+      socket?.sent.filter(
+        (payload) => JSON.parse(payload).type === "response.cancel",
+      ),
+    ).toHaveLength((cancelsBeforeStop ?? 0) + 1);
+    socket?.receive({
+      type: "response.audio_transcript.delta",
+      response_id: "response-old",
+      delta: "这段旧字幕不能出现",
+    });
+    expect(playback?.chunks).toEqual([]);
+    expect(harness.snapshots.at(-1)?.assistantCaption).toBe("");
+
+    socket?.receive({
+      type: "response.done",
+      response: {
+        id: "response-old",
+        status: "cancelled",
+        status_details: { reason: "client_cancelled" },
+      },
+    });
+    socket?.receive({
+      type: "response.created",
+      response: { id: "response-fresh", status: "in_progress" },
+    });
+    expect(harness.snapshots.at(-1)?.activity).toBe("assistant_speaking");
+  });
+
+  it("blocks an opening interrupted after response.create but before response.created", async () => {
+    const harness = createHarness();
+    await startClient(harness.client, true);
+    const socket = harness.sockets[0];
+    const playback = harness.playbacks[0];
+    socket?.open();
+    socket?.receive({ type: "relay.ready" });
+    socket?.receive({ type: "session.updated" });
+
+    const sentTypes = (): string[] =>
+      (socket?.sent ?? []).map(
+        (payload) => (JSON.parse(payload) as { type: string }).type,
+      );
+    expect(
+      sentTypes().filter((type) => type === "response.create"),
+    ).toHaveLength(1);
+    expect(sentTypes()).not.toContain("response.cancel");
+
+    // The request is in flight but has no response id, so this only arms the
+    // manual barrier. Cancelling happens once the provider reveals that id.
+    harness.client.interrupt();
+    expect(sentTypes()).not.toContain("response.cancel");
+
+    socket?.receive({
+      type: "response.created",
+      response: { id: "opening-response", status: "in_progress" },
+    });
+    socket?.receive({
+      type: "response.audio.delta",
+      response_id: "opening-response",
+      item_id: "opening-item",
+      output_index: 0,
+      content_index: 0,
+      delta: encodePcm16Base64(new Int16Array([1000, 1000])),
+    });
+
+    expect(
+      sentTypes().filter((type) => type === "response.cancel"),
+    ).toHaveLength(1);
+    expect(playback?.chunks).toEqual([]);
+    expect(harness.snapshots.at(-1)?.activity).not.toBe("assistant_speaking");
+  });
+});
