@@ -55,6 +55,10 @@ export type {
 const SOCKET_OPEN = 1;
 const DEFAULT_MAX_SOCKET_BUFFERED_BYTES = 512 * 1024;
 const PROVIDER_OUTPUT_SAMPLE_RATE = 24_000;
+const RECONNECT_WINDOW_MS = 30_000;
+const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
+
+export type ScheduledTask = { cancel(): void };
 
 export type QwenWebSocketClientDependencies = {
   createSocket?: (url: string) => WebSocket;
@@ -66,6 +70,9 @@ export type QwenWebSocketClientDependencies = {
   ) => PcmMicrophoneCapture;
   getLocationHref?: () => string;
   maxSocketBufferedBytes?: number;
+  now?: () => number;
+  scheduleTask?: (callback: () => void, delayMs: number) => ScheduledTask;
+  subscribeToForeground?: (callback: () => void) => () => void;
 };
 
 type RelayControlFrame = {
@@ -101,6 +108,13 @@ export class QwenWebSocketRealtimeClient {
   private committedSpeechIds = new Set<string>();
   private seenEventIds = new Set<string>();
   private socketBackpressureReported = false;
+  private reconnectStartedAt: number | null = null;
+  private reconnectAttempt = 0;
+  private reconnectAttemptInFlight = false;
+  private reconnectRetryTask: ScheduledTask | null = null;
+  private reconnectDeadlineTask: ScheduledTask | null = null;
+  private removeForegroundListener: (() => void) | null = null;
+  private terminalSocketError = false;
 
   constructor(
     private readonly legacyRemoteAudio: HTMLAudioElement,
@@ -166,15 +180,8 @@ export class QwenWebSocketRealtimeClient {
       };
       this.emitSnapshot();
       this.updateConnection("connecting", "正在建立实时语音连接");
-
-      const url = getCharacterRealtimeWebSocketUrl(
-        options.characterId,
-        this.dependencies.getLocationHref?.(),
-      );
-      const socket =
-        this.dependencies.createSocket?.(url) ?? new WebSocket(url);
-      this.socket = socket;
-      this.bindSocket(socket, lifecycle);
+      this.registerForegroundListener();
+      this.openSocket(lifecycle);
     } catch (error) {
       if (lifecycle !== this.lifecycle) {
         return;
@@ -208,6 +215,20 @@ export class QwenWebSocketRealtimeClient {
       inputMode,
     };
     this.emitSnapshot();
+  }
+
+  retry(): void {
+    if (
+      !this.options ||
+      !this.microphone ||
+      !this.playback ||
+      (this.snapshot.connection !== "paused" &&
+        this.snapshot.connection !== "reconnecting")
+    ) {
+      return;
+    }
+    this.terminalSocketError = false;
+    this.beginReconnect("正在按你的选择重新连接", true);
   }
 
   setMicrophoneMuted(muted: boolean): void {
@@ -288,7 +309,10 @@ export class QwenWebSocketRealtimeClient {
       if (!this.isCurrentSocket(socket, lifecycle)) {
         return;
       }
-      this.updateConnection("connecting", "服务端已连接，正在连接千问实时模型");
+      this.updateConnection(
+        this.reconnectStartedAt === null ? "connecting" : "reconnecting",
+        "服务端已连接，正在连接千问实时模型",
+      );
     };
     socket.onmessage = (message) => {
       if (!this.isCurrentSocket(socket, lifecycle)) {
@@ -304,29 +328,249 @@ export class QwenWebSocketRealtimeClient {
       if (!this.isCurrentSocket(socket, lifecycle)) {
         return;
       }
-      this.responseCreatePending = false;
-      this.reportError("REALTIME_SOCKET_ERROR", "实时语音连接发生网络错误。");
+      this.handleUnexpectedSocketFailure(
+        socket,
+        lifecycle,
+        "实时语音连接发生网络错误，正在自动恢复。",
+      );
     };
     socket.onclose = (event) => {
       if (!this.isCurrentSocket(socket, lifecycle) || this.manuallyClosing) {
         return;
       }
-      this.microphone?.setEnabled(false);
-      this.responseAudio?.reset();
-      this.responseCreatePending = false;
       if (event.code === 4401 || event.code === 4403) {
+        this.terminalSocketError = true;
         this.callbacks.onUnauthorized?.();
       }
-      const detail = event.reason || "实时语音连接已断开，请结束后重新连接。";
-      this.snapshot = {
-        ...this.snapshot,
-        connection: "paused",
-        activity: "idle",
-        detail,
-      };
-      this.emitSnapshot();
-      this.reportError("REALTIME_SOCKET_CLOSED", detail);
+      const detail = event.reason || "实时语音连接已断开，正在自动恢复。";
+      this.handleUnexpectedSocketFailure(socket, lifecycle, detail);
     };
+  }
+
+  private openSocket(lifecycle: number): void {
+    const options = this.options;
+    if (!options || lifecycle !== this.lifecycle) {
+      throw new QwenWebSocketClientError(
+        "REALTIME_SESSION_CLOSED",
+        "当前实时通话已经结束。",
+      );
+    }
+    const url = getCharacterRealtimeWebSocketUrl(
+      options.characterId,
+      options.conversationId,
+      this.dependencies.getLocationHref?.(),
+    );
+    const socket = this.dependencies.createSocket?.(url) ?? new WebSocket(url);
+    this.socket = socket;
+    this.bindSocket(socket, lifecycle);
+  }
+
+  private handleUnexpectedSocketFailure(
+    socket: WebSocket,
+    lifecycle: number,
+    detail: string,
+  ): void {
+    if (!this.isCurrentSocket(socket, lifecycle) || this.manuallyClosing) {
+      return;
+    }
+    this.detachSocket(socket);
+    this.resetTransportForReconnect();
+    if (this.terminalSocketError) {
+      this.pauseConnection(detail, "REALTIME_AUTHORIZATION_FAILED");
+      return;
+    }
+    this.beginReconnect(detail);
+  }
+
+  private beginReconnect(detail: string, immediately = false): void {
+    if (!this.options || this.manuallyClosing) return;
+    this.resetTransportForReconnect();
+    if (this.reconnectStartedAt === null) {
+      this.reconnectStartedAt = this.now();
+      this.reconnectAttempt = 0;
+      this.reconnectDeadlineTask?.cancel();
+      this.reconnectDeadlineTask = this.scheduleTask(() => {
+        this.pauseConnection(
+          "连接在 30 秒内未恢复。你可以继续重试，或结束并保存已确认记录。",
+          "REALTIME_RECONNECT_TIMEOUT",
+        );
+      }, RECONNECT_WINDOW_MS);
+    }
+    this.snapshot = {
+      ...this.snapshot,
+      connection: "reconnecting",
+      activity: "idle",
+      detail,
+      userCaption: "",
+      assistantCaption: "",
+    };
+    this.emitSnapshot();
+    this.scheduleReconnectAttempt(immediately);
+  }
+
+  private scheduleReconnectAttempt(immediately = false): void {
+    if (
+      this.manuallyClosing ||
+      this.reconnectStartedAt === null ||
+      this.reconnectRetryTask ||
+      this.reconnectAttemptInFlight ||
+      this.socket
+    ) {
+      return;
+    }
+    const elapsed = this.now() - this.reconnectStartedAt;
+    if (elapsed >= RECONNECT_WINDOW_MS) {
+      this.pauseConnection(
+        "连接在 30 秒内未恢复。你可以继续重试，或结束并保存已确认记录。",
+        "REALTIME_RECONNECT_TIMEOUT",
+      );
+      return;
+    }
+    const delay = immediately
+      ? 0
+      : (RECONNECT_DELAYS_MS[
+          Math.min(this.reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)
+        ] ?? 8_000);
+    this.reconnectRetryTask = this.scheduleTask(
+      () => {
+        this.reconnectRetryTask = null;
+        void this.runReconnectAttempt();
+      },
+      Math.min(delay, RECONNECT_WINDOW_MS - elapsed),
+    );
+  }
+
+  private async runReconnectAttempt(): Promise<void> {
+    if (
+      this.manuallyClosing ||
+      this.reconnectStartedAt === null ||
+      this.reconnectAttemptInFlight ||
+      this.socket
+    ) {
+      return;
+    }
+    if (this.now() - this.reconnectStartedAt >= RECONNECT_WINDOW_MS) {
+      this.pauseConnection(
+        "连接在 30 秒内未恢复。你可以继续重试，或结束并保存已确认记录。",
+        "REALTIME_RECONNECT_TIMEOUT",
+      );
+      return;
+    }
+
+    this.reconnectAttemptInFlight = true;
+    const lifecycle = this.lifecycle;
+    try {
+      await this.microphone?.ensureAvailable();
+      await this.callbacks.onBeforeReconnect?.();
+      if (
+        lifecycle !== this.lifecycle ||
+        this.manuallyClosing ||
+        this.reconnectStartedAt === null
+      ) {
+        return;
+      }
+      this.reconnectAttempt += 1;
+      this.relayReady = false;
+      this.configurationSent = false;
+      this.sessionConfigured = false;
+      this.updateConnection(
+        "reconnecting",
+        `正在进行第 ${this.reconnectAttempt} 次恢复尝试`,
+      );
+      this.openSocket(lifecycle);
+    } catch {
+      if (lifecycle === this.lifecycle && this.reconnectStartedAt !== null) {
+        this.updateConnection(
+          "reconnecting",
+          "已确认记录暂时无法同步，稍后继续恢复",
+        );
+      }
+    } finally {
+      this.reconnectAttemptInFlight = false;
+      if (!this.socket && this.reconnectStartedAt !== null) {
+        this.scheduleReconnectAttempt();
+      }
+    }
+  }
+
+  private resetTransportForReconnect(): void {
+    this.microphone?.setEnabled(false);
+    this.responseAudio?.reset();
+    this.responseCreatePending = false;
+    this.pushToTalkActive = false;
+    this.projection = { ...initialQwenProjection };
+    this.pendingSpeechIds.clear();
+    this.awaitingCommittedSpeechIds.clear();
+    this.committedSpeechIds.clear();
+    this.relayReady = false;
+    this.configurationSent = false;
+    this.sessionConfigured = false;
+    this.socketBackpressureReported = false;
+  }
+
+  private pauseConnection(detail: string, code: string): void {
+    this.clearReconnectState();
+    if (this.socket) this.detachSocket(this.socket);
+    this.microphone?.setEnabled(false);
+    this.responseAudio?.reset();
+    this.snapshot = {
+      ...this.snapshot,
+      connection: "paused",
+      activity: "idle",
+      detail,
+      userCaption: "",
+      assistantCaption: "",
+    };
+    this.emitSnapshot();
+    this.reportError(code, detail);
+  }
+
+  private detachSocket(socket: WebSocket): void {
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onerror = null;
+    socket.onclose = null;
+    if (this.socket === socket) this.socket = null;
+    if (socket.readyState === 0 || socket.readyState === SOCKET_OPEN) {
+      socket.close(1000, "replacing connection");
+    }
+  }
+
+  private completeReconnect(): boolean {
+    const resumed = this.reconnectStartedAt !== null;
+    this.clearReconnectState();
+    this.terminalSocketError = false;
+    return resumed;
+  }
+
+  private clearReconnectState(): void {
+    this.reconnectRetryTask?.cancel();
+    this.reconnectRetryTask = null;
+    this.reconnectDeadlineTask?.cancel();
+    this.reconnectDeadlineTask = null;
+    this.reconnectStartedAt = null;
+    this.reconnectAttempt = 0;
+    this.reconnectAttemptInFlight = false;
+  }
+
+  private registerForegroundListener(): void {
+    this.removeForegroundListener?.();
+    const subscribe =
+      this.dependencies.subscribeToForeground ?? subscribeToForeground;
+    this.removeForegroundListener = subscribe(() => {
+      if (this.snapshot.connection !== "reconnecting") return;
+      this.reconnectRetryTask?.cancel();
+      this.reconnectRetryTask = null;
+      this.scheduleReconnectAttempt(true);
+    });
+  }
+
+  private now(): number {
+    return this.dependencies.now?.() ?? Date.now();
+  }
+
+  private scheduleTask(callback: () => void, delayMs: number): ScheduledTask {
+    return (this.dependencies.scheduleTask ?? scheduleTask)(callback, delayMs);
   }
 
   private handleSocketMessage(input: string): void {
@@ -368,6 +612,7 @@ export class QwenWebSocketRealtimeClient {
     if (frame.type === "relay.error") {
       this.responseCreatePending = false;
       if (frame.status === 401 || frame.status === 403) {
+        this.terminalSocketError = true;
         this.callbacks.onUnauthorized?.();
       }
       this.reportError(
@@ -556,18 +801,21 @@ export class QwenWebSocketRealtimeClient {
       return;
     }
     this.sessionConfigured = true;
+    const resumed = this.completeReconnect();
     this.updateConnection(
       "active",
-      this.microphone?.microphoneLabel
-        ? `已连接，麦克风：${this.microphone.microphoneLabel}`
-        : "已连接，可以开始说话",
+      resumed
+        ? "连接已恢复，已接回确认过的对话"
+        : this.microphone?.microphoneLabel
+          ? `已连接，麦克风：${this.microphone.microphoneLabel}`
+          : "已连接，可以开始说话",
     );
     this.applyMicrophoneGate();
 
     if (this.options?.assistantStarts && !this.initialResponseRequested) {
       this.initialResponseRequested = true;
       this.sendText(
-        "请根据角色设定主动、自然地向我打招呼并开始本次对话，不要提及这条指令。",
+        "请根据角色设定和当前会话上下文，自然、简短地开始这次通话。如果上下文包含以前的对话，请承接已有关系或话题，不要重复首次见面的固定欢迎语；不要提及这条指令。",
       );
     }
   }
@@ -743,6 +991,9 @@ export class QwenWebSocketRealtimeClient {
 
   private teardown(): void {
     this.lifecycle += 1;
+    this.clearReconnectState();
+    this.removeForegroundListener?.();
+    this.removeForegroundListener = null;
     this.microphone?.setEnabled(false);
     void this.microphone?.stop();
     this.microphone = null;
@@ -780,6 +1031,7 @@ export class QwenWebSocketRealtimeClient {
     this.committedSpeechIds.clear();
     this.seenEventIds.clear();
     this.socketBackpressureReported = false;
+    this.terminalSocketError = false;
   }
 }
 
@@ -804,6 +1056,7 @@ class ProviderOutputPcmSink implements GenerationPcmSink {
 
 export function getCharacterRealtimeWebSocketUrl(
   characterId: string,
+  conversationId: string,
   locationHref = typeof window === "undefined"
     ? "http://localhost/"
     : window.location.href,
@@ -812,6 +1065,7 @@ export function getCharacterRealtimeWebSocketUrl(
     `/api/characters/${encodeURIComponent(characterId)}/realtime/websocket`,
     locationHref,
   );
+  url.searchParams.set("conversationId", conversationId);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
 }
@@ -872,6 +1126,21 @@ function isRecord(input: unknown): input is Record<string, unknown> {
 
 function createEventId(): string {
   return `event_${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
+function scheduleTask(callback: () => void, delayMs: number): ScheduledTask {
+  const timeout = globalThis.setTimeout(callback, delayMs);
+  return { cancel: () => globalThis.clearTimeout(timeout) };
+}
+
+function subscribeToForeground(callback: () => void): () => void {
+  if (typeof document === "undefined") return () => undefined;
+  const onVisibilityChange = () => {
+    if (document.visibilityState === "visible") callback();
+  };
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  return () =>
+    document.removeEventListener("visibilitychange", onVisibilityChange);
 }
 
 class QwenWebSocketClientError extends Error {

@@ -1,0 +1,64 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  appendConversationMessagesRequestSchema,
+  conversationRealtimeQuerySchema,
+  createConversationRequestSchema,
+} from "./conversations.js";
+
+describe("conversation protocol", () => {
+  it("accepts client-owned stable ids and a temporary conversation mode", () => {
+    expect(
+      createConversationRequestSchema.parse({
+        id: "9172f06d-c71a-47b3-94fe-35e1204b5b55",
+        characterId: "c437c71e-f209-4f7d-8f98-1c1e239d4201",
+        mode: "temporary",
+      }),
+    ).toMatchObject({ mode: "temporary" });
+  });
+
+  it("defaults persisted transcript metadata without accepting forged fields", () => {
+    const parsed = appendConversationMessagesRequestSchema.parse({
+      messages: [
+        {
+          id: "9bb6162e-e85c-4e5d-a3ff-000000000001",
+          sequence: 1,
+          role: "user",
+          text: "你好",
+          createdAt: "2026-08-10T05:00:01.000Z",
+        },
+      ],
+    });
+    expect(parsed.messages[0]).toMatchObject({
+      status: "completed",
+      providerEventId: null,
+    });
+    expect(() =>
+      appendConversationMessagesRequestSchema.parse({
+        messages: [
+          {
+            ...parsed.messages[0],
+            userId: "4d1c2e31-ad0e-4fa9-9ae8-ae3497069116",
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+
+  it("requires exactly one valid conversation id for realtime continuity", () => {
+    expect(
+      conversationRealtimeQuerySchema.parse({
+        conversationId: "9172f06d-c71a-47b3-94fe-35e1204b5b55",
+      }),
+    ).toEqual({
+      conversationId: "9172f06d-c71a-47b3-94fe-35e1204b5b55",
+    });
+    expect(() => conversationRealtimeQuerySchema.parse({})).toThrow();
+    expect(() =>
+      conversationRealtimeQuerySchema.parse({
+        conversationId: "not-a-uuid",
+        userId: "forged-user",
+      }),
+    ).toThrow();
+  });
+});

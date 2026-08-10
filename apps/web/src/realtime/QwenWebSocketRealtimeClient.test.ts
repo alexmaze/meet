@@ -11,6 +11,7 @@ import {
   QwenWebSocketRealtimeClient,
   type QwenWebSocketClientDependencies,
   type RealtimeClientSnapshot,
+  type ScheduledTask,
 } from "./QwenWebSocketRealtimeClient.js";
 
 class FakeSocket {
@@ -40,16 +41,62 @@ class FakeSocket {
       new MessageEvent("message", { data: JSON.stringify(value) }),
     );
   }
+
+  disconnect(code = 1006, reason = "network lost"): void {
+    this.readyState = 3;
+    this.onclose?.({ code, reason } as CloseEvent);
+  }
+}
+
+class FakeScheduler {
+  now = 0;
+  private nextId = 1;
+  private tasks: Array<{
+    id: number;
+    at: number;
+    callback: () => void;
+    cancelled: boolean;
+  }> = [];
+
+  schedule = (callback: () => void, delayMs: number): ScheduledTask => {
+    const task = {
+      id: this.nextId++,
+      at: this.now + delayMs,
+      callback,
+      cancelled: false,
+    };
+    this.tasks.push(task);
+    return { cancel: () => (task.cancelled = true) };
+  };
+
+  advance(milliseconds: number): void {
+    const target = this.now + milliseconds;
+    while (true) {
+      const next = this.tasks
+        .filter((task) => !task.cancelled && task.at <= target)
+        .sort((left, right) => left.at - right.at || left.id - right.id)[0];
+      if (!next) break;
+      next.cancelled = true;
+      this.now = next.at;
+      next.callback();
+    }
+    this.now = target;
+  }
 }
 
 class FakeMicrophone implements PcmMicrophoneCapture {
   readonly microphoneLabel = "测试麦克风";
   enabled = false;
   stopped = false;
+  ensureAvailableCalls = 0;
 
   constructor(private readonly options: MicrophonePcmCaptureOptions) {}
 
   async start(): Promise<void> {}
+
+  async ensureAvailable(): Promise<void> {
+    this.ensureAvailableCalls += 1;
+  }
 
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
@@ -94,20 +141,29 @@ class FakePlayback implements PcmPlaybackOutput {
 function createHarness(maxSocketBufferedBytes = 1024): {
   client: QwenWebSocketRealtimeClient;
   sockets: FakeSocket[];
+  socketUrls: string[];
   microphones: FakeMicrophone[];
   playbacks: FakePlayback[];
   providerEvents: unknown[];
   errors: string[];
   snapshots: RealtimeClientSnapshot[];
+  scheduler: FakeScheduler;
+  foreground: () => void;
+  beforeReconnect: ReturnType<typeof vi.fn>;
 } {
   const sockets: FakeSocket[] = [];
+  const socketUrls: string[] = [];
   const microphones: FakeMicrophone[] = [];
   const playbacks: FakePlayback[] = [];
   const providerEvents: unknown[] = [];
   const errors: string[] = [];
   const snapshots: RealtimeClientSnapshot[] = [];
+  const scheduler = new FakeScheduler();
+  const beforeReconnect = vi.fn(async () => undefined);
+  let foregroundCallback: (() => void) | null = null;
   const dependencies: QwenWebSocketClientDependencies = {
-    createSocket: () => {
+    createSocket: (url) => {
+      socketUrls.push(url);
       const socket = new FakeSocket();
       sockets.push(socket);
       return socket as unknown as WebSocket;
@@ -124,6 +180,14 @@ function createHarness(maxSocketBufferedBytes = 1024): {
     },
     getLocationHref: () => "https://meet.example.test/call",
     maxSocketBufferedBytes,
+    now: () => scheduler.now,
+    scheduleTask: scheduler.schedule,
+    subscribeToForeground: (callback) => {
+      foregroundCallback = callback;
+      return () => {
+        if (foregroundCallback === callback) foregroundCallback = null;
+      };
+    },
   };
   const audio = {
     muted: false,
@@ -136,17 +200,22 @@ function createHarness(maxSocketBufferedBytes = 1024): {
       onProviderEvent: (_direction, event) => providerEvents.push(event),
       onError: (error) => errors.push(error.code),
       onSnapshot: (snapshot) => snapshots.push(snapshot),
+      onBeforeReconnect: beforeReconnect,
     },
     dependencies,
   );
   return {
     client,
     sockets,
+    socketUrls,
     microphones,
     playbacks,
     providerEvents,
     errors,
     snapshots,
+    scheduler,
+    foreground: () => foregroundCallback?.(),
+    beforeReconnect,
   };
 }
 
@@ -156,6 +225,7 @@ async function startClient(
 ): Promise<void> {
   await client.start({
     characterId: "character/one",
+    conversationId: "9172f06d-c71a-47b3-94fe-35e1204b5b55",
     voice: "longanqian",
     instructions: "保持自然、简短。",
     inputMode: "hands_free",
@@ -164,6 +234,115 @@ async function startClient(
 }
 
 describe("QwenWebSocketRealtimeClient", () => {
+  it("binds the authenticated conversation id to the realtime socket URL", async () => {
+    const harness = createHarness();
+    await startClient(harness.client);
+
+    expect(harness.socketUrls).toEqual([
+      "wss://meet.example.test/api/characters/character%2Fone/realtime/websocket?conversationId=9172f06d-c71a-47b3-94fe-35e1204b5b55",
+    ]);
+  });
+
+  it("reconnects with confirmed records after the first exponential backoff", async () => {
+    const harness = createHarness();
+    await startClient(harness.client);
+    const firstSocket = harness.sockets[0];
+    const microphone = harness.microphones[0];
+    activateSocket(firstSocket);
+    expect(microphone?.enabled).toBe(true);
+
+    firstSocket?.disconnect();
+    expect(harness.snapshots.at(-1)?.connection).toBe("reconnecting");
+    expect(microphone?.enabled).toBe(false);
+    harness.scheduler.advance(999);
+    await settleAsyncWork();
+    expect(harness.sockets).toHaveLength(1);
+
+    harness.scheduler.advance(1);
+    await settleAsyncWork();
+    expect(harness.beforeReconnect).toHaveBeenCalledTimes(1);
+    expect(microphone?.ensureAvailableCalls).toBe(1);
+    expect(harness.sockets).toHaveLength(2);
+
+    activateSocket(harness.sockets[1]);
+    expect(harness.snapshots.at(-1)).toMatchObject({
+      connection: "active",
+      detail: "连接已恢复，已接回确认过的对话",
+    });
+    expect(microphone?.enabled).toBe(true);
+  });
+
+  it("does not repeat the assistant opening after a replacement session", async () => {
+    const harness = createHarness();
+    await startClient(harness.client, true);
+    const firstSocket = harness.sockets[0];
+    activateSocket(firstSocket);
+    expect(sentTypes(firstSocket)).toContain("response.create");
+
+    firstSocket?.disconnect();
+    harness.scheduler.advance(1_000);
+    await settleAsyncWork();
+    const replacement = harness.sockets[1];
+    activateSocket(replacement);
+
+    expect(sentTypes(replacement)).toEqual(["session.update"]);
+  });
+
+  it("pauses after 30 seconds and supports an explicit retry", async () => {
+    const harness = createHarness();
+    await startClient(harness.client);
+    activateSocket(harness.sockets[0]);
+    harness.sockets[0]?.disconnect();
+
+    harness.scheduler.advance(1_000);
+    await settleAsyncWork();
+    harness.sockets[1]?.disconnect();
+    harness.scheduler.advance(2_000);
+    await settleAsyncWork();
+    expect(harness.sockets).toHaveLength(3);
+
+    harness.scheduler.advance(27_000);
+    await settleAsyncWork();
+    expect(harness.snapshots.at(-1)?.connection).toBe("paused");
+    expect(harness.errors).toContain("REALTIME_RECONNECT_TIMEOUT");
+
+    harness.client.retry();
+    harness.scheduler.advance(0);
+    await settleAsyncWork();
+    expect(harness.sockets).toHaveLength(4);
+    expect(harness.snapshots.at(-1)?.connection).toBe("reconnecting");
+  });
+
+  it("retries immediately when the app returns to the foreground", async () => {
+    const harness = createHarness();
+    await startClient(harness.client);
+    activateSocket(harness.sockets[0]);
+    harness.sockets[0]?.disconnect();
+
+    harness.foreground();
+    harness.scheduler.advance(0);
+    await settleAsyncWork();
+    expect(harness.sockets).toHaveLength(2);
+  });
+
+  it("waits for missing confirmed records to sync before replacing the session", async () => {
+    const harness = createHarness();
+    harness.beforeReconnect.mockRejectedValueOnce(new Error("offline"));
+    await startClient(harness.client);
+    activateSocket(harness.sockets[0]);
+    harness.sockets[0]?.disconnect();
+
+    harness.scheduler.advance(1_000);
+    await settleAsyncWork();
+    expect(harness.sockets).toHaveLength(1);
+    expect(harness.beforeReconnect).toHaveBeenCalledTimes(1);
+
+    harness.scheduler.advance(1_000);
+    await settleAsyncWork();
+    expect(harness.beforeReconnect).toHaveBeenCalledTimes(2);
+    expect(harness.sockets).toHaveLength(2);
+  });
+
   it("waits for relay.ready before session.update and excludes relay frames from provider events", async () => {
     const harness = createHarness();
     await startClient(harness.client);
@@ -462,6 +641,20 @@ describe("QwenWebSocketRealtimeClient", () => {
     expect(
       sentTypes().filter((type) => type === "response.create"),
     ).toHaveLength(1);
+    const openingItem = (socket?.sent ?? [])
+      .map((payload) => JSON.parse(payload) as Record<string, unknown>)
+      .find((event) => event.type === "conversation.item.create");
+    expect(openingItem).toMatchObject({
+      item: {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: expect.stringContaining("不要重复首次见面的固定欢迎语"),
+          },
+        ],
+      },
+    });
     expect(sentTypes()).not.toContain("response.cancel");
 
     // The request is in flight but has no response id, so this only arms the
@@ -489,3 +682,20 @@ describe("QwenWebSocketRealtimeClient", () => {
     expect(harness.snapshots.at(-1)?.activity).not.toBe("assistant_speaking");
   });
 });
+
+function activateSocket(socket: FakeSocket | undefined): void {
+  socket?.open();
+  socket?.receive({ type: "relay.ready" });
+  socket?.receive({ type: "session.updated" });
+}
+
+function sentTypes(socket: FakeSocket | undefined): string[] {
+  return (socket?.sent ?? []).map(
+    (payload) => (JSON.parse(payload) as { type: string }).type,
+  );
+}
+
+async function settleAsyncWork(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}

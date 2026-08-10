@@ -13,6 +13,8 @@ import {
 export type PendingTranscript = {
   speaker: "user" | "assistant";
   text: string;
+  status: "completed" | "interrupted";
+  providerEventId: string | null;
 };
 
 export type QwenConversationProjection = {
@@ -84,6 +86,12 @@ export function projectQwenEvent(
         commits.push({
           speaker: "assistant",
           text: state.assistantDraft.trim(),
+          status:
+            responseDone.success &&
+            responseDone.data.response.status === "completed"
+              ? "completed"
+              : "interrupted",
+          providerEventId: state.activeResponseId,
         });
       }
       state.assistantDraft = "";
@@ -111,7 +119,12 @@ export function projectQwenEvent(
       userCompleted.data.text ??
       state.userDraft;
     if (text.trim()) {
-      commits.push({ speaker: "user", text: text.trim() });
+      commits.push({
+        speaker: "user",
+        text: text.trim(),
+        status: "completed",
+        providerEventId: userCompleted.data.event_id ?? null,
+      });
     }
     state.userDraft = "";
   }

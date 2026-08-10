@@ -17,6 +17,7 @@ import { hashSessionToken } from "../src/auth/session-token.js";
 import { buildApp } from "../src/app.js";
 import type { CharacterRepository } from "../src/characters/repository.js";
 import { loadConfig, type AppConfig } from "../src/config.js";
+import type { ConversationRepository } from "../src/conversations/repository.js";
 
 const config: AppConfig = {
   server: { host: "127.0.0.1", port: 8787, logLevel: "silent" },
@@ -64,6 +65,7 @@ const authRepository: AuthRepository = {
   async revokeLoginSession() {},
 };
 const authHeaders = { cookie: `meet_session=${sessionToken}` };
+const testConversationId = "9172f06d-c71a-47b3-94fe-35e1204b5b55";
 const testCharacter = aggregateFromPreset();
 const characterRepository = {
   async listVisible() {
@@ -97,8 +99,23 @@ const characterRepository = {
     throw new Error("unused");
   },
 } satisfies CharacterRepository;
+const conversationRepository = {
+  create: vi.fn(async () => {
+    throw new Error("unused");
+  }),
+  list: vi.fn(async () => []),
+  isGuardianReadableTarget: vi.fn(async () => false),
+  findReadable: vi.fn(async () => null),
+  loadRealtimeContext: vi.fn(async () => ({
+    mode: "normal" as const,
+    messages: [],
+  })),
+  appendMessages: vi.fn(async () => ({ kind: "not_found" as const })),
+  complete: vi.fn(async () => ({ kind: "not_found" as const })),
+  delete: vi.fn(async () => false),
+} satisfies ConversationRepository;
 const characterSessionUrl = `/api/characters/${testCharacter.character.id}/realtime/sessions`;
-const characterWebSocketUrl = `/api/characters/${testCharacter.character.id}/realtime/websocket`;
+const characterWebSocketUrl = `/api/characters/${testCharacter.character.id}/realtime/websocket?conversationId=${testConversationId}`;
 
 describe("Meet API", () => {
   it("returns authenticated realtime config without secrets", async () => {
@@ -201,10 +218,35 @@ describe("Meet API", () => {
       );
       return new WebSocket(`ws://127.0.0.1:${address.port}`, options);
     });
+    const relayConversationRepository = {
+      ...conversationRepository,
+      loadRealtimeContext: vi.fn(async () => ({
+        mode: "normal" as const,
+        messages: [
+          {
+            id: "9bb6162e-e85c-4e5d-a3ff-000000000001",
+            conversationId: testConversationId,
+            role: "user" as const,
+            text: "我周五要考试。",
+            status: "completed" as const,
+            createdAt: new Date("2026-08-09T05:00:00.000Z"),
+          },
+          {
+            id: "9bb6162e-e85c-4e5d-a3ff-000000000002",
+            conversationId: testConversationId,
+            role: "assistant" as const,
+            text: "记得，我们先复习分数。",
+            status: "completed" as const,
+            createdAt: new Date("2026-08-09T05:00:01.000Z"),
+          },
+        ],
+      })),
+    } satisfies ConversationRepository;
     const app = await buildApp({
       config,
       authRepository,
       characterRepository,
+      conversationRepository: relayConversationRepository,
       qwenWebSocketFactory,
       logger: false,
     });
@@ -282,6 +324,31 @@ describe("Meet API", () => {
     );
     expect(forwardedSessionUpdate.toString()).toBe(sessionUpdate);
 
+    const injectedHistory = nextWebSocketMessages(upstream, 4);
+    upstream.send(JSON.stringify({ type: "session.updated" }));
+    const injectedEvents = (
+      await withTimeout(injectedHistory, "history injection")
+    ).map((payload) => JSON.parse(payload) as Record<string, unknown>);
+    expect(injectedEvents).toHaveLength(4);
+    expect(injectedEvents.map((event) => event.type)).toEqual([
+      "conversation.item.create",
+      "conversation.item.create",
+      "conversation.item.create",
+      "conversation.item.create",
+    ]);
+    expect(injectedEvents[1]).toMatchObject({
+      item: {
+        role: "user",
+        content: [{ type: "input_text", text: "我周五要考试。" }],
+      },
+    });
+    expect(injectedEvents[2]).toMatchObject({
+      item: {
+        role: "assistant",
+        content: [{ type: "output_text", text: "记得，我们先复习分数。" }],
+      },
+    });
+
     const clientEvent = JSON.stringify({
       event_id: "event-1",
       type: "input_audio_buffer.append",
@@ -336,6 +403,7 @@ describe("Meet API", () => {
       config,
       authRepository,
       characterRepository,
+      conversationRepository,
       qwenWebSocketFactory,
       logger: false,
     });
@@ -360,6 +428,7 @@ describe("Meet API", () => {
       config,
       authRepository,
       characterRepository,
+      conversationRepository,
       qwenWebSocketFactory,
       logger: false,
     });
@@ -386,6 +455,7 @@ describe("Meet API", () => {
       config,
       authRepository,
       characterRepository: hiddenCharacterRepository,
+      conversationRepository,
       qwenWebSocketFactory,
       logger: false,
     });
@@ -400,6 +470,42 @@ describe("Meet API", () => {
         },
       }),
     ).rejects.toThrow("Unexpected server response: 404");
+    expect(qwenWebSocketFactory).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("rejects an unowned or character-mismatched conversation before opening upstream", async () => {
+    const qwenWebSocketFactory = vi.fn();
+    const inaccessibleConversationRepository = {
+      ...conversationRepository,
+      loadRealtimeContext: vi.fn(async () => null),
+    } satisfies ConversationRepository;
+    const app = await buildApp({
+      config,
+      authRepository,
+      characterRepository,
+      conversationRepository: inaccessibleConversationRepository,
+      qwenWebSocketFactory,
+      logger: false,
+    });
+    await app.ready();
+
+    await expect(
+      app.injectWS(characterWebSocketUrl, {
+        headers: {
+          ...authHeaders,
+          host: "meet.test",
+          origin: "http://meet.test",
+        },
+      }),
+    ).rejects.toThrow("Unexpected server response: 404");
+    expect(
+      inaccessibleConversationRepository.loadRealtimeContext,
+    ).toHaveBeenCalledWith(
+      testUser.id,
+      testConversationId,
+      testCharacter.character.id,
+    );
     expect(qwenWebSocketFactory).not.toHaveBeenCalled();
     await app.close();
   });
@@ -423,6 +529,7 @@ describe("Meet API", () => {
       config,
       authRepository,
       characterRepository: invalidModelRepository,
+      conversationRepository,
       qwenWebSocketFactory,
       logger: false,
     });
@@ -450,6 +557,7 @@ describe("Meet API", () => {
       },
       authRepository,
       characterRepository,
+      conversationRepository,
       qwenWebSocketFactory,
       logger: false,
     });
@@ -614,6 +722,23 @@ function aggregateFromPreset(): CharacterAggregate {
 async function closeWebSocketServer(server: WebSocketServer): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+function nextWebSocketMessages(
+  socket: WebSocket,
+  count: number,
+): Promise<string[]> {
+  return new Promise((resolve) => {
+    const messages: string[] = [];
+    const onMessage = (data: WebSocket.RawData) => {
+      messages.push(data.toString());
+      if (messages.length === count) {
+        socket.off("message", onMessage);
+        resolve(messages);
+      }
+    };
+    socket.on("message", onMessage);
   });
 }
 

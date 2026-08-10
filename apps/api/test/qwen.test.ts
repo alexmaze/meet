@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AppConfig } from "../src/config.js";
 import {
+  buildQwenContinuityEvents,
   buildQwenRealtimeWebSocketUrl,
   isAllowedQwenClientEvent,
   isAllowedWebSocketOrigin,
@@ -116,6 +117,57 @@ describe("Qwen WebSocket relay", () => {
     ).toBe(
       "wss://realtime.example.com/api-ws/v1/realtime?model=qwen-audio-3.0-realtime-plus",
     );
+  });
+
+  it("maps saved turns to provider-native history items in order", () => {
+    const events = buildQwenContinuityEvents([
+      {
+        id: "9bb6162e-e85c-4e5d-a3ff-000000000001",
+        role: "user",
+        text: "我周五要考试。",
+      },
+      {
+        id: "9bb6162e-e85c-4e5d-a3ff-000000000002",
+        role: "assistant",
+        text: "记得，我们先复习分数。",
+      },
+    ]);
+
+    expect(events).toHaveLength(4);
+    expect(events[0]).toMatchObject({
+      type: "conversation.item.create",
+      item: {
+        role: "system",
+        content: [{ type: "input_text" }],
+      },
+    });
+    expect(events[1]).toMatchObject({
+      item: {
+        role: "user",
+        content: [{ type: "input_text", text: "我周五要考试。" }],
+      },
+    });
+    expect(events[2]).toMatchObject({
+      item: {
+        role: "assistant",
+        content: [{ type: "output_text", text: "记得，我们先复习分数。" }],
+      },
+    });
+    expect(events[3]).toMatchObject({
+      item: {
+        role: "system",
+        content: [
+          {
+            type: "input_text",
+            text: expect.stringContaining("不要因为连接恢复而重复上一句"),
+          },
+        ],
+      },
+    });
+  });
+
+  it("does not inject synthetic continuity when no history is available", () => {
+    expect(buildQwenContinuityEvents([])).toEqual([]);
   });
 
   it("accepts the page origin when it exactly matches the request host", () => {

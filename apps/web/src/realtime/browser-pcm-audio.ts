@@ -89,6 +89,7 @@ export type MicrophonePcmCaptureOptions = {
 export interface PcmMicrophoneCapture {
   readonly microphoneLabel: string;
   start(): Promise<void>;
+  ensureAvailable(): Promise<void>;
   setEnabled(enabled: boolean): void;
   stop(): Promise<void>;
 }
@@ -239,6 +240,19 @@ export class AudioWorkletMicrophoneCapture implements PcmMicrophoneCapture {
     this.source = source;
     this.processor = processor;
     this.silentGain = silentGain;
+  }
+
+  async ensureAvailable(): Promise<void> {
+    if (
+      this.track?.readyState === "live" &&
+      this.context &&
+      this.context.state !== "closed"
+    ) {
+      this.ensureRunning();
+      return;
+    }
+    await this.stop();
+    await this.start();
   }
 
   setEnabled(enabled: boolean): void {

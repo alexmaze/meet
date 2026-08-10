@@ -1,5 +1,6 @@
 import {
   characterIdParamsSchema,
+  conversationRealtimeQuerySchema,
   createCharacterRequestSchema,
   deleteCharacterRequestSchema,
   emptyCharacterActionRequestSchema,
@@ -22,6 +23,10 @@ import {
   CharacterServiceError,
   type CharacterService,
 } from "../characters/service.js";
+import {
+  ConversationServiceError,
+  type ConversationService,
+} from "../conversations/service.js";
 import type { AppConfig } from "../config.js";
 import {
   isAllowedWebSocketOrigin,
@@ -37,6 +42,7 @@ export async function registerCharacterRoutes(
   config: AppConfig,
   auth: AuthService,
   characterService: CharacterService,
+  conversationService: ConversationService,
   fetchFunction?: FetchFunction,
   qwenWebSocketFactory?: QwenWebSocketFactory,
 ): Promise<void> {
@@ -47,6 +53,11 @@ export async function registerCharacterRoutes(
       model: ReturnType<typeof qwenRealtimeModelSchema.parse>;
       voice: string;
       instructions: string;
+      history: Array<{
+        id: string;
+        role: "user" | "assistant";
+        text: string;
+      }>;
     }
   >();
   app.get("/api/characters", async (request, reply) => {
@@ -343,12 +354,17 @@ export async function registerCharacterRoutes(
             actor,
             params.data.characterId,
           );
-          if (
-            Object.keys((request.query ?? {}) as Record<string, unknown>)
-              .length > 0
-          ) {
+          const query = conversationRealtimeQuerySchema.safeParse(
+            request.query,
+          );
+          if (!query.success) {
             return invalidCharacterRequest(reply);
           }
+          const continuity = await conversationService.realtimeContext(
+            actor,
+            query.data.conversationId,
+            params.data.characterId,
+          );
           const model = qwenRealtimeModelSchema.safeParse(
             runtime.realtime.model,
           );
@@ -387,6 +403,7 @@ export async function registerCharacterRoutes(
             model: model.data,
             voice: runtime.realtime.voice,
             instructions: runtime.realtime.instructions,
+            history: continuity.messages,
           });
         } catch (error) {
           return sendCharacterError(reply, error);
@@ -407,6 +424,7 @@ export async function registerCharacterRoutes(
         runtime: {
           voice: context.voice,
           instructions: context.instructions,
+          history: context.history,
         },
         webSocketFactory: qwenWebSocketFactory,
       });
@@ -433,6 +451,18 @@ async function authenticateActor(
 
 function sendCharacterError(reply: FastifyReply, error: unknown) {
   if (error instanceof AuthError) return sendAuthError(reply, error);
+  if (error instanceof ConversationServiceError) {
+    if (error.statusCode >= 500 && error.cause) {
+      reply.request.log.error(
+        { ...getSafeErrorLogContext(error.cause), code: error.code },
+        "Conversation repository operation failed during realtime setup",
+      );
+    }
+    return reply.code(error.statusCode).send({
+      code: error.code,
+      message: error.message,
+    });
+  }
   if (error instanceof CharacterServiceError) {
     if (error.statusCode >= 500 && error.cause) {
       reply.request.log.error(

@@ -85,6 +85,26 @@ export const characterAuditEventTypeEnum = pgEnum(
   ["created", "updated", "visibility_changed", "copied", "deleted", "restored"],
 );
 
+export const conversationModeEnum = pgEnum("conversation_mode", [
+  "normal",
+  "temporary",
+]);
+
+export const conversationStatusEnum = pgEnum("conversation_status", [
+  "active",
+  "completed",
+]);
+
+export const conversationMessageRoleEnum = pgEnum("conversation_message_role", [
+  "user",
+  "assistant",
+]);
+
+export const conversationMessageStatusEnum = pgEnum(
+  "conversation_message_status",
+  ["completed", "interrupted"],
+);
+
 export const userAccounts = pgTable(
   "user_accounts",
   {
@@ -412,6 +432,109 @@ export const characterAuditEvents = pgTable(
   ],
 );
 
+export const conversations = pgTable(
+  "conversations",
+  {
+    id: uuid("id").primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "cascade" }),
+    characterId: uuid("character_id")
+      .notNull()
+      .references(() => characters.id, { onDelete: "restrict" }),
+    mode: conversationModeEnum("mode").notNull(),
+    status: conversationStatusEnum("status").notNull().default("active"),
+    provider: realtimeProviderEnum("provider").notNull(),
+    model: varchar("model", { length: 120 }).notNull(),
+    voice: varchar("voice", { length: 120 }).notNull(),
+    messageCount: integer("message_count").notNull().default(0),
+    lastSequence: integer("last_sequence").notNull().default(0),
+    startedAt: timestamp("started_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("conversations_user_updated_idx").on(table.userId, table.updatedAt),
+    index("conversations_user_character_updated_idx").on(
+      table.userId,
+      table.characterId,
+      table.updatedAt,
+    ),
+    check(
+      "conversations_counters_nonnegative",
+      sql`${table.messageCount} >= 0 AND ${table.lastSequence} >= 0`,
+    ),
+    check(
+      "conversations_status_times_match",
+      sql`(
+        (${table.status} = 'active' AND ${table.endedAt} IS NULL)
+        OR
+        (${table.status} = 'completed' AND ${table.endedAt} IS NOT NULL)
+      )`,
+    ),
+    check(
+      "conversations_end_after_start",
+      sql`${table.endedAt} IS NULL OR ${table.endedAt} >= ${table.startedAt}`,
+    ),
+    check(
+      "conversations_model_not_blank",
+      sql`length(btrim(${table.model})) > 0`,
+    ),
+    check(
+      "conversations_voice_not_blank",
+      sql`length(btrim(${table.voice})) > 0`,
+    ),
+  ],
+);
+
+export const conversationMessages = pgTable(
+  "conversation_messages",
+  {
+    id: uuid("id").primaryKey(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "cascade" }),
+    sequence: integer("sequence").notNull(),
+    role: conversationMessageRoleEnum("role").notNull(),
+    status: conversationMessageStatusEnum("status")
+      .notNull()
+      .default("completed"),
+    text: text("text").notNull(),
+    providerEventId: varchar("provider_event_id", { length: 200 }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("conversation_messages_conversation_sequence_unique").on(
+      table.conversationId,
+      table.sequence,
+    ),
+    uniqueIndex("conversation_messages_provider_event_unique")
+      .on(table.conversationId, table.providerEventId)
+      .where(sql`${table.providerEventId} IS NOT NULL`),
+    index("conversation_messages_user_created_idx").on(
+      table.userId,
+      table.createdAt,
+    ),
+    check(
+      "conversation_messages_sequence_positive",
+      sql`${table.sequence} > 0`,
+    ),
+    check(
+      "conversation_messages_text_not_blank",
+      sql`length(btrim(${table.text})) > 0`,
+    ),
+  ],
+);
+
 export type UserAccount = typeof userAccounts.$inferSelect;
 export type NewUserAccount = typeof userAccounts.$inferInsert;
 export type PasswordCredential = typeof passwordCredentials.$inferSelect;
@@ -430,3 +553,9 @@ export type CharacterRecord = typeof characters.$inferSelect;
 export type NewCharacterRecord = typeof characters.$inferInsert;
 export type CharacterAuditEvent = typeof characterAuditEvents.$inferSelect;
 export type NewCharacterAuditEvent = typeof characterAuditEvents.$inferInsert;
+export type ConversationRecord = typeof conversations.$inferSelect;
+export type NewConversationRecord = typeof conversations.$inferInsert;
+export type ConversationMessageRecord =
+  typeof conversationMessages.$inferSelect;
+export type NewConversationMessageRecord =
+  typeof conversationMessages.$inferInsert;

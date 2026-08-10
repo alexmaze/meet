@@ -1,7 +1,7 @@
 # Meet 技术架构草案
 
 状态：Draft  
-更新时间：2026-08-09
+更新时间：2026-08-10
 
 本文记录已经达成共识的架构边界。具体依赖版本在项目初始化时依据兼容性测试锁定。
 
@@ -105,15 +105,17 @@ interface MediaStore {
 
 ## 2. 供应商适配边界
 
-第一版默认实时语音实现连接 `qwen-audio-3.0-realtime-plus`：浏览器以 WebRTC 发送持续音频，免提会话配置为 `turn_detection.type: "smart_turn"`，默认系统音色为 `longanqian`。这个默认值用于推进当前业务闭环，不构成永久供应商绑定。该模型最多保留 50 轮、累计 300 秒音频上下文，其中 `max_history_turns` 默认是 20；这些是供应商的短期上下文边界，不能替代应用自己的会话记录、摘要和长期记忆。
+第一版默认实时语音实现连接 `qwen-audio-3.0-realtime-plus`：浏览器通过同源、带账号认证的 Fastify WebSocket 连接中继，中继使用服务端凭据连接供应商 WebSocket。浏览器发送 16 kHz PCM16 单声道分片，并用应用持有、可按 `response_id` 和 generation 清空的 24 kHz PCM 队列播放模型音频。免提会话配置为 `turn_detection.type: "smart_turn"`，默认系统音色为 `longanqian`。这个默认值用于推进当前业务闭环，不构成永久供应商绑定。该模型最多保留 50 轮、累计 300 秒音频上下文，其中 `max_history_turns` 默认是 20；这些是供应商的短期上下文边界，不能替代应用自己的会话记录、摘要和长期记忆。
 
-千问 WebRTC 当前是白名单能力。部署者需要从阿里云商务获得专用 Endpoint，并以 `QWEN_REALTIME_ENDPOINT` 配置到服务端；不能从 Workspace ID 拼接或推导信令域名。服务端只接受商务提供的 hostname 或不带额外 path、query、hash、用户信息和非默认端口的 HTTPS origin，再自行追加 `/api/v1/webrtc/realtime?model=...`。API Key、Endpoint 和 SDP 鉴权请求均不下发浏览器。
+部署者以 `QWEN_REALTIME_ENDPOINT` 配置供应商允许的 Endpoint；不能从 Workspace ID 拼接或推导信令域名。服务端只接受 hostname 或不带额外 path、query、hash、用户信息和非默认端口的 HTTPS origin，再为默认链路自行追加 `/api-ws/v1/realtime?model=...`。API Key、Endpoint、上游鉴权头和完整角色提示词均不下发浏览器，也不进入常规日志。
 
-WebRTC 建连时，浏览器在 `getUserMedia` 后立即令 `microphoneTrack.enabled = false`，并在生成 offer 前通过 `sender.replaceTrack(null)` 暂时移除音轨；客户端同时创建一个仅用于触发 SDP 数据通道协商的 bootstrap DataChannel，供应商服务端随后创建名为 `txt` 的 DataChannel。客户端从 `txt` 收到 `session.created` 后，先通过同一通道发送 `session.update`，随后立即重新挂载仍为 disabled 的麦克风音轨；收到 `session.updated` 后才按免提或按住说话的本地 gate 启用发送并进入活动状态，确保首个音频包发送前已经配置 `smart_turn`。真实链路排障表明，延迟到 `session.updated` 后才挂载音轨会导致上行 RTP 不可靠，因此挂载与允许发送必须保持为两个阶段。控制事件和供应商事件此后也都走 `txt` 通道。
+默认 WebSocket 建连时，浏览器先启动带回声消除、降噪和自动增益约束的麦克风采集与可清空播放器，再连接同源中继。中继先校验 Origin、登录状态、角色可见性、Provider Profile 与速率/帧大小边界，然后连接固定的供应商地址。浏览器只能发送允许列表内的会话配置、PCM append、文本、响应创建和取消事件；模型、声音和角色指令由服务端解析角色运行时配置后约束。
 
-角色通话的 Meet HTTP 接口只接收角色 ID 和 SDP，并在服务端依据当前登录账号校验角色可见性、Provider Profile 与模型；它不接受客户端提交 owner、voice、instructions 或 model。由于媒体和 `txt` DataChannel 在 SDP 交换后由浏览器直连供应商，修改过的浏览器仍然可以改变自己当次会话的 `session.update`。这个限制不能用来读取其他账号的私人角色、会话、记忆或服务端密钥，但服务端不能声称已经对不可信浏览器强制锁定角色提示词。若未来需要强制锁定，必须采用供应商支持的受限会话配置能力，或把对应控制通道改为服务端中继。
+应用持有每个输出 PCM 分片的 `response_id` 和本地播放 generation。收到有效插话或手动停止时，客户端先同步增加 generation、停止已安排节点并清空队列，再处理上游取消；迟到的旧响应分片直接丢弃。字幕投影使用同一响应标识，因此旧回复不能在新字幕出现后重新发声。
 
-这条 WebRTC 链路不支持 `turn_detection: null` 或 `input_audio_buffer.commit` 手动模式。界面的“按住说话”只启用或禁用本地 RTP 音轨，松开后仍由 `smart_turn` 收尾。有效插话由服务端自动取消当前响应，客户端收到 `input_audio_buffer.speech_started` 时不发送 `response.cancel`；只有用户点击手动停止时才显式发送取消事件。若 `speech_stopped.reason` 为 `turn_invalid`，前端在没有活动回复时回到聆听，有活动回复时恢复为角色说话状态。
+千问链路不支持 `turn_detection: null` 或 `input_audio_buffer.commit` 手动模式。界面的“按住说话”只控制是否继续发送本地 PCM 分片，松开后仍由 `smart_turn` 收尾。有效插话由供应商自动取消当前响应；只有用户点击手动停止时才显式发送取消事件。若 `speech_stopped.reason` 为 `turn_invalid`，前端在没有活动回复时回到聆听，有活动回复时恢复角色说话状态，但不会回填已经清掉的旧 PCM。
+
+现有浏览器直连 WebRTC 实现保留为实验和诊断路径，用于比较端到端延迟与回声处理。它不能按响应标识清空浏览器 RTP 接收缓冲，因此不是“确定性打断”的默认或验收实现。
 
 Qwen-Audio 的输入模态只有 Audio 与 Text，能力声明必须把图片输入标记为不支持。`qwen3.5-omni-plus-realtime` 保留为图片与教学多模态候选；也可以先由独立视觉模型分析图片，再把带来源标记的文本或结构化教学结果注入 Audio 会话。模型选择属于 Provider Profile，不写死在角色、会话或前端页面结构中。
 
@@ -201,6 +203,8 @@ connecting → active → reconnecting → active
 - 恢复时优先继续供应商原会话；无法恢复时使用已保存的角色上下文和最近确认序号创建替代会话；
 - 当前模型连续重试失败后进入 `paused`，等待用户选择重试或结束；
 - 不允许恢复逻辑自动切换供应商、模型或 Voice Profile。
+
+当前 Qwen-Audio WebSocket 协议的一条连接对应一个供应商会话，没有跨连接继续原会话的接口，因此默认实现直接使用替代会话恢复。浏览器在意外关闭时关闭麦克风 gate、清空带 generation 的 PCM 队列和未确认草稿，在 30 秒窗口内按 1、2、4、8 秒退避连接同一角色运行时；返回前台会取消等待并立即尝试。每次尝试前先调用现有幂等消息接口补写待确认的完整字幕，API 随后从当前活动会话和普通关系历史加载有界上下文。临时会话只允许加载当前会话自身的消息。替代会话收到 `session.updated` 后恢复麦克风，但保留“已经请求过开场”的客户端标志，不重复发送开场请求。30 秒超时进入 `paused`，保留媒体与业务会话供用户手动继续重试或结束保存；未完成的旧 PCM 和转写草稿有意不恢复。
 
 ## 3. 角色和音色数据边界
 
@@ -322,6 +326,8 @@ type FamilyFact = {
 
 普通会话默认加载前述四层上下文。临时会话仍加载角色设定和用户主动维护的基础资料，但不加载可选的关系延续摘要，也不会在结束时写入私人长期记忆；具体加载边界在实现前通过体验测试确认。
 
+当前摘要和长期记忆尚未实现。现阶段的普通续聊先绑定一个已认证、属于当前账号且与当前角色一致的活动会话，再从该账号与该角色之前的普通会话读取最近最多 24 条已保存消息，并由 API 在 12,000 字符预算内裁剪。Qwen WebSocket 中继收到供应商 `session.updated` 后，先以供应商原生的 `conversation.item.create` 消息按时间顺序注入这些历史，再把 `session.updated` 转发浏览器，使角色开场请求一定排在历史之后。临时会话在数据库查询和服务层各自清空继承消息；任何跨账号、跨角色、已结束或不存在的当前会话标识都按未找到处理。该最近原文窗口只是摘要与长期记忆上线前的有界连续性实现，不能代替后两者。
+
 推荐流程：
 
 ```text
@@ -442,8 +448,8 @@ type CharacterMemory = {
 2. 建立 PostgreSQL、Drizzle、共享配置与 Provider Adapter 基础，把现有千问实现收敛到供应商边界内；
 3. 实现管理员初始化、家庭成员管理、登录会话和服务端授权隔离；
 4. 已以预置角色、结构化角色卡、角色权限、角色首页和实时通话完成第一个业务纵向切片；
-5. 实现会话与消息持久化、历史记录、稳定事件 ID、断线恢复和幂等保存；
-6. 实现摘要、长期记忆、`pg-boss` Worker、MediaStore 和录音生命周期；
+5. 已实现会话与消息持久化、私人历史记录、稳定消息 ID、连续确认序号、幂等保存、同账号同角色的有界最近历史续聊，以及约 30 秒替代会话恢复和缺失消息补写；
+6. 下一步实现摘要、长期记忆、`pg-boss` Worker、MediaStore 和录音生命周期；
 7. 接入图片能力路由、教学辅助和计算器工具，使用 Qwen3.5 Omni Plus Realtime 或独立视觉分析完成拍题流程；
 8. 完成移动浏览器与 PWA 适配，并在上述业务切片中持续补齐统一事件、延迟、打断、用量和错误记录；
 9. 真实手机与桌面设备测试、家庭噪声测试、Qwen-Audio Flash 成本对照和豆包 S2S-SC 盲测与业务开发并行，作为 MVP 验收和默认模型调整依据，不再阻塞第 2–8 项；

@@ -26,6 +26,7 @@ export type InputMode = "hands_free" | "push_to_talk";
 
 export type QwenRealtimeOptions = {
   characterId: string;
+  conversationId: string;
   voice: string;
   instructions: string;
   inputMode: InputMode;
@@ -63,6 +64,7 @@ export type QwenRealtimeCallbacks = {
   onProviderEvent?: (direction: Direction, event: unknown) => void;
   onError?: (error: RealtimeError) => void;
   onUnauthorized?: () => void;
+  onBeforeReconnect?: () => Promise<void>;
 };
 
 export class QwenRealtimeClient {

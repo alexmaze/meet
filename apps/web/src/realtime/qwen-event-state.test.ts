@@ -23,7 +23,14 @@ describe("Qwen conversation projection", () => {
       response: { id: "resp_assistant", status: "completed" },
     });
 
-    expect(done.commits).toEqual([{ speaker: "assistant", text: "你好" }]);
+    expect(done.commits).toEqual([
+      {
+        speaker: "assistant",
+        text: "你好",
+        status: "completed",
+        providerEventId: "resp_assistant",
+      },
+    ]);
     expect(done.state.responseActive).toBe(false);
   });
 

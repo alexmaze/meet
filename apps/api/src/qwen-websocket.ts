@@ -38,8 +38,15 @@ export type QwenWebSocketRelayOptions = {
   runtime: {
     voice: string;
     instructions: string;
+    history?: QwenContinuityMessage[];
   };
   webSocketFactory?: QwenWebSocketFactory;
+};
+
+export type QwenContinuityMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
 };
 
 export type WebSocketOriginCheck = {
@@ -123,6 +130,7 @@ export function relayQwenWebSocket({
   let stopped = false;
   let upstreamReady = false;
   let sessionConfigured = false;
+  let historyInjected = false;
   let pendingBytes = 0;
   let rateWindowStartedAt = Date.now();
   let rateWindowAudioBytes = 0;
@@ -266,6 +274,25 @@ export function relayQwenWebSocket({
       stop("relay", CLOSE_INTERNAL_ERROR, "Upstream message too large");
       return;
     }
+    if (
+      !historyInjected &&
+      !isBinary &&
+      readJsonEventType(message) === "session.updated"
+    ) {
+      historyInjected = true;
+      for (const event of buildQwenContinuityEvents(runtime.history ?? [])) {
+        const payload = Buffer.from(JSON.stringify(event));
+        if (!sendWithBackpressure(upstream, payload, false)) {
+          sendRelayError(
+            client,
+            "RELAY_BACKPRESSURE",
+            "续聊上下文注入失败，请重新连接。",
+          );
+          stop("relay", CLOSE_TRY_AGAIN_LATER, "History injection failed");
+          return;
+        }
+      }
+    }
     if (!sendWithBackpressure(client, message, isBinary)) {
       stop("relay", CLOSE_TRY_AGAIN_LATER, "Relay backpressure");
     }
@@ -298,6 +325,71 @@ export function relayQwenWebSocket({
   sessionTimeout.unref();
 
   return upstream;
+}
+
+export function buildQwenContinuityEvents(
+  history: QwenContinuityMessage[],
+): Array<Record<string, unknown>> {
+  if (history.length === 0) return [];
+  const events: Array<Record<string, unknown>> = [
+    qwenContextItem(
+      "meet_history_context",
+      "system",
+      "input_text",
+      "以下消息是当前用户与这个角色此前真实发生、已经确认保存的对话。请把它们作为关系延续上下文使用；只依据记录回忆，不要编造未出现的往事。",
+    ),
+  ];
+  for (const message of history) {
+    events.push(
+      qwenContextItem(
+        `meet_history_${message.id.replaceAll("-", "")}`,
+        message.role,
+        message.role === "assistant" ? "output_text" : "input_text",
+        message.text,
+      ),
+    );
+  }
+  events.push(
+    qwenContextItem(
+      "meet_history_resume",
+      "system",
+      "input_text",
+      "现在开始或恢复实时连接。自然承接上面的关系与话题；只有收到新的用户输入或明确的开场请求时才回应，不要因为连接恢复而重复上一句或首次见面的固定欢迎语。",
+    ),
+  );
+  return events;
+}
+
+function qwenContextItem(
+  id: string,
+  role: "system" | "user" | "assistant",
+  contentType: "input_text" | "output_text",
+  text: string,
+): Record<string, unknown> {
+  return {
+    event_id: `event_${id}`,
+    type: "conversation.item.create",
+    item: {
+      id,
+      type: "message",
+      role,
+      content: [{ type: contentType, text }],
+    },
+  };
+}
+
+function readJsonEventType(message: Buffer): string | null {
+  try {
+    const parsed = JSON.parse(message.toString("utf8")) as unknown;
+    return typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed) &&
+      typeof Reflect.get(parsed, "type") === "string"
+      ? (Reflect.get(parsed, "type") as string)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function defaultWebSocketFactory(

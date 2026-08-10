@@ -9,6 +9,9 @@ import { AuthService } from "./auth/service.js";
 import { PostgresCharacterRepository } from "./characters/postgres-repository.js";
 import type { CharacterRepository } from "./characters/repository.js";
 import { CharacterService } from "./characters/service.js";
+import { PostgresConversationRepository } from "./conversations/postgres-repository.js";
+import type { ConversationRepository } from "./conversations/repository.js";
+import { ConversationService } from "./conversations/service.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import { PostgresMemberRepository } from "./members/postgres-repository.js";
 import type { AdminMemberRepository } from "./members/repository.js";
@@ -20,6 +23,7 @@ import {
 import { registerAdminMemberRoutes } from "./routes/admin-members.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerCharacterRoutes } from "./routes/characters.js";
+import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerRealtimeRoutes } from "./routes/realtime.js";
 
 type FetchFunction = typeof globalThis.fetch;
@@ -30,6 +34,7 @@ export type BuildAppOptions = {
   authRepository?: AuthRepository | null;
   memberRepository?: AdminMemberRepository | null;
   characterRepository?: CharacterRepository | null;
+  conversationRepository?: ConversationRepository | null;
   databaseClient?: DatabaseClient | null;
   qwenWebSocketFactory?: QwenWebSocketFactory;
   logger?: boolean;
@@ -62,6 +67,12 @@ export async function buildApp(
         ? new PostgresCharacterRepository(databaseClient.db)
         : null
       : options.characterRepository;
+  const conversationRepository =
+    options.conversationRepository === undefined
+      ? databaseClient
+        ? new PostgresConversationRepository(databaseClient.db)
+        : null
+      : options.conversationRepository;
   const app = Fastify({
     logger:
       options.logger === false
@@ -109,6 +120,7 @@ export async function buildApp(
   const auth = new AuthService(authRepository, config.auth.sessionTtlMs);
   const members = new MemberService(memberRepository);
   const characters = new CharacterService(characterRepository);
+  const conversations = new ConversationService(conversationRepository);
 
   if (ownedDatabaseClient) {
     app.addHook("onClose", () => ownedDatabaseClient.close());
@@ -133,9 +145,11 @@ export async function buildApp(
     config,
     auth,
     characters,
+    conversations,
     options.fetchFunction,
     options.qwenWebSocketFactory,
   );
+  await registerConversationRoutes(app, config, auth, conversations);
   await registerRealtimeRoutes(app, config, auth);
   return app;
 }

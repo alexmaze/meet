@@ -1,5 +1,6 @@
 import type {
   CharacterRuntimeResponse,
+  ConversationMode,
   QwenRealtimePublicConfig,
   RealtimeConnectionState,
   TranscriptSegment,
@@ -16,6 +17,12 @@ import {
 
 import { mapRuntimeToLaunchOptions } from "../characters/character-logic.js";
 import {
+  ConversationApiError,
+  appendConversationMessages,
+  completeConversation,
+  createConversation,
+} from "../history/conversation-api.js";
+import {
   initialClientSnapshot,
   type InputMode,
   type RealtimeClientSnapshot,
@@ -30,6 +37,24 @@ type EventLogEntry = {
 };
 
 type MicrophoneOption = { deviceId: string; label: string };
+
+type PendingPersistedMessage = {
+  id: string;
+  sequence: number;
+  role: "user" | "assistant";
+  status: "completed" | "interrupted";
+  text: string;
+  providerEventId: string | null;
+  createdAt: string;
+};
+
+type ConversationPersistence = {
+  id: string;
+  nextSequence: number;
+  acknowledgedSequence: number;
+  pending: PendingPersistedMessage[];
+  flushing: Promise<void> | null;
+};
 
 type CharacterCallProps = {
   runtime: CharacterRuntimeResponse;
@@ -64,6 +89,7 @@ export default function CharacterCall({
 }: CharacterCallProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const clientRef = useRef<QwenWebSocketRealtimeClient | null>(null);
+  const persistenceRef = useRef<ConversationPersistence | null>(null);
   const [snapshot, setSnapshot] = useState<RealtimeClientSnapshot>(
     initialClientSnapshot,
   );
@@ -72,6 +98,8 @@ export default function CharacterCall({
     const saved = window.localStorage.getItem("meet.inputMode");
     return saved === "push_to_talk" ? "push_to_talk" : "hands_free";
   });
+  const [conversationMode, setConversationMode] =
+    useState<ConversationMode>("normal");
   const [microphones, setMicrophones] = useState<MicrophoneOption[]>([]);
   const [selectedMicrophoneId, setSelectedMicrophoneId] = useState(
     () => window.localStorage.getItem("meet.microphoneDeviceId") ?? "",
@@ -80,6 +108,7 @@ export default function CharacterCall({
   const [history, setHistory] = useState<TranscriptSegment[]>([]);
   const [eventLog, setEventLog] = useState<EventLogEntry[]>([]);
   const [errorMessage, setErrorMessage] = useState("");
+  const [persistenceError, setPersistenceError] = useState("");
   const [publicConfig, setPublicConfig] =
     useState<QwenRealtimePublicConfig | null>(null);
   const [configError, setConfigError] = useState("");
@@ -176,6 +205,105 @@ export default function CharacterCall({
     [],
   );
 
+  const flushPersistence = async (): Promise<void> => {
+    const persistence = persistenceRef.current;
+    if (!persistence) return;
+    if (persistence.flushing) return persistence.flushing;
+
+    const flush = (async () => {
+      while (
+        persistenceRef.current === persistence &&
+        persistence.pending.length > 0
+      ) {
+        const message = persistence.pending[0];
+        if (!message) break;
+        let lastError: unknown;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            const acknowledgedSequence = await appendConversationMessages(
+              persistence.id,
+              { messages: [message] },
+            );
+            persistence.acknowledgedSequence = acknowledgedSequence;
+            persistence.pending.shift();
+            setPersistenceError("");
+            lastError = undefined;
+            break;
+          } catch (error) {
+            lastError = error;
+            if (error instanceof ConversationApiError && error.status === 401) {
+              onUnauthorized();
+              throw error;
+            }
+            if (attempt < 2) await delay(500 * 2 ** attempt);
+          }
+        }
+        if (lastError) {
+          setPersistenceError(
+            "文字记录暂时没有同步成功；保持页面打开时会在下一条字幕出现后继续重试。",
+          );
+          throw lastError;
+        }
+      }
+    })().finally(() => {
+      if (persistenceRef.current === persistence) persistence.flushing = null;
+    });
+    persistence.flushing = flush;
+    return flush;
+  };
+
+  const queueTranscript = (transcript: {
+    speaker: "user" | "assistant";
+    text: string;
+    status: "completed" | "interrupted";
+    providerEventId: string | null;
+  }): void => {
+    const persistence = persistenceRef.current;
+    const createdAt = new Date().toISOString();
+    const id = createLocalId();
+    setHistory((current) => [
+      ...current,
+      { id, speaker: transcript.speaker, text: transcript.text, createdAt },
+    ]);
+    if (!persistence) return;
+    persistence.pending.push({
+      id,
+      sequence: persistence.nextSequence,
+      role: transcript.speaker,
+      status: transcript.status,
+      text: transcript.text,
+      providerEventId: transcript.providerEventId,
+      createdAt,
+    });
+    persistence.nextSequence += 1;
+    void flushPersistence().catch(() => undefined);
+  };
+
+  const finishPersistence = async (): Promise<boolean> => {
+    const persistence = persistenceRef.current;
+    if (!persistence) return true;
+    try {
+      await flushPersistence();
+      if (persistence.pending.length > 0) return false;
+      await completeConversation(
+        persistence.id,
+        persistence.acknowledgedSequence,
+      );
+      if (persistenceRef.current === persistence) persistenceRef.current = null;
+      setPersistenceError("");
+      return true;
+    } catch (error) {
+      if (error instanceof ConversationApiError && error.status === 401) {
+        onUnauthorized();
+      } else {
+        setPersistenceError(
+          "通话已经停止，但文字记录尚未完整收口；历史中会标记为未正常结束。",
+        );
+      }
+      return false;
+    }
+  };
+
   const startCall = async () => {
     if (
       !audioRef.current ||
@@ -186,22 +314,42 @@ export default function CharacterCall({
     )
       return;
     setErrorMessage("");
+    setPersistenceError("");
     setHistory([]);
     setEventLog([]);
 
+    if (persistenceRef.current && !(await finishPersistence())) return;
+
+    let conversationId: string;
+    try {
+      const conversation = await createConversation({
+        id: createLocalId(),
+        characterId: character.id,
+        mode: conversationMode,
+      });
+      conversationId = conversation.id;
+      persistenceRef.current = {
+        id: conversation.id,
+        nextSequence: conversation.lastSequence + 1,
+        acknowledgedSequence: conversation.lastSequence,
+        pending: [],
+        flushing: null,
+      };
+    } catch (error) {
+      if (error instanceof ConversationApiError && error.status === 401) {
+        onUnauthorized();
+      } else {
+        setPersistenceError("无法创建通话记录，请稍后重试。通话尚未开始。");
+      }
+      return;
+    }
+
     const client = new QwenWebSocketRealtimeClient(audioRef.current, {
-      onSnapshot: setSnapshot,
-      onTranscript: ({ speaker, text }) => {
-        setHistory((current) => [
-          ...current,
-          {
-            id: createLocalId(),
-            speaker,
-            text,
-            createdAt: new Date().toISOString(),
-          },
-        ]);
+      onSnapshot: (nextSnapshot) => {
+        setSnapshot(nextSnapshot);
+        if (nextSnapshot.connection === "active") setErrorMessage("");
       },
+      onTranscript: queueTranscript,
       onProviderEvent: (direction, event) => {
         setEventLog((current) => [
           ...current.slice(-79),
@@ -215,6 +363,7 @@ export default function CharacterCall({
       },
       onError: (error) => setErrorMessage(error.message),
       onUnauthorized,
+      onBeforeReconnect: flushPersistence,
     });
 
     clientRef.current = client;
@@ -222,6 +371,7 @@ export default function CharacterCall({
     try {
       await client.start({
         ...launch.value,
+        conversationId,
         inputMode,
         audioInputDeviceId: selectedMicrophoneId || undefined,
       });
@@ -229,6 +379,7 @@ export default function CharacterCall({
     } catch {
       clientRef.current = null;
       setHasClient(false);
+      await finishPersistence();
     }
   };
 
@@ -237,6 +388,7 @@ export default function CharacterCall({
     clientRef.current = null;
     setHasClient(false);
     await client?.close();
+    await finishPersistence();
   };
 
   const exitCall = async () => {
@@ -319,9 +471,10 @@ export default function CharacterCall({
         </div>
       </section>
 
-      {(configError || !launch.ok || errorMessage) && (
+      {(configError || !launch.ok || errorMessage || persistenceError) && (
         <div className="call-error" role="alert">
-          {configError || (!launch.ok ? launch.message : errorMessage)}
+          {configError ||
+            (!launch.ok ? launch.message : errorMessage || persistenceError)}
         </div>
       )}
       {publicConfig && (!publicConfig.enabled || !publicConfig.configured) && (
@@ -333,6 +486,24 @@ export default function CharacterCall({
       )}
 
       <footer className="immersive-call-controls">
+        <div className="call-mode-switch" aria-label="通话记忆模式">
+          <button
+            className={conversationMode === "normal" ? "selected" : ""}
+            type="button"
+            disabled={hasClient}
+            onClick={() => setConversationMode("normal")}
+          >
+            延续关系
+          </button>
+          <button
+            className={conversationMode === "temporary" ? "selected" : ""}
+            type="button"
+            disabled={hasClient}
+            onClick={() => setConversationMode("temporary")}
+          >
+            临时对话
+          </button>
+        </div>
         <div className="call-mode-switch" aria-label="语音输入模式">
           <button
             className={inputMode === "hands_free" ? "selected" : ""}
@@ -411,6 +582,15 @@ export default function CharacterCall({
               >
                 ■
               </button>
+              {snapshot.connection === "paused" && (
+                <button
+                  className="call-retry-button"
+                  type="button"
+                  onClick={() => clientRef.current?.retry()}
+                >
+                  继续重试
+                </button>
+              )}
               <button
                 className="call-end-button"
                 type="button"
@@ -528,4 +708,8 @@ function getCaptionPlaceholder(
 
 function createLocalId(): string {
   return crypto.randomUUID();
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
