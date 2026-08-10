@@ -1,4 +1,6 @@
+import { once } from "node:events";
 import { describe, expect, it, vi } from "vitest";
+import WebSocket, { WebSocketServer } from "ws";
 
 import type { AppConfig } from "../src/config.js";
 import {
@@ -14,6 +16,10 @@ import {
   normalizeQwenRealtimeEndpoint,
   validateOfferSdp,
 } from "../src/qwen.js";
+import {
+  generateQwenVoicePreview,
+  pcm16ToWav,
+} from "../src/qwen-voice-preview.js";
 
 const offer = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
 const answer = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
@@ -314,5 +320,96 @@ describe("Qwen WebSocket relay", () => {
     expect(
       isAllowedQwenClientEvent(Buffer.from(JSON.stringify(event)), runtime),
     ).toBe(false);
+  });
+});
+
+describe("Qwen voice preview", () => {
+  it("turns allowlisted realtime PCM into a playable mono WAV", async () => {
+    const upstreamServer = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await once(upstreamServer, "listening");
+    const address = upstreamServer.address();
+    if (typeof address === "string" || address === null) {
+      throw new Error("测试 WebSocket 服务未监听 TCP 端口。");
+    }
+
+    let authorization: string | undefined;
+    const receivedTypes: string[] = [];
+    upstreamServer.once("connection", (socket, request) => {
+      authorization = request.headers.authorization;
+      socket.send(JSON.stringify({ type: "session.created" }));
+      socket.on("message", (data) => {
+        const event = JSON.parse(data.toString()) as Record<string, unknown>;
+        receivedTypes.push(String(event.type));
+        if (event.type === "session.update") {
+          expect(event).toMatchObject({
+            session: {
+              voice: "longanxiaoxin",
+              output_audio_format: "pcm",
+            },
+          });
+          socket.send(JSON.stringify({ type: "session.updated" }));
+        }
+        if (event.type === "conversation.item.create") {
+          expect(event).toMatchObject({
+            item: {
+              role: "user",
+              content: [{ type: "input_text" }],
+            },
+          });
+        }
+        if (event.type === "response.create") {
+          for (const [index, delta] of ["AQI=", "AwQ="].entries()) {
+            socket.send(
+              JSON.stringify({
+                type: "response.audio.delta",
+                response_id: "response-preview",
+                item_id: "item-preview",
+                output_index: 0,
+                content_index: index,
+                delta,
+              }),
+            );
+          }
+          socket.send(
+            JSON.stringify({
+              type: "response.done",
+              response: { id: "response-preview", status: "completed" },
+            }),
+          );
+        }
+      });
+    });
+
+    try {
+      const wav = await generateQwenVoicePreview({
+        config: { ...qwenConfig, requestTimeoutMs: 1_000 },
+        model: "qwen-audio-3.0-realtime-plus",
+        voice: "longanxiaoxin",
+        webSocketFactory: (_url, options) =>
+          new WebSocket(`ws://127.0.0.1:${address.port}`, options),
+      });
+      expect(wav.subarray(0, 4).toString("ascii")).toBe("RIFF");
+      expect(wav.subarray(8, 12).toString("ascii")).toBe("WAVE");
+      expect(wav.readUInt32LE(24)).toBe(24_000);
+      expect([...wav.subarray(44)]).toEqual([1, 2, 3, 4]);
+      expect(receivedTypes).toEqual([
+        "session.update",
+        "conversation.item.create",
+        "response.create",
+      ]);
+      expect(authorization).toBe("Bearer test-key");
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        upstreamServer.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
+  it("writes the PCM length into a standard WAV header", () => {
+    const wav = pcm16ToWav(Buffer.from([0, 0, 1, 0]), 24_000);
+    expect(wav.readUInt32LE(4)).toBe(40);
+    expect(wav.readUInt32LE(40)).toBe(4);
+    expect(wav.readUInt16LE(22)).toBe(1);
+    expect(wav.readUInt16LE(34)).toBe(16);
   });
 });

@@ -43,6 +43,13 @@
       "when": 1786357689777,
       "tag": "0005_media_store",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786377600000,
+      "tag": "0006_qwen_system_voices",
+      "breakpoints": true
     }
   ]
 }

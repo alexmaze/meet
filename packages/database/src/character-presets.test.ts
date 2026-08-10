@@ -50,7 +50,7 @@ describe("built-in character presets", () => {
     }
   });
 
-  it("uses the current Qwen Audio profile and the three confirmed voice ids", () => {
+  it("uses the current Qwen Audio profile and all five system voice ids", () => {
     expect(DEFAULT_PROVIDER_PROFILE).toMatchObject({
       provider: "qwen",
       model: "qwen-audio-3.0-realtime-plus",
@@ -62,7 +62,13 @@ describe("built-in character presets", () => {
     ).toBe(true);
     expect(
       BUILTIN_VOICE_PROFILES.map(({ providerVoiceId }) => providerVoiceId),
-    ).toEqual(["longanlufeng", "longanlingxi", "longanlingxin"]);
+    ).toEqual([
+      "longanqian",
+      "longanlufeng",
+      "longanlingxi",
+      "longanlingxin",
+      "longanxiaoxin",
+    ]);
     for (const voice of BUILTIN_VOICE_PROFILES) {
       expect(voiceStyleSchema.safeParse(voice.style).success).toBe(true);
       expect(voice.providerProfileId).toBe(DEFAULT_QWEN_PROVIDER_PROFILE_ID);

@@ -109,6 +109,34 @@ export class CharacterService {
     };
   }
 
+  async voicePreviewRuntime(
+    actor: UserAccount,
+    voiceProfileId: string,
+  ): Promise<{
+    provider: ProviderProfile["provider"];
+    model: string;
+    voice: string;
+  }> {
+    this.assertWriter(actor);
+    const catalog = await this.callRepository((repository) =>
+      repository.listCatalog(),
+    );
+    const voice = catalog.voices.find(
+      (candidate) => candidate.id === voiceProfileId,
+    );
+    const provider = voice
+      ? catalog.providers.find(
+          (candidate) => candidate.id === voice.providerProfileId,
+        )
+      : null;
+    if (!voice || !provider) throw invalidProfile();
+    return {
+      provider: provider.provider,
+      model: provider.model,
+      voice: voice.providerVoiceId,
+    };
+  }
+
   async create(
     actor: UserAccount,
     input: CreateCharacterRequest,

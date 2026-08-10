@@ -122,6 +122,7 @@ const conversationRepository = {
 } satisfies ConversationRepository;
 const characterSessionUrl = `/api/characters/${testCharacter.character.id}/realtime/sessions`;
 const characterWebSocketUrl = `/api/characters/${testCharacter.character.id}/realtime/websocket?conversationId=${testConversationId}`;
+const voicePreviewUrl = `/api/characters/voices/${testCharacter.voiceProfile.id}/preview`;
 
 describe("Meet API", () => {
   it("returns authenticated realtime config without secrets", async () => {
@@ -166,6 +167,69 @@ describe("Meet API", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ configured: false });
     await app.close();
+  });
+
+  it("returns an authenticated catalog voice preview as WAV", async () => {
+    const upstreamServer = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await once(upstreamServer, "listening");
+    const address = upstreamServer.address();
+    if (typeof address === "string" || address === null) {
+      throw new Error("测试 WebSocket 服务未监听 TCP 端口。");
+    }
+    upstreamServer.once("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "session.created" }));
+      socket.on("message", (data) => {
+        const event = JSON.parse(data.toString()) as Record<string, unknown>;
+        if (event.type === "session.update") {
+          expect(event).toMatchObject({
+            session: { voice: testCharacter.voiceProfile.providerVoiceId },
+          });
+          socket.send(JSON.stringify({ type: "session.updated" }));
+        }
+        if (event.type === "response.create") {
+          socket.send(
+            JSON.stringify({
+              type: "response.audio.delta",
+              response_id: "response-preview",
+              item_id: "item-preview",
+              output_index: 0,
+              content_index: 0,
+              delta: "AQIDBA==",
+            }),
+          );
+          socket.send(
+            JSON.stringify({
+              type: "response.done",
+              response: { id: "response-preview", status: "completed" },
+            }),
+          );
+        }
+      });
+    });
+
+    const app = await buildApp({
+      config,
+      authRepository,
+      characterRepository,
+      qwenWebSocketFactory: (_url, options) =>
+        new WebSocket(`ws://127.0.0.1:${address.port}`, options),
+      logger: false,
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: voicePreviewUrl,
+        headers: authHeaders,
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["content-type"]).toContain("audio/wav");
+      expect(response.rawPayload.subarray(0, 4).toString("ascii")).toBe("RIFF");
+      expect([...response.rawPayload.subarray(44)]).toEqual([1, 2, 3, 4]);
+      expect(response.body).not.toContain("never-return-this-key");
+    } finally {
+      await app.close();
+      await closeWebSocketServer(upstreamServer);
+    }
   });
 
   it("proxies SDP as application/sdp", async () => {

@@ -53,6 +53,48 @@ export async function getCharacterCatalog(
   return parseCharacterCatalog(body);
 }
 
+export async function previewVoice(
+  voiceProfileId: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  let response: Response;
+  try {
+    response = await fetch(
+      `/api/characters/voices/${encodeURIComponent(voiceProfileId)}/preview`,
+      {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        signal,
+      },
+    );
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw error;
+    }
+    throw new CharacterApiError(null, "VOICE_PREVIEW_FAILED");
+  }
+
+  if (!response.ok) {
+    let code: string | undefined;
+    try {
+      const parsed = apiErrorSchema.safeParse(await response.json());
+      if (parsed.success) code = parsed.data.code;
+    } catch {
+      // Fall through to the stable client-side error code.
+    }
+    throw new CharacterApiError(
+      response.status,
+      code ?? "VOICE_PREVIEW_FAILED",
+    );
+  }
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("audio/wav")) {
+    throw new CharacterApiError(null, "INVALID_VOICE_PREVIEW_RESPONSE");
+  }
+  return await response.blob();
+}
+
 export async function getCharacter(
   characterId: string,
   signal?: AbortSignal,

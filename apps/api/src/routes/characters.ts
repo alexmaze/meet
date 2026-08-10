@@ -7,6 +7,7 @@ import {
   qwenRealtimeModelSchema,
   updateCharacterRequestSchema,
   updateCharacterVisibilityRequestSchema,
+  voiceProfileIdParamsSchema,
   type UserAccount,
 } from "@meet/protocol";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -29,6 +30,10 @@ import {
 } from "../conversations/service.js";
 import type { AppConfig } from "../config.js";
 import {
+  generateQwenVoicePreview,
+  QwenVoicePreviewError,
+} from "../qwen-voice-preview.js";
+import {
   isAllowedWebSocketOrigin,
   relayQwenWebSocket,
   type QwenWebSocketFactory,
@@ -47,6 +52,7 @@ export async function registerCharacterRoutes(
   qwenWebSocketFactory?: QwenWebSocketFactory,
 ): Promise<void> {
   const realtimeHandshakeRateLimiter = new LoginRateLimiter(20, 60_000);
+  const voicePreviewRateLimiter = new LoginRateLimiter(10, 60_000);
   const websocketContexts = new WeakMap<
     FastifyRequest,
     {
@@ -82,6 +88,71 @@ export async function registerCharacterRoutes(
       return sendCharacterError(reply, error);
     }
   });
+
+  app.post(
+    "/api/characters/voices/:voiceProfileId/preview",
+    async (request, reply) => {
+      noStore(reply);
+      const actor = await authenticateActor(request, reply, config, auth);
+      if (!actor) return;
+      try {
+        const params = voiceProfileIdParamsSchema.safeParse(request.params);
+        if (!params.success) return invalidCharacterRequest(reply);
+        const runtime = await characterService.voicePreviewRuntime(
+          actor,
+          params.data.voiceProfileId,
+        );
+        const model = qwenRealtimeModelSchema.safeParse(runtime.model);
+        if (runtime.provider !== "qwen" || !model.success) {
+          throw new CharacterServiceError(
+            "CHARACTER_REALTIME_UNAVAILABLE",
+            "该声音当前不支持在线试听。",
+            409,
+          );
+        }
+        if (!config.qwen.enabled) {
+          return reply.code(503).send({
+            code: "REALTIME_SPIKE_DISABLED",
+            message: "千问实时服务未启用。",
+          });
+        }
+
+        const rateLimit = voicePreviewRateLimiter.consume(
+          `${actor.id}:${request.ip}`,
+        );
+        if (!rateLimit.allowed) {
+          reply.header("Retry-After", String(rateLimit.retryAfterSeconds));
+          return reply.code(429).send({
+            code: "RATE_LIMITED",
+            message: "音色试听过于频繁，请稍后再试。",
+          });
+        }
+
+        const wav = await generateQwenVoicePreview({
+          config: config.qwen,
+          model: model.data,
+          voice: runtime.voice,
+          webSocketFactory: qwenWebSocketFactory,
+        });
+        return reply
+          .type("audio/wav")
+          .header("Content-Length", String(wav.byteLength))
+          .send(wav);
+      } catch (error) {
+        if (error instanceof QwenVoicePreviewError) {
+          request.log.warn(
+            { code: error.code },
+            "Qwen voice preview generation failed",
+          );
+          return reply.code(error.statusCode).send({
+            code: error.code,
+            message: error.message,
+          });
+        }
+        return sendCharacterError(reply, error);
+      }
+    },
+  );
 
   app.post("/api/characters", async (request, reply) => {
     noStore(reply);

@@ -5,8 +5,16 @@ import type {
   UserAccount,
   VoiceProfile,
 } from "@meet/protocol";
-import { useMemo, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 
+import { previewVoice } from "./character-api.js";
 import {
   buildCreateCharacterRequest,
   builtInAvatarChoices,
@@ -26,6 +34,16 @@ type CharacterEditorProps = {
   onSave: (request: CreateCharacterRequest) => void;
 };
 
+type VoicePreviewState =
+  | { status: "idle" }
+  | { status: "loading"; voiceProfileId: string }
+  | {
+      status: "ready" | "playing";
+      voiceProfileId: string;
+      objectUrl: string;
+    }
+  | { status: "error"; voiceProfileId: string; message: string };
+
 export default function CharacterEditor({
   user,
   character,
@@ -42,6 +60,12 @@ export default function CharacterEditor({
       : createEmptyCharacterForm(providers, voices),
   );
   const [validationError, setValidationError] = useState("");
+  const [voicePreview, setVoicePreview] = useState<VoicePreviewState>({
+    status: "idle",
+  });
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const previewAbortRef = useRef<AbortController | null>(null);
+  const previewObjectUrlRef = useRef<string | null>(null);
   const matchingVoices = useMemo(
     () =>
       voices.filter(
@@ -49,6 +73,80 @@ export default function CharacterEditor({
       ),
     [form.providerProfileId, voices],
   );
+
+  useEffect(
+    () => () => {
+      previewAbortRef.current?.abort();
+      previewAudioRef.current?.pause();
+      if (previewObjectUrlRef.current) {
+        URL.revokeObjectURL(previewObjectUrlRef.current);
+      }
+    },
+    [],
+  );
+
+  const resetVoicePreview = () => {
+    previewAbortRef.current?.abort();
+    previewAbortRef.current = null;
+    previewAudioRef.current?.pause();
+    previewAudioRef.current = null;
+    if (previewObjectUrlRef.current) {
+      URL.revokeObjectURL(previewObjectUrlRef.current);
+      previewObjectUrlRef.current = null;
+    }
+    setVoicePreview({ status: "idle" });
+  };
+
+  const toggleVoicePreview = async () => {
+    const voiceProfileId = form.voiceProfileId;
+    if (!voiceProfileId) return;
+
+    if (
+      voicePreview.status === "playing" &&
+      voicePreview.voiceProfileId === voiceProfileId
+    ) {
+      previewAudioRef.current?.pause();
+      setVoicePreview({ ...voicePreview, status: "ready" });
+      return;
+    }
+    if (
+      voicePreview.status === "ready" &&
+      voicePreview.voiceProfileId === voiceProfileId
+    ) {
+      try {
+        await previewAudioRef.current?.play();
+      } catch {
+        // 下方原生播放器仍可用于满足更严格的移动端播放策略。
+      }
+      return;
+    }
+
+    resetVoicePreview();
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
+    setVoicePreview({ status: "loading", voiceProfileId });
+    try {
+      const blob = await previewVoice(voiceProfileId, controller.signal);
+      if (controller.signal.aborted) return;
+      const objectUrl = URL.createObjectURL(blob);
+      previewObjectUrlRef.current = objectUrl;
+      setVoicePreview({ status: "ready", voiceProfileId, objectUrl });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setVoicePreview({
+        status: "error",
+        voiceProfileId,
+        message:
+          error instanceof Error
+            ? "暂时无法生成试听，请检查实时服务配置后重试。"
+            : "暂时无法生成试听，请稍后重试。",
+      });
+    } finally {
+      if (previewAbortRef.current === controller) {
+        previewAbortRef.current = null;
+      }
+    }
+  };
 
   const change = <K extends keyof CharacterFormValue>(
     key: K,
@@ -305,6 +403,7 @@ export default function CharacterEditor({
                   id="character-provider"
                   value={form.providerProfileId}
                   onChange={(event) => {
+                    resetVoicePreview();
                     const providerProfileId = event.target.value;
                     const voice = voices.find(
                       (candidate) =>
@@ -324,21 +423,79 @@ export default function CharacterEditor({
                   ))}
                 </select>
               </Field>
-              <Field label="角色声音" htmlFor="character-voice">
-                <select
-                  id="character-voice"
-                  value={form.voiceProfileId}
-                  onChange={(event) =>
-                    change("voiceProfileId", event.target.value)
-                  }
-                >
-                  {matchingVoices.map((voice) => (
-                    <option key={voice.id} value={voice.id}>
-                      {voice.displayName}
-                    </option>
-                  ))}
-                </select>
-              </Field>
+              <div className="voice-picker-field">
+                <Field label="角色声音" htmlFor="character-voice">
+                  <select
+                    id="character-voice"
+                    value={form.voiceProfileId}
+                    onChange={(event) => {
+                      resetVoicePreview();
+                      change("voiceProfileId", event.target.value);
+                    }}
+                  >
+                    {matchingVoices.map((voice) => (
+                      <option key={voice.id} value={voice.id}>
+                        {voice.displayName}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <div className="voice-preview-row">
+                  <button
+                    className="secondary-button voice-preview-button"
+                    type="button"
+                    disabled={
+                      !form.voiceProfileId || voicePreview.status === "loading"
+                    }
+                    onClick={() => void toggleVoicePreview()}
+                  >
+                    {voicePreview.status === "loading"
+                      ? "正在生成试听…"
+                      : voicePreview.status === "playing"
+                        ? "停止试听"
+                        : voicePreview.status === "ready" &&
+                            voicePreview.voiceProfileId === form.voiceProfileId
+                          ? "播放试听"
+                          : "试听声音"}
+                  </button>
+                  <span className="voice-preview-note" aria-live="polite">
+                    {voicePreview.status === "error"
+                      ? voicePreview.message
+                      : "固定短句 · 不会创建对话记录"}
+                  </span>
+                </div>
+                {(voicePreview.status === "ready" ||
+                  voicePreview.status === "playing") &&
+                  voicePreview.voiceProfileId === form.voiceProfileId && (
+                    <audio
+                      className="voice-preview-audio"
+                      autoPlay
+                      controls
+                      src={voicePreview.objectUrl}
+                      onPlay={() =>
+                        setVoicePreview({ ...voicePreview, status: "playing" })
+                      }
+                      onPause={() => {
+                        if (!previewAudioRef.current?.ended) {
+                          setVoicePreview({ ...voicePreview, status: "ready" });
+                        }
+                      }}
+                      onEnded={() =>
+                        setVoicePreview({ ...voicePreview, status: "ready" })
+                      }
+                      onError={() =>
+                        setVoicePreview({
+                          status: "error",
+                          voiceProfileId: voicePreview.voiceProfileId,
+                          message: "试听音频无法播放，请稍后重试。",
+                        })
+                      }
+                      ref={(element) => {
+                        if (element) previewAudioRef.current = element;
+                      }}
+                    />
+                  )}
+              </div>
             </div>
             <fieldset className="avatar-picker">
               <legend>内置形象</legend>

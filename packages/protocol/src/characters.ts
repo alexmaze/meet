@@ -260,6 +260,12 @@ export const characterIdParamsSchema = z
   })
   .strict();
 
+export const voiceProfileIdParamsSchema = z
+  .object({
+    voiceProfileId: z.uuid(),
+  })
+  .strict();
+
 export const characterListResponseSchema = z
   .object({ characters: z.array(characterSummarySchema) })
   .strict();

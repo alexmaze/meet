@@ -16,9 +16,11 @@ export const BUILTIN_CHARACTER_IDS = {
 } as const;
 
 export const BUILTIN_VOICE_PROFILE_IDS = {
+  defaultFemale: "be8f77ec-a61e-4be0-8b70-8c7cb9e51104",
   hero: "be8f77ec-a61e-4be0-8b70-8c7cb9e51101",
   teacher: "be8f77ec-a61e-4be0-8b70-8c7cb9e51102",
   companion: "be8f77ec-a61e-4be0-8b70-8c7cb9e51103",
+  livelyFemale: "be8f77ec-a61e-4be0-8b70-8c7cb9e51105",
 } as const;
 
 export type ProviderProfileSeed = {
@@ -54,6 +56,20 @@ export type VoiceProfileSeed = {
 };
 
 export const BUILTIN_VOICE_PROFILES: VoiceProfileSeed[] = [
+  {
+    id: BUILTIN_VOICE_PROFILE_IDS.defaultFemale,
+    systemKey: "voice.qwen.longanqian",
+    providerProfileId: DEFAULT_QWEN_PROVIDER_PROFILE_ID,
+    type: "preset",
+    providerVoiceId: "longanqian",
+    displayName: "自然女声",
+    style: {
+      pace: "normal",
+      energy: "medium",
+      warmth: "medium",
+      emotionInstruction: "自然、亲切、清晰，适合轻松日常交流。",
+    },
+  },
   {
     id: BUILTIN_VOICE_PROFILE_IDS.hero,
     systemKey: "voice.qwen.longanlufeng",
@@ -94,6 +110,20 @@ export const BUILTIN_VOICE_PROFILES: VoiceProfileSeed[] = [
       energy: "low",
       warmth: "high",
       emotionInstruction: "温柔自然、不过度煽情，回应保留真实的停顿感。",
+    },
+  },
+  {
+    id: BUILTIN_VOICE_PROFILE_IDS.livelyFemale,
+    systemKey: "voice.qwen.longanxiaoxin",
+    providerProfileId: DEFAULT_QWEN_PROVIDER_PROFILE_ID,
+    type: "preset",
+    providerVoiceId: "longanxiaoxin",
+    displayName: "亲切活力声",
+    style: {
+      pace: "normal",
+      energy: "high",
+      warmth: "medium",
+      emotionInstruction: "亲切活泼、明快自然，表达有朝气但不过分夸张。",
     },
   },
 ];

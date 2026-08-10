@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CharacterApiError,
   parseCharacter,
   parseCharacterList,
   parseCharacterRuntime,
+  previewVoice,
 } from "./character-api.js";
 
 const ids = {
@@ -122,5 +123,50 @@ describe("character API parsers", () => {
         realtime: { ...runtime.realtime, apiKey: "should-not-exist" },
       }),
     ).toThrow(CharacterApiError);
+  });
+});
+
+describe("previewVoice", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("requests an authenticated no-store WAV preview", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(new Uint8Array([82, 73, 70, 70]), {
+          status: 200,
+          headers: { "Content-Type": "audio/wav" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const blob = await previewVoice("be8f77ec-a61e-4be0-8b70-8c7cb9e51105");
+    expect(blob.type).toBe("audio/wav");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/characters/voices/be8f77ec-a61e-4be0-8b70-8c7cb9e51105/preview",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+      }),
+    );
+  });
+
+  it("rejects a successful response that is not WAV", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("not audio", {
+            status: 200,
+            headers: { "Content-Type": "text/plain" },
+          }),
+      ),
+    );
+
+    await expect(
+      previewVoice("be8f77ec-a61e-4be0-8b70-8c7cb9e51105"),
+    ).rejects.toMatchObject({
+      code: "INVALID_VOICE_PREVIEW_RESPONSE",
+    });
   });
 });

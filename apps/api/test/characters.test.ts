@@ -77,6 +77,10 @@ describe("character routes", () => {
         payload: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
         headers: { "content-type": "application/sdp" },
       },
+      {
+        method: "POST" as const,
+        url: `/api/characters/voices/${BUILTIN_VOICE_PROFILES[0]!.id}/preview`,
+      },
     ]) {
       const response = await app.inject(requestOptions);
       expect(response.statusCode).toBe(401);
@@ -84,6 +88,32 @@ describe("character routes", () => {
         code: "AUTHENTICATION_REQUIRED",
       });
     }
+    await app.close();
+  });
+
+  it("restricts voice preview to character writers and catalog voices", async () => {
+    const repository = seededCharacters();
+    const app = await testApp(repository);
+    const voiceId = BUILTIN_VOICE_PROFILES[0]!.id;
+
+    const childPreview = await request(
+      app,
+      child,
+      "POST",
+      `/api/characters/voices/${voiceId}/preview`,
+    );
+    expect(childPreview.statusCode).toBe(403);
+
+    const unknownPreview = await request(
+      app,
+      adult,
+      "POST",
+      "/api/characters/voices/be8f77ec-a61e-4be0-8b70-8c7cb9e59999/preview",
+    );
+    expect(unknownPreview.statusCode).toBe(400);
+    expect(unknownPreview.json()).toMatchObject({
+      code: "CHARACTER_PROFILE_INVALID",
+    });
     await app.close();
   });
 
