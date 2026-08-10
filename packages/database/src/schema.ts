@@ -14,6 +14,7 @@ import {
   pgEnum,
   pgTable,
   primaryKey,
+  real,
   timestamp,
   uniqueIndex,
   uuid,
@@ -104,6 +105,13 @@ export const conversationMessageStatusEnum = pgEnum(
   "conversation_message_status",
   ["completed", "interrupted"],
 );
+
+export const characterMemoryStatusEnum = pgEnum("character_memory_status", [
+  "active",
+  "suggested",
+  "rejected",
+  "deleted",
+]);
 
 export const userAccounts = pgTable(
   "user_accounts",
@@ -535,6 +543,110 @@ export const conversationMessages = pgTable(
   ],
 );
 
+export const conversationSummaries = pgTable(
+  "conversation_summaries",
+  {
+    conversationId: uuid("conversation_id")
+      .primaryKey()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "cascade" }),
+    characterId: uuid("character_id")
+      .notNull()
+      .references(() => characters.id, { onDelete: "restrict" }),
+    content: text("content").notNull(),
+    sourceMessageCount: integer("source_message_count").notNull(),
+    sourceLastSequence: integer("source_last_sequence").notNull(),
+    analyzerModel: varchar("analyzer_model", { length: 120 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("conversation_summaries_user_character_updated_idx").on(
+      table.userId,
+      table.characterId,
+      table.updatedAt,
+    ),
+    check(
+      "conversation_summaries_content_not_blank",
+      sql`length(btrim(${table.content})) > 0`,
+    ),
+    check(
+      "conversation_summaries_source_counters_nonnegative",
+      sql`${table.sourceMessageCount} >= 0 AND ${table.sourceLastSequence} >= 0`,
+    ),
+    check(
+      "conversation_summaries_analyzer_model_not_blank",
+      sql`length(btrim(${table.analyzerModel})) > 0`,
+    ),
+  ],
+);
+
+export const characterMemories = pgTable(
+  "character_memories",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "cascade" }),
+    characterId: uuid("character_id")
+      .notNull()
+      .references(() => characters.id, { onDelete: "restrict" }),
+    sourceConversationId: uuid("source_conversation_id").references(
+      () => conversations.id,
+      { onDelete: "set null" },
+    ),
+    contentFingerprint: varchar("content_fingerprint", {
+      length: 64,
+    }).notNull(),
+    content: text("content").notNull(),
+    sourceExcerpt: text("source_excerpt").notNull(),
+    confidence: real("confidence").notNull(),
+    status: characterMemoryStatusEnum("status").notNull(),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("character_memories_user_character_fingerprint_unique").on(
+      table.userId,
+      table.characterId,
+      table.contentFingerprint,
+    ),
+    index("character_memories_user_status_updated_idx").on(
+      table.userId,
+      table.status,
+      table.updatedAt,
+    ),
+    index("character_memories_user_character_status_idx").on(
+      table.userId,
+      table.characterId,
+      table.status,
+    ),
+    check(
+      "character_memories_content_not_blank",
+      sql`length(btrim(${table.content})) > 0`,
+    ),
+    check(
+      "character_memories_source_excerpt_not_blank",
+      sql`length(btrim(${table.sourceExcerpt})) > 0`,
+    ),
+    check(
+      "character_memories_confidence_range",
+      sql`${table.confidence} >= 0 AND ${table.confidence} <= 1`,
+    ),
+  ],
+);
+
 export type UserAccount = typeof userAccounts.$inferSelect;
 export type NewUserAccount = typeof userAccounts.$inferInsert;
 export type PasswordCredential = typeof passwordCredentials.$inferSelect;
@@ -559,3 +671,9 @@ export type ConversationMessageRecord =
   typeof conversationMessages.$inferSelect;
 export type NewConversationMessageRecord =
   typeof conversationMessages.$inferInsert;
+export type ConversationSummaryRecord =
+  typeof conversationSummaries.$inferSelect;
+export type NewConversationSummaryRecord =
+  typeof conversationSummaries.$inferInsert;
+export type CharacterMemoryRecord = typeof characterMemories.$inferSelect;
+export type NewCharacterMemoryRecord = typeof characterMemories.$inferInsert;

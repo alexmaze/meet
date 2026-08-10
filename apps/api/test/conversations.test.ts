@@ -199,6 +199,18 @@ describe("conversation realtime continuity", () => {
           "我记得，我们复习了分数。",
         ),
       ],
+      summaries: [
+        {
+          content: "上次一起复习了分数，约定继续准备周五考试。",
+          updatedAt: new Date("2026-08-09T05:10:00.000Z"),
+        },
+      ],
+      memories: [
+        {
+          content: "用户周五有数学考试。",
+          updatedAt: new Date("2026-08-09T05:11:00.000Z"),
+        },
+      ],
     });
     const service = new ConversationService(fake);
 
@@ -206,6 +218,8 @@ describe("conversation realtime continuity", () => {
       service.realtimeContext(adult, conversationId, characterId),
     ).resolves.toEqual({
       mode: "normal",
+      relationshipContext:
+        "已确认长期记忆：\n- 用户周五有数学考试。\n\n此前通话摘要：\n- 上次一起复习了分数，约定继续准备周五考试。",
       messages: [
         {
           id: "9bb6162e-e85c-4e5d-a3ff-000000000001",
@@ -238,6 +252,18 @@ describe("conversation realtime continuity", () => {
           "其他通话不应泄露",
           "0e684b9d-8fe1-4e68-bd49-f399fbaa0001",
         ),
+      ],
+      summaries: [
+        {
+          content: "临时对话不能加载的摘要",
+          updatedAt: new Date("2026-08-09T05:10:00.000Z"),
+        },
+      ],
+      memories: [
+        {
+          content: "临时对话不能加载的记忆",
+          updatedAt: new Date("2026-08-09T05:11:00.000Z"),
+        },
       ],
     });
     const service = new ConversationService(fake);

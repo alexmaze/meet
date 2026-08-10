@@ -8,12 +8,16 @@ import {
   loadConversationRealtimeContext,
   listConversations,
   type Database,
+  type ConversationCompletionHook,
 } from "@meet/database";
 
 import type { ConversationRepository } from "./repository.js";
 
 export class PostgresConversationRepository implements ConversationRepository {
-  constructor(private readonly db: Database) {}
+  constructor(
+    private readonly db: Database,
+    private readonly onCompleted?: ConversationCompletionHook,
+  ) {}
 
   create(
     actorUserId: string,
@@ -84,6 +88,7 @@ export class PostgresConversationRepository implements ConversationRepository {
       conversationId,
       lastSequence,
       endedAt,
+      onCompleted: this.onCompleted,
     });
   }
 

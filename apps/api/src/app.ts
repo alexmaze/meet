@@ -1,6 +1,14 @@
 import fastifyCookie from "@fastify/cookie";
 import fastifyWebsocket from "@fastify/websocket";
-import { createDatabaseClient, type DatabaseClient } from "@meet/database";
+import {
+  createDatabaseClient,
+  type ConversationCompletionHook,
+  type DatabaseClient,
+} from "@meet/database";
+import {
+  ConversationCompletionJobPublisher,
+  createMeetJobBoss,
+} from "@meet/jobs";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { PostgresAuthRepository } from "./auth/postgres-repository.js";
@@ -16,6 +24,9 @@ import { loadConfig, type AppConfig } from "./config.js";
 import { PostgresMemberRepository } from "./members/postgres-repository.js";
 import type { AdminMemberRepository } from "./members/repository.js";
 import { MemberService } from "./members/service.js";
+import { PostgresMemoryRepository } from "./memories/postgres-repository.js";
+import type { MemoryRepository } from "./memories/repository.js";
+import { MemoryService } from "./memories/service.js";
 import {
   QWEN_RELAY_CLIENT_MAX_MESSAGE_BYTES,
   type QwenWebSocketFactory,
@@ -24,6 +35,7 @@ import { registerAdminMemberRoutes } from "./routes/admin-members.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerCharacterRoutes } from "./routes/characters.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
+import { registerMemoryRoutes } from "./routes/memories.js";
 import { registerRealtimeRoutes } from "./routes/realtime.js";
 
 type FetchFunction = typeof globalThis.fetch;
@@ -35,7 +47,9 @@ export type BuildAppOptions = {
   memberRepository?: AdminMemberRepository | null;
   characterRepository?: CharacterRepository | null;
   conversationRepository?: ConversationRepository | null;
+  memoryRepository?: MemoryRepository | null;
   databaseClient?: DatabaseClient | null;
+  conversationCompletionHook?: ConversationCompletionHook | null;
   qwenWebSocketFactory?: QwenWebSocketFactory;
   logger?: boolean;
 };
@@ -49,6 +63,19 @@ export async function buildApp(
       ? createDatabaseClient({ connectionString: config.database.url })
       : null;
   const databaseClient = options.databaseClient ?? ownedDatabaseClient;
+  const ownedJobBoss =
+    options.conversationCompletionHook === undefined &&
+    options.conversationRepository === undefined &&
+    databaseClient &&
+    config.database.url
+      ? await createMeetJobBoss(config.database.url)
+      : null;
+  const conversationCompletionHook =
+    options.conversationCompletionHook === undefined
+      ? ownedJobBoss
+        ? new ConversationCompletionJobPublisher(ownedJobBoss).enqueue
+        : undefined
+      : (options.conversationCompletionHook ?? undefined);
   const authRepository =
     options.authRepository === undefined
       ? databaseClient
@@ -70,9 +97,18 @@ export async function buildApp(
   const conversationRepository =
     options.conversationRepository === undefined
       ? databaseClient
-        ? new PostgresConversationRepository(databaseClient.db)
+        ? new PostgresConversationRepository(
+            databaseClient.db,
+            conversationCompletionHook,
+          )
         : null
       : options.conversationRepository;
+  const memoryRepository =
+    options.memoryRepository === undefined
+      ? databaseClient
+        ? new PostgresMemoryRepository(databaseClient.db)
+        : null
+      : options.memoryRepository;
   const app = Fastify({
     logger:
       options.logger === false
@@ -121,9 +157,13 @@ export async function buildApp(
   const members = new MemberService(memberRepository);
   const characters = new CharacterService(characterRepository);
   const conversations = new ConversationService(conversationRepository);
+  const memories = new MemoryService(memoryRepository);
 
-  if (ownedDatabaseClient) {
-    app.addHook("onClose", () => ownedDatabaseClient.close());
+  if (ownedJobBoss || ownedDatabaseClient) {
+    app.addHook("onClose", async () => {
+      await ownedJobBoss?.stop();
+      await ownedDatabaseClient?.close();
+    });
   }
 
   app.addContentTypeParser(
@@ -150,6 +190,7 @@ export async function buildApp(
     options.qwenWebSocketFactory,
   );
   await registerConversationRoutes(app, config, auth, conversations);
+  await registerMemoryRoutes(app, config, auth, memories);
   await registerRealtimeRoutes(app, config, auth);
   return app;
 }

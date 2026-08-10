@@ -32,6 +32,7 @@ import {
   presentCharacterError,
 } from "./characters/character-logic.js";
 import HistoryPage from "./history/HistoryPage.js";
+import MemoryPage from "./memory/MemoryPage.js";
 import CharacterCall from "./realtime/CharacterCall.js";
 
 type ProductSection = "characters" | "history" | "memory" | "profile";
@@ -412,7 +413,9 @@ export default function App(session: AuthenticatedAppSession) {
               onUnauthorized={session.invalidateSession}
             />
           )}
-          {section === "memory" && <ComingSoon section="memory" />}
+          {section === "memory" && (
+            <MemoryPage onUnauthorized={session.invalidateSession} />
+          )}
           {section === "profile" && <ProfilePage session={session} />}
         </div>
       </div>
@@ -504,7 +507,6 @@ function ProductNav({
         >
           <span aria-hidden="true">{item.icon}</span>
           <span>{item.label}</span>
-          {item.id === "memory" && <small>下一阶段</small>}
         </button>
       ))}
     </nav>
@@ -521,20 +523,6 @@ function ProductBottomNav({
   return (
     <div className="product-bottom-nav">
       <ProductNav section={section} onNavigate={onNavigate} />
-    </div>
-  );
-}
-
-function ComingSoon({ section: _section }: { section: "memory" }) {
-  return (
-    <div className="coming-soon page-frame">
-      <span aria-hidden="true">◎</span>
-      <p className="product-eyebrow">NEXT STAGE</p>
-      <h1>长期记忆</h1>
-      <p>
-        下一阶段会在这里管理明确事实与待确认建议；不同账号的私人记忆始终隔离。
-      </p>
-      <strong>通话历史稳定后继续建设</strong>
     </div>
   );
 }

@@ -38,6 +38,7 @@ export type QwenWebSocketRelayOptions = {
   runtime: {
     voice: string;
     instructions: string;
+    relationshipContext?: string;
     history?: QwenContinuityMessage[];
   };
   webSocketFactory?: QwenWebSocketFactory;
@@ -280,7 +281,10 @@ export function relayQwenWebSocket({
       readJsonEventType(message) === "session.updated"
     ) {
       historyInjected = true;
-      for (const event of buildQwenContinuityEvents(runtime.history ?? [])) {
+      for (const event of buildQwenContinuityEvents(
+        runtime.history ?? [],
+        runtime.relationshipContext,
+      )) {
         const payload = Buffer.from(JSON.stringify(event));
         if (!sendWithBackpressure(upstream, payload, false)) {
           sendRelayError(
@@ -329,16 +333,30 @@ export function relayQwenWebSocket({
 
 export function buildQwenContinuityEvents(
   history: QwenContinuityMessage[],
+  relationshipContext?: string,
 ): Array<Record<string, unknown>> {
-  if (history.length === 0) return [];
-  const events: Array<Record<string, unknown>> = [
-    qwenContextItem(
-      "meet_history_context",
-      "system",
-      "input_text",
-      "以下消息是当前用户与这个角色此前真实发生、已经确认保存的对话。请把它们作为关系延续上下文使用；只依据记录回忆，不要编造未出现的往事。",
-    ),
-  ];
+  if (history.length === 0 && !relationshipContext) return [];
+  const events: Array<Record<string, unknown>> = [];
+  if (relationshipContext) {
+    events.push(
+      qwenContextItem(
+        "meet_relationship_context",
+        "system",
+        "input_text",
+        `以下是当前账号与这个角色之间由应用保存的已确认长期记忆和过往摘要。只把它们用于自然延续关系，不要逐条朗读，也不要扩展成未记录的事实。\n\n${relationshipContext}`,
+      ),
+    );
+  }
+  if (history.length > 0) {
+    events.push(
+      qwenContextItem(
+        "meet_history_context",
+        "system",
+        "input_text",
+        "以下消息是当前用户与这个角色此前真实发生、已经确认保存的对话。请把它们作为关系延续上下文使用；只依据记录回忆，不要编造未出现的往事。",
+      ),
+    );
+  }
   for (const message of history) {
     events.push(
       qwenContextItem(

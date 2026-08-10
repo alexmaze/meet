@@ -170,6 +170,34 @@ describe("Qwen WebSocket relay", () => {
     expect(buildQwenContinuityEvents([])).toEqual([]);
   });
 
+  it("injects confirmed memories before recent raw history", () => {
+    const events = buildQwenContinuityEvents(
+      [
+        {
+          id: "9bb6162e-e85c-4e5d-a3ff-000000000001",
+          role: "user",
+          text: "我们继续吧。",
+        },
+      ],
+      "已确认长期记忆：\n- 用户喜欢围棋。",
+    );
+    expect(events).toHaveLength(4);
+    expect(events[0]).toMatchObject({
+      item: {
+        id: "meet_relationship_context",
+        role: "system",
+        content: [
+          {
+            text: expect.stringContaining("用户喜欢围棋"),
+          },
+        ],
+      },
+    });
+    expect(events[2]).toMatchObject({
+      item: { role: "user", content: [{ text: "我们继续吧。" }] },
+    });
+  });
+
   it("accepts the page origin when it exactly matches the request host", () => {
     expect(
       isAllowedWebSocketOrigin({

@@ -39,6 +39,7 @@ export class ConversationServiceError extends Error {
 
 export type ConversationRealtimeLaunchContext = {
   mode: "normal" | "temporary";
+  relationshipContext?: string;
   messages: Array<{
     id: string;
     role: "user" | "assistant";
@@ -48,6 +49,7 @@ export type ConversationRealtimeLaunchContext = {
 
 const CONTINUITY_CHARACTER_BUDGET = 12_000;
 const CONTINUITY_MESSAGE_CHARACTER_LIMIT = 2_000;
+const RELATIONSHIP_CONTEXT_CHARACTER_BUDGET = 8_000;
 
 export class ConversationService {
   constructor(
@@ -127,6 +129,13 @@ export class ConversationService {
         : context.messages;
     return {
       mode: context.mode,
+      relationshipContext:
+        context.mode === "normal"
+          ? buildRelationshipContext(
+              context.summaries ?? [],
+              context.memories ?? [],
+            )
+          : undefined,
       messages: boundContinuityMessages(messages),
     };
   }
@@ -211,6 +220,25 @@ function boundContinuityMessages(
     remaining -= text.length;
   }
   return selected.reverse();
+}
+
+function buildRelationshipContext(
+  summaries: Array<{ content: string }>,
+  memories: Array<{ content: string }>,
+): string | undefined {
+  const sections: string[] = [];
+  if (memories.length > 0) {
+    sections.push(
+      `已确认长期记忆：\n${memories.map((memory) => `- ${memory.content.trim()}`).join("\n")}`,
+    );
+  }
+  if (summaries.length > 0) {
+    sections.push(
+      `此前通话摘要：\n${summaries.map((summary) => `- ${summary.content.trim()}`).join("\n")}`,
+    );
+  }
+  if (sections.length === 0) return undefined;
+  return sections.join("\n\n").slice(0, RELATIONSHIP_CONTEXT_CHARACTER_BUDGET);
 }
 
 function toDetail(detail: ConversationDetailAggregate) {

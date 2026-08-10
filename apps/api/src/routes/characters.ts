@@ -53,6 +53,7 @@ export async function registerCharacterRoutes(
       model: ReturnType<typeof qwenRealtimeModelSchema.parse>;
       voice: string;
       instructions: string;
+      relationshipContext?: string;
       history: Array<{
         id: string;
         role: "user" | "assistant";
@@ -403,6 +404,7 @@ export async function registerCharacterRoutes(
             model: model.data,
             voice: runtime.realtime.voice,
             instructions: runtime.realtime.instructions,
+            relationshipContext: continuity.relationshipContext,
             history: continuity.messages,
           });
         } catch (error) {
@@ -424,6 +426,7 @@ export async function registerCharacterRoutes(
         runtime: {
           voice: context.voice,
           instructions: context.instructions,
+          relationshipContext: context.relationshipContext,
           history: context.history,
         },
         webSocketFactory: qwenWebSocketFactory,

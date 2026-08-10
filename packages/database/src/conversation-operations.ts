@@ -7,7 +7,9 @@ import { and, asc, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import type { Database } from "./client.js";
 import {
   characters,
+  characterMemories,
   conversationMessages,
+  conversationSummaries,
   conversations,
   providerProfiles,
   userAccounts,
@@ -36,9 +38,13 @@ export type ConversationContinuityMessage = Pick<
 export type ConversationRealtimeContext = {
   mode: ConversationMode;
   messages: ConversationContinuityMessage[];
+  summaries: Array<{ content: string; updatedAt: Date }>;
+  memories: Array<{ content: string; updatedAt: Date }>;
 };
 
 export const CONVERSATION_CONTINUITY_MESSAGE_LIMIT = 24;
+export const CONVERSATION_CONTINUITY_SUMMARY_LIMIT = 4;
+export const CONVERSATION_CONTINUITY_MEMORY_LIMIT = 24;
 
 export type CreateConversationResult =
   | { kind: "created" | "existing"; conversation: ConversationAggregate }
@@ -264,7 +270,55 @@ export async function loadConversationRealtimeContext(
     .orderBy(desc(conversations.startedAt), desc(conversationMessages.sequence))
     .limit(CONVERSATION_CONTINUITY_MESSAGE_LIMIT);
 
-  return { mode: current.mode, messages: recentFirst.reverse() };
+  if (current.mode === "temporary") {
+    return {
+      mode: current.mode,
+      messages: recentFirst.reverse(),
+      summaries: [],
+      memories: [],
+    };
+  }
+  const summaries = await db
+    .select({
+      content: conversationSummaries.content,
+      updatedAt: conversationSummaries.updatedAt,
+    })
+    .from(conversationSummaries)
+    .innerJoin(
+      conversations,
+      eq(conversationSummaries.conversationId, conversations.id),
+    )
+    .where(
+      and(
+        eq(conversationSummaries.userId, input.actorUserId),
+        eq(conversationSummaries.characterId, input.characterId),
+        eq(conversations.mode, "normal"),
+      ),
+    )
+    .orderBy(desc(conversationSummaries.updatedAt))
+    .limit(CONVERSATION_CONTINUITY_SUMMARY_LIMIT);
+  const memories = await db
+    .select({
+      content: characterMemories.content,
+      updatedAt: characterMemories.updatedAt,
+    })
+    .from(characterMemories)
+    .where(
+      and(
+        eq(characterMemories.userId, input.actorUserId),
+        eq(characterMemories.characterId, input.characterId),
+        eq(characterMemories.status, "active"),
+      ),
+    )
+    .orderBy(desc(characterMemories.updatedAt))
+    .limit(CONVERSATION_CONTINUITY_MEMORY_LIMIT);
+
+  return {
+    mode: current.mode,
+    messages: recentFirst.reverse(),
+    summaries: summaries.reverse(),
+    memories,
+  };
 }
 
 export async function appendConversationMessages(
@@ -392,6 +446,7 @@ export async function completeConversation(
     conversationId: string;
     lastSequence: number;
     endedAt?: Date;
+    onCompleted?: ConversationCompletionHook;
   },
 ): Promise<CompleteConversationResult> {
   const endedAt = input.endedAt ?? new Date();
@@ -419,6 +474,7 @@ export async function completeConversation(
       .where(eq(conversations.id, input.conversationId));
     const aggregate = await findConversationAggregate(tx, input.conversationId);
     if (!aggregate) throw new Error("Completed conversation was not readable.");
+    await input.onCompleted?.(tx, aggregate);
     return { kind: "completed", conversation: aggregate };
   });
 }
@@ -440,7 +496,16 @@ export async function deleteOwnedConversation(
   return Boolean(deleted);
 }
 
-type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
+export type DatabaseTransaction = Parameters<
+  Parameters<Database["transaction"]>[0]
+>[0];
+
+export type ConversationCompletionHook = (
+  transaction: DatabaseTransaction,
+  conversation: ConversationAggregate,
+) => Promise<void>;
+
+type Transaction = DatabaseTransaction;
 
 async function findConversationAggregate(
   db: Database | Transaction,
