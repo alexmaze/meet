@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { resolve } from "node:path";
 
 const envSchema = z.object({
   DATABASE_URL: z
@@ -20,6 +21,7 @@ const envSchema = z.object({
     .min(1_000)
     .max(120_000)
     .default(60_000),
+  MEDIA_LOCAL_DIR: z.string().trim().min(1).default("./data/media"),
 });
 
 export type WorkerConfig = {
@@ -29,6 +31,9 @@ export type WorkerConfig = {
     baseUrl: string;
     model: string;
     requestTimeoutMs: number;
+  };
+  media: {
+    localDirectory: string;
   };
 };
 
@@ -46,6 +51,9 @@ export function loadWorkerConfig(
       baseUrl: result.data.QWEN_ANALYSIS_BASE_URL,
       model: result.data.QWEN_ANALYSIS_MODEL,
       requestTimeoutMs: result.data.QWEN_ANALYSIS_REQUEST_TIMEOUT_MS,
+    },
+    media: {
+      localDirectory: resolve(result.data.MEDIA_LOCAL_DIR),
     },
   };
 }

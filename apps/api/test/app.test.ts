@@ -691,6 +691,12 @@ describe("Meet API", () => {
       /AUTH_COOKIE_SECURE/,
     );
   });
+
+  it("resolves the private media directory outside public web assets", () => {
+    expect(
+      loadConfig({ MEDIA_LOCAL_DIR: "./private-media" }).media?.localDirectory,
+    ).toMatch(/private-media$/);
+  });
 });
 
 function aggregateFromPreset(): CharacterAggregate {

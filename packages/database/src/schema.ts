@@ -113,6 +113,24 @@ export const characterMemoryStatusEnum = pgEnum("character_memory_status", [
   "deleted",
 ]);
 
+export const mediaObjectKindEnum = pgEnum("media_object_kind", [
+  "call_recording",
+  "conversation_image",
+  "character_avatar",
+  "avatar_preview",
+]);
+
+export const mediaRetentionEnum = pgEnum("media_retention", [
+  "temporary",
+  "retained",
+]);
+
+export const mediaObjectStatusEnum = pgEnum("media_object_status", [
+  "available",
+  "pending_deletion",
+  "deleted",
+]);
+
 export const userAccounts = pgTable(
   "user_accounts",
   {
@@ -543,6 +561,87 @@ export const conversationMessages = pgTable(
   ],
 );
 
+export const mediaObjects = pgTable(
+  "media_objects",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    ownerUserId: uuid("owner_user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "restrict" }),
+    conversationId: uuid("conversation_id").references(() => conversations.id, {
+      onDelete: "restrict",
+    }),
+    kind: mediaObjectKindEnum("kind").notNull(),
+    objectKey: varchar("object_key", { length: 512 }).notNull(),
+    contentType: varchar("content_type", { length: 160 }).notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    checksumSha256: varchar("checksum_sha256", { length: 64 }).notNull(),
+    retention: mediaRetentionEnum("retention").notNull(),
+    status: mediaObjectStatusEnum("status").notNull().default("available"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("media_objects_object_key_unique").on(table.objectKey),
+    index("media_objects_owner_created_idx").on(
+      table.ownerUserId,
+      table.createdAt,
+    ),
+    index("media_objects_conversation_created_idx").on(
+      table.conversationId,
+      table.createdAt,
+    ),
+    index("media_objects_expiration_idx")
+      .on(table.expiresAt)
+      .where(
+        sql`${table.status} = 'available' AND ${table.retention} = 'temporary'`,
+      ),
+    check("media_objects_size_nonnegative", sql`${table.sizeBytes} >= 0`),
+    check(
+      "media_objects_key_not_blank",
+      sql`length(btrim(${table.objectKey})) > 0`,
+    ),
+    check(
+      "media_objects_content_type_not_blank",
+      sql`length(btrim(${table.contentType})) > 0`,
+    ),
+    check(
+      "media_objects_checksum_sha256_format",
+      sql`${table.checksumSha256} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "media_objects_retention_expiry_match",
+      sql`(
+        (${table.retention} = 'temporary' AND ${table.expiresAt} IS NOT NULL)
+        OR
+        (${table.retention} = 'retained' AND ${table.expiresAt} IS NULL)
+      )`,
+    ),
+    check(
+      "media_objects_conversation_kind_match",
+      sql`(
+        (${table.kind} IN ('call_recording', 'conversation_image') AND ${table.conversationId} IS NOT NULL)
+        OR
+        (${table.kind} IN ('character_avatar', 'avatar_preview') AND ${table.conversationId} IS NULL)
+      )`,
+    ),
+    check(
+      "media_objects_deletion_state_match",
+      sql`(
+        (${table.status} IN ('available', 'pending_deletion') AND ${table.deletedAt} IS NULL)
+        OR
+        (${table.status} = 'deleted' AND ${table.deletedAt} IS NOT NULL)
+      )`,
+    ),
+  ],
+);
+
 export const conversationSummaries = pgTable(
   "conversation_summaries",
   {
@@ -671,6 +770,8 @@ export type ConversationMessageRecord =
   typeof conversationMessages.$inferSelect;
 export type NewConversationMessageRecord =
   typeof conversationMessages.$inferInsert;
+export type MediaObjectRecord = typeof mediaObjects.$inferSelect;
+export type NewMediaObjectRecord = typeof mediaObjects.$inferInsert;
 export type ConversationSummaryRecord =
   typeof conversationSummaries.$inferSelect;
 export type NewConversationSummaryRecord =

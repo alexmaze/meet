@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   conversationFinalizeJobSchema,
+  mediaExpireJobSchema,
   memoryExtractJobSchema,
 } from "./schemas.js";
 
@@ -29,6 +30,25 @@ describe("background job payloads", () => {
     expect(
       memoryExtractJobSchema.safeParse({ ...payload, unexpected: true })
         .success,
+    ).toBe(false);
+  });
+
+  it("requires expiration jobs to carry the scheduled version", () => {
+    const media = {
+      idempotencyKey:
+        "media.expire:2fd4cbb6-fce4-40e2-9141-22f3a1bc2051:expired:2026-08-11T00:00:00.000Z",
+      mediaId: "2fd4cbb6-fce4-40e2-9141-22f3a1bc2051",
+      objectKey: "2026/08/2fd4cbb6-fce4-40e2-9141-22f3a1bc2051",
+      reason: "expired",
+      notBefore: "2026-08-11T00:00:00.000Z",
+      expectedExpiresAt: "2026-08-11T00:00:00.000Z",
+    };
+    expect(mediaExpireJobSchema.parse(media)).toEqual(media);
+    expect(
+      mediaExpireJobSchema.safeParse({
+        ...media,
+        expectedExpiresAt: undefined,
+      }).success,
     ).toBe(false);
   });
 });

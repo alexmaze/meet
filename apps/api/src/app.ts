@@ -4,11 +4,14 @@ import {
   createDatabaseClient,
   type ConversationCompletionHook,
   type DatabaseClient,
+  type MediaCleanupHook,
 } from "@meet/database";
 import {
   ConversationCompletionJobPublisher,
+  MediaCleanupJobPublisher,
   createMeetJobBoss,
 } from "@meet/jobs";
+import { LocalMediaStore, type MediaStore } from "@meet/media";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { PostgresAuthRepository } from "./auth/postgres-repository.js";
@@ -27,6 +30,9 @@ import { MemberService } from "./members/service.js";
 import { PostgresMemoryRepository } from "./memories/postgres-repository.js";
 import type { MemoryRepository } from "./memories/repository.js";
 import { MemoryService } from "./memories/service.js";
+import { PostgresMediaRepository } from "./media/postgres-repository.js";
+import type { MediaRepository } from "./media/repository.js";
+import { MediaService } from "./media/service.js";
 import {
   QWEN_RELAY_CLIENT_MAX_MESSAGE_BYTES,
   type QwenWebSocketFactory,
@@ -36,6 +42,7 @@ import { registerAuthRoutes } from "./routes/auth.js";
 import { registerCharacterRoutes } from "./routes/characters.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerMemoryRoutes } from "./routes/memories.js";
+import { registerMediaRoutes } from "./routes/media.js";
 import { registerRealtimeRoutes } from "./routes/realtime.js";
 
 type FetchFunction = typeof globalThis.fetch;
@@ -48,8 +55,11 @@ export type BuildAppOptions = {
   characterRepository?: CharacterRepository | null;
   conversationRepository?: ConversationRepository | null;
   memoryRepository?: MemoryRepository | null;
+  mediaRepository?: MediaRepository | null;
+  mediaStore?: MediaStore | null;
   databaseClient?: DatabaseClient | null;
   conversationCompletionHook?: ConversationCompletionHook | null;
+  mediaCleanupHook?: MediaCleanupHook | null;
   qwenWebSocketFactory?: QwenWebSocketFactory;
   logger?: boolean;
 };
@@ -63,9 +73,14 @@ export async function buildApp(
       ? createDatabaseClient({ connectionString: config.database.url })
       : null;
   const databaseClient = options.databaseClient ?? ownedDatabaseClient;
-  const ownedJobBoss =
+  const needsConversationJobs =
     options.conversationCompletionHook === undefined &&
-    options.conversationRepository === undefined &&
+    options.conversationRepository === undefined;
+  const needsMediaJobs =
+    options.mediaCleanupHook === undefined &&
+    options.mediaRepository === undefined;
+  const ownedJobBoss =
+    (needsConversationJobs || needsMediaJobs) &&
     databaseClient &&
     config.database.url
       ? await createMeetJobBoss(config.database.url)
@@ -76,6 +91,12 @@ export async function buildApp(
         ? new ConversationCompletionJobPublisher(ownedJobBoss).enqueue
         : undefined
       : (options.conversationCompletionHook ?? undefined);
+  const mediaCleanupHook =
+    options.mediaCleanupHook === undefined
+      ? ownedJobBoss
+        ? new MediaCleanupJobPublisher(ownedJobBoss).enqueue
+        : undefined
+      : (options.mediaCleanupHook ?? undefined);
   const authRepository =
     options.authRepository === undefined
       ? databaseClient
@@ -109,6 +130,16 @@ export async function buildApp(
         ? new PostgresMemoryRepository(databaseClient.db)
         : null
       : options.memoryRepository;
+  const mediaRepository =
+    options.mediaRepository === undefined
+      ? databaseClient && mediaCleanupHook
+        ? new PostgresMediaRepository(databaseClient.db, mediaCleanupHook)
+        : null
+      : options.mediaRepository;
+  const mediaStore =
+    options.mediaStore === undefined
+      ? new LocalMediaStore(config.media?.localDirectory ?? "./data/media")
+      : options.mediaStore;
   const app = Fastify({
     logger:
       options.logger === false
@@ -158,6 +189,7 @@ export async function buildApp(
   const characters = new CharacterService(characterRepository);
   const conversations = new ConversationService(conversationRepository);
   const memories = new MemoryService(memoryRepository);
+  const media = new MediaService(mediaRepository, mediaStore);
 
   if (ownedJobBoss || ownedDatabaseClient) {
     app.addHook("onClose", async () => {
@@ -191,6 +223,7 @@ export async function buildApp(
   );
   await registerConversationRoutes(app, config, auth, conversations);
   await registerMemoryRoutes(app, config, auth, memories);
+  await registerMediaRoutes(app, config, auth, media);
   await registerRealtimeRoutes(app, config, auth);
   return app;
 }

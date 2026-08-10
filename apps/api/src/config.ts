@@ -5,6 +5,7 @@ import {
   type QwenRealtimeRegion,
 } from "@meet/protocol";
 import { z } from "zod";
+import { resolve } from "node:path";
 
 import { normalizeQwenRealtimeEndpoint } from "./qwen.js";
 
@@ -101,6 +102,7 @@ const envSchema = z.object({
     .default(
       "你是一位自然、耐心、有角色感的中文聊天伙伴。先听清用户再回答，默认简短口语化，不要像客服或说明书。",
     ),
+  MEDIA_LOCAL_DIR: z.string().trim().min(1).default("./data/media"),
 });
 
 export type AppConfig = {
@@ -128,6 +130,9 @@ export type AppConfig = {
     voice: string;
     instructions: string;
     requestTimeoutMs: number;
+  };
+  media?: {
+    localDirectory: string;
   };
 };
 
@@ -166,6 +171,9 @@ export function loadConfig(
       voice: env.QWEN_REALTIME_VOICE,
       instructions: env.QWEN_REALTIME_INSTRUCTIONS,
       requestTimeoutMs: env.QWEN_REALTIME_REQUEST_TIMEOUT_MS,
+    },
+    media: {
+      localDirectory: resolve(env.MEDIA_LOCAL_DIR),
     },
   };
 }

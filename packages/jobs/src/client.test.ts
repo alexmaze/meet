@@ -7,9 +7,13 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   CONVERSATION_FINALIZE_QUEUE,
+  MEDIA_EXPIRE_QUEUE,
   MEMORY_EXTRACT_QUEUE,
 } from "./schemas.js";
-import { ConversationCompletionJobPublisher } from "./client.js";
+import {
+  ConversationCompletionJobPublisher,
+  MediaCleanupJobPublisher,
+} from "./client.js";
 
 describe("conversation completion job publisher", () => {
   it("enqueues summary and memory extraction for a normal conversation", async () => {
@@ -45,6 +49,33 @@ describe("conversation completion job publisher", () => {
       CONVERSATION_FINALIZE_QUEUE,
       expect.any(Object),
       expect.any(Object),
+    );
+  });
+});
+
+describe("media cleanup job publisher", () => {
+  it("schedules expiration at the metadata deadline in the same transaction", async () => {
+    const boss = fakeBoss();
+    const publisher = new MediaCleanupJobPublisher(boss.value);
+    const expiresAt = new Date("2026-08-11T00:00:00.000Z");
+    await publisher.enqueue(transaction(), {
+      mediaId: "2fd4cbb6-fce4-40e2-9141-22f3a1bc2051",
+      objectKey: "2026/08/2fd4cbb6-fce4-40e2-9141-22f3a1bc2051",
+      reason: "expired",
+      notBefore: expiresAt,
+      expectedExpiresAt: expiresAt,
+    });
+
+    expect(boss.send).toHaveBeenCalledWith(
+      MEDIA_EXPIRE_QUEUE,
+      expect.objectContaining({
+        reason: "expired",
+        expectedExpiresAt: expiresAt.toISOString(),
+      }),
+      expect.objectContaining({
+        db: expect.any(Object),
+        startAfter: expiresAt,
+      }),
     );
   });
 });

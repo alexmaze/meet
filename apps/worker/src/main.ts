@@ -4,13 +4,19 @@ import { fileURLToPath } from "node:url";
 import { createDatabaseClient } from "@meet/database";
 import {
   CONVERSATION_FINALIZE_QUEUE,
+  MEDIA_EXPIRE_QUEUE,
   MEMORY_EXTRACT_QUEUE,
   createMeetJobBoss,
 } from "@meet/jobs";
+import { LocalMediaStore } from "@meet/media";
 
 import { QwenConversationAnalyzer } from "./analyzer.js";
 import { loadWorkerConfig } from "./config.js";
 import { createWorkerHandlers } from "./handlers.js";
+import {
+  createMediaExpirationHandler,
+  PostgresMediaCleanupRepository,
+} from "./media-cleanup.js";
 
 const environmentFile = fileURLToPath(
   new URL("../../../.env", import.meta.url),
@@ -24,6 +30,10 @@ const boss = await createMeetJobBoss(config.databaseUrl, (error) => {
 });
 const analyzer = new QwenConversationAnalyzer(config.qwen);
 const handlers = createWorkerHandlers(database.db, analyzer);
+const expireMedia = createMediaExpirationHandler(
+  new PostgresMediaCleanupRepository(database.db),
+  new LocalMediaStore(config.media.localDirectory),
+);
 
 await boss.work(CONVERSATION_FINALIZE_QUEUE, async (jobs) => {
   for (const job of jobs) await handlers.finalizeConversation(job.data);
@@ -31,8 +41,11 @@ await boss.work(CONVERSATION_FINALIZE_QUEUE, async (jobs) => {
 await boss.work(MEMORY_EXTRACT_QUEUE, async (jobs) => {
   for (const job of jobs) await handlers.extractMemories(job.data);
 });
+await boss.work(MEDIA_EXPIRE_QUEUE, async (jobs) => {
+  for (const job of jobs) await expireMedia(job.data);
+});
 
-console.info("Meet Worker 已启动，正在处理摘要与长期记忆任务。");
+console.info("Meet Worker 已启动，正在处理摘要、长期记忆与媒体清理任务。");
 
 let closing = false;
 const close = async (signal: string): Promise<void> => {

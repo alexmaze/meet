@@ -5,5 +5,6 @@ export * from "./conversation-operations.js";
 export * from "./client.js";
 export * from "./member-operations.js";
 export * from "./memory-operations.js";
+export * from "./media-operations.js";
 export * from "./schema.js";
 export * from "./username.js";

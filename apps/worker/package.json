@@ -12,6 +12,7 @@
   "dependencies": {
     "@meet/database": "workspace:*",
     "@meet/jobs": "workspace:*",
+    "@meet/media": "workspace:*",
     "pg-boss": "12.27.0",
     "zod": "4.4.3"
   }
