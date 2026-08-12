@@ -12,6 +12,7 @@ import {
   createMeetJobBoss,
 } from "@meet/jobs";
 import { LocalMediaStore, type MediaStore } from "@meet/media";
+import { CHARACTER_AVATAR_MAX_BYTES } from "@meet/protocol";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { PostgresAuthRepository } from "./auth/postgres-repository.js";
@@ -186,10 +187,10 @@ export async function buildApp(
   });
   const auth = new AuthService(authRepository, config.auth.sessionTtlMs);
   const members = new MemberService(memberRepository);
-  const characters = new CharacterService(characterRepository);
   const conversations = new ConversationService(conversationRepository);
   const memories = new MemoryService(memoryRepository);
   const media = new MediaService(mediaRepository, mediaStore);
+  const characters = new CharacterService(characterRepository, media);
 
   if (ownedJobBoss || ownedDatabaseClient) {
     app.addHook("onClose", async () => {
@@ -201,6 +202,11 @@ export async function buildApp(
   app.addContentTypeParser(
     "application/sdp",
     { parseAs: "string", bodyLimit: 512 * 1024 },
+    (_request, body, done) => done(null, body),
+  );
+  app.addContentTypeParser(
+    ["image/jpeg", "image/png", "image/webp"],
+    { parseAs: "buffer", bodyLimit: CHARACTER_AVATAR_MAX_BYTES },
     (_request, body, done) => done(null, body),
   );
 

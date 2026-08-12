@@ -409,10 +409,6 @@ export const characters = pgTable(
     check("characters_revision_positive", sql`${table.revision} > 0`),
     check("characters_name_not_blank", sql`length(btrim(${table.name})) > 0`),
     check(
-      "characters_description_not_blank",
-      sql`length(btrim(${table.description})) > 0`,
-    ),
-    check(
       "characters_system_fields_match",
       sql`(
         (${table.visibility} = 'builtin' AND ${table.systemKey} IS NOT NULL AND ${table.systemVersion} IS NOT NULL AND ${table.systemVersion} > 0 AND ${table.ownerUserId} IS NULL)

@@ -1,4 +1,5 @@
 import {
+  characterAvatarUploadResponseSchema,
   apiErrorSchema,
   characterCatalogResponseSchema,
   characterListResponseSchema,
@@ -10,6 +11,7 @@ import {
   updateCharacterRequestSchema,
   updateCharacterVisibilityRequestSchema,
   type Character,
+  type CharacterAvatarUploadResponse,
   type CharacterRuntimeResponse,
   type CharacterSummary,
   type CreateCharacterRequest,
@@ -93,6 +95,51 @@ export async function previewVoice(
     throw new CharacterApiError(null, "INVALID_VOICE_PREVIEW_RESPONSE");
   }
   return await response.blob();
+}
+
+export async function uploadCharacterAvatar(
+  file: File,
+  signal?: AbortSignal,
+): Promise<CharacterAvatarUploadResponse> {
+  let response: Response;
+  try {
+    response = await fetch("/api/media/character-avatars", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": file.type,
+      },
+      credentials: "same-origin",
+      cache: "no-store",
+      body: file,
+      signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw error;
+    }
+    throw new CharacterApiError(null, "CHARACTER_AVATAR_UPLOAD_FAILED");
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new CharacterApiError(
+      response.status,
+      "CHARACTER_AVATAR_UPLOAD_FAILED",
+    );
+  }
+  if (!response.ok) {
+    const parsedError = apiErrorSchema.safeParse(body);
+    throw new CharacterApiError(
+      response.status,
+      parsedError.success
+        ? parsedError.data.code
+        : "CHARACTER_AVATAR_UPLOAD_FAILED",
+    );
+  }
+  return parseWith(characterAvatarUploadResponseSchema, body);
 }
 
 export async function getCharacter(

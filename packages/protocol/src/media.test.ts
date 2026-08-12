@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { mediaObjectSchema } from "./media.js";
+import {
+  characterAvatarUploadResponseSchema,
+  mediaObjectSchema,
+} from "./media.js";
 
 describe("media protocol", () => {
   it("exposes metadata without storage keys or checksums", () => {
@@ -18,5 +21,31 @@ describe("media protocol", () => {
     expect(media.kind).toBe("call_recording");
     expect(media).not.toHaveProperty("objectKey");
     expect(media).not.toHaveProperty("checksumSha256");
+  });
+
+  it("only exposes authenticated same-origin avatar content paths", () => {
+    const response = {
+      media: {
+        id: "2fd4cbb6-fce4-40e2-9141-22f3a1bc2051",
+        ownerUserId: "4d1c2e31-ad0e-4fa9-9ae8-ae3497069117",
+        conversationId: null,
+        kind: "character_avatar",
+        contentType: "image/png",
+        sizeBytes: 42,
+        retention: "temporary",
+        expiresAt: "2026-08-11T05:20:00.000Z",
+        createdAt: "2026-08-10T05:20:00.000Z",
+      },
+      avatarUrl: "/api/media/2fd4cbb6-fce4-40e2-9141-22f3a1bc2051/content",
+    };
+    expect(
+      characterAvatarUploadResponseSchema.safeParse(response).success,
+    ).toBe(true);
+    expect(
+      characterAvatarUploadResponseSchema.safeParse({
+        ...response,
+        avatarUrl: "https://tracker.example/avatar.png",
+      }).success,
+    ).toBe(false);
   });
 });

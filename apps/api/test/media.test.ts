@@ -14,6 +14,7 @@ import type { MediaRepository } from "../src/media/repository.js";
 
 const adult = account("4d1c2e31-ad0e-4fa9-9ae8-ae3497069117", "adult");
 const admin = account("4d1c2e31-ad0e-4fa9-9ae8-ae3497069116", "admin");
+const child = account("4d1c2e31-ad0e-4fa9-9ae8-ae3497069118", "child");
 const mediaId = "2fd4cbb6-fce4-40e2-9141-22f3a1bc2051";
 
 const config: AppConfig = {
@@ -37,6 +38,80 @@ const config: AppConfig = {
 };
 
 describe("media routes", () => {
+  it("uploads a validated image as a temporary owner-scoped character avatar", async () => {
+    const fakeRepository = repository();
+    const fakeStore = store();
+    vi.mocked(fakeStore.put).mockResolvedValue({
+      key: "2026/08/2fd4cbb6-fce4-40e2-9141-22f3a1bc2051",
+      sizeBytes: 8,
+      checksumSha256: "b".repeat(64),
+    });
+    vi.mocked(fakeRepository.createCharacterAvatar).mockResolvedValue({
+      kind: "created",
+      media: avatarRecord(),
+    });
+    const app = await testApp(fakeRepository, fakeStore);
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+    const response = await injectAs(app, adult, {
+      method: "POST",
+      url: "/api/media/character-avatars",
+      headers: { "content-type": "image/png" },
+      payload: png,
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toMatchObject({
+      media: {
+        id: mediaId,
+        ownerUserId: adult.id,
+        kind: "character_avatar",
+        retention: "temporary",
+      },
+      avatarUrl: `/api/media/${mediaId}/content`,
+    });
+    expect(fakeStore.put).toHaveBeenCalledWith({
+      body: expect.any(Uint8Array),
+      contentType: "image/png",
+    });
+    expect(fakeRepository.createCharacterAvatar).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ownerUserId: adult.id,
+        contentType: "image/png",
+        sizeBytes: 8,
+        checksumSha256: "b".repeat(64),
+        expiresAt: expect.any(Date),
+      }),
+    );
+    await app.close();
+  });
+
+  it("rejects disguised images and child avatar uploads", async () => {
+    const fakeRepository = repository();
+    const fakeStore = store();
+    const app = await testApp(fakeRepository, fakeStore);
+    const disguised = await injectAs(app, adult, {
+      method: "POST",
+      url: "/api/media/character-avatars",
+      headers: { "content-type": "image/png" },
+      payload: Buffer.from("not an image"),
+    });
+    expect(disguised.statusCode).toBe(400);
+    expect(disguised.json()).toMatchObject({
+      code: "MEDIA_INVALID_CHARACTER_AVATAR",
+    });
+
+    const childUpload = await injectAs(app, child, {
+      method: "POST",
+      url: "/api/media/character-avatars",
+      headers: { "content-type": "image/jpeg" },
+      payload: Buffer.from([0xff, 0xd8, 0xff]),
+    });
+    expect(childUpload.statusCode).toBe(403);
+    expect(fakeStore.put).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it("requires authentication", async () => {
     const app = await testApp(repository(), store());
     const response = await app.inject({
@@ -167,6 +242,10 @@ describe("media routes", () => {
 
 function repository(): MediaRepository {
   return {
+    createCharacterAvatar: vi.fn(async () => ({
+      kind: "created" as const,
+      media: avatarRecord(),
+    })),
     findReadable: vi.fn(async () => record()),
     requestDelete: vi.fn(async () => ({
       kind: "requested" as const,
@@ -181,7 +260,11 @@ function repository(): MediaRepository {
 
 function store(): MediaStore {
   return {
-    put: vi.fn(),
+    put: vi.fn(async () => ({
+      key: "2026/08/2fd4cbb6-fce4-40e2-9141-22f3a1bc2051",
+      sizeBytes: 3,
+      checksumSha256: "b".repeat(64),
+    })),
     open: vi.fn(
       async () =>
         new ReadableStream<Uint8Array>({
@@ -193,6 +276,18 @@ function store(): MediaStore {
     ),
     delete: vi.fn(async () => undefined),
     exists: vi.fn(async () => true),
+  };
+}
+
+function avatarRecord(): MediaObjectRecord {
+  return {
+    ...record(),
+    conversationId: null,
+    kind: "character_avatar",
+    contentType: "image/png",
+    sizeBytes: 8,
+    retention: "temporary",
+    expiresAt: new Date("2026-08-11T05:20:00.000Z"),
   };
 }
 
@@ -233,6 +328,7 @@ function authRepository(): AuthRepository {
   const users = new Map([
     [hashSessionToken(adult.username), adult],
     [hashSessionToken(admin.username), admin],
+    [hashSessionToken(child.username), child],
   ]);
   return {
     async findCredentialByUsername() {

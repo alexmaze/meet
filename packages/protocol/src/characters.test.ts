@@ -47,6 +47,51 @@ describe("character protocol", () => {
     );
   });
 
+  it("允许除角色名称外的人设文本留空", () => {
+    expect(
+      createCharacterRequestSchema.safeParse({
+        ...validRequest,
+        description: "   ",
+        persona: {
+          background: "",
+          personalityTraits: [],
+          relationship: "",
+          speakingStyle: "",
+          emotionalStyle: "",
+          conversationGoals: [],
+          sampleLines: [],
+        },
+        openingLine: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      createCharacterRequestSchema.safeParse({
+        ...validRequest,
+        name: "   ",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("支持完整 Prompt 模式并拒绝空 Prompt", () => {
+    const customPromptRequest = {
+      ...validRequest,
+      persona: {
+        ...validRequest.persona,
+        definitionMode: "custom_prompt" as const,
+        customPrompt: "你是一位沉稳的旅行向导。回答时先询问用户的偏好。",
+      },
+    };
+    expect(
+      createCharacterRequestSchema.safeParse(customPromptRequest).success,
+    ).toBe(true);
+    expect(
+      createCharacterRequestSchema.safeParse({
+        ...customPromptRequest,
+        persona: { ...customPromptRequest.persona, customPrompt: "   " },
+      }).success,
+    ).toBe(false);
+  });
+
   it("strictly rejects server-owned and provider-secret fields", () => {
     for (const forbidden of [
       { ownerUserId: crypto.randomUUID() },
@@ -65,7 +110,13 @@ describe("character protocol", () => {
     }
   });
 
-  it("only accepts the current built-in avatar namespace and safe themes", () => {
+  it("only accepts built-in or authenticated uploaded avatar paths and safe themes", () => {
+    expect(
+      visualProfileSchema.safeParse({
+        ...validRequest.visualProfile,
+        avatarUrl: "/api/media/2fd4cbb6-fce4-40e2-9141-22f3a1bc2051/content",
+      }).success,
+    ).toBe(true);
     expect(
       visualProfileSchema.safeParse({
         ...validRequest.visualProfile,

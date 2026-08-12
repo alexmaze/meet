@@ -2081,6 +2081,34 @@ summary:focus-visible {
   line-height: 1.65;
 }
 
+.character-field textarea.custom-prompt-editor {
+  min-height: 360px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  line-height: 1.75;
+}
+
+.field-help {
+  margin: -6px 0 0;
+  color: #887e76;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.detail-custom-prompt {
+  overflow: auto;
+  max-height: 520px;
+  margin: 0;
+  padding: 14px;
+  border-radius: 12px;
+  color: #4f4741;
+  background: #f4efe8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.75;
+}
+
 .voice-picker-field {
   min-width: 0;
   display: flex;
@@ -2204,6 +2232,83 @@ summary:focus-visible {
   display: block;
   padding: 8px;
   font-size: 9px;
+}
+
+.avatar-upload-panel {
+  display: grid;
+  grid-template-columns: minmax(110px, 180px) minmax(0, 1fr);
+  align-items: center;
+  gap: 18px;
+  padding: 14px;
+  border: 1px solid rgba(48, 39, 32, 0.1);
+  border-radius: 14px;
+  background: #f4efe8;
+}
+
+.avatar-upload-panel > img {
+  width: 100%;
+  aspect-ratio: 1.45;
+  display: block;
+  border-radius: 11px;
+  background: #e7ded4;
+  object-fit: cover;
+  object-position: 50% 23%;
+}
+
+.avatar-upload-panel > div {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.avatar-upload-panel strong {
+  color: #4a423b;
+  font-size: 11px;
+}
+
+.avatar-upload-panel p {
+  margin: 5px 0 11px;
+  color: #887e76;
+  font-size: 9px;
+}
+
+.avatar-upload-button {
+  position: relative;
+  min-height: 40px;
+  cursor: pointer;
+}
+
+.avatar-upload-button.disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.avatar-upload-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
+.avatar-upload-status {
+  margin-top: 8px;
+  color: #8d837b;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+@media (max-width: 560px) {
+  .avatar-upload-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .avatar-upload-panel > img {
+    max-height: 220px;
+  }
 }
 
 .editor-submit-row {

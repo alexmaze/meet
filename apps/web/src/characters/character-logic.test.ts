@@ -75,6 +75,64 @@ describe("getCharacterActionVisibility", () => {
 });
 
 describe("character form mapping", () => {
+  it("完整 Prompt 模式只需维护一段人设文本", () => {
+    const form = createEmptyCharacterForm([provider], [voice]);
+    form.name = "远山";
+    form.personaMode = "custom_prompt";
+    form.customPrompt = "  你是远山，一位熟悉徒步路线的向导。  ";
+
+    const result = buildCreateCharacterRequest(form);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.persona).toMatchObject({
+      definitionMode: "custom_prompt",
+      customPrompt: "你是远山，一位熟悉徒步路线的向导。",
+    });
+  });
+
+  it("完整 Prompt 模式要求填写 Prompt 文本", () => {
+    const form = createEmptyCharacterForm([provider], [voice]);
+    form.name = "远山";
+    form.personaMode = "custom_prompt";
+    expect(buildCreateCharacterRequest(form)).toEqual({
+      ok: false,
+      message: "请输入完整的角色 Prompt。",
+    });
+  });
+
+  it("只填角色名称也可以创建，其他人设字段保持留空", () => {
+    const form = createEmptyCharacterForm([provider], [voice]);
+    form.name = "  小麦  ";
+
+    const result = buildCreateCharacterRequest(form);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toMatchObject({
+      name: "小麦",
+      description: "",
+      persona: {
+        background: "",
+        personalityTraits: [],
+        relationship: "",
+        speakingStyle: "",
+        emotionalStyle: "",
+        conversationGoals: [],
+        sampleLines: [],
+      },
+      openingLine: null,
+    });
+  });
+
+  it("仍然要求角色名称", () => {
+    const form = createEmptyCharacterForm([provider], [voice]);
+    expect(buildCreateCharacterRequest(form)).toEqual({
+      ok: false,
+      message: "请输入角色名称。",
+    });
+  });
+
   it("新建表单不继承之前内容，并只产生服务端允许的字段", () => {
     const first = createEmptyCharacterForm([provider], [voice]);
     first.name = "不会保留";

@@ -1,11 +1,13 @@
-import type {
-  Character,
-  CreateCharacterRequest,
-  ProviderProfile,
-  UserAccount,
-  VoiceProfile,
+import {
+  CHARACTER_AVATAR_MAX_BYTES,
+  type Character,
+  type CreateCharacterRequest,
+  type ProviderProfile,
+  type UserAccount,
+  type VoiceProfile,
 } from "@meet/protocol";
 import {
+  type ChangeEvent,
   useEffect,
   useMemo,
   useRef,
@@ -14,7 +16,7 @@ import {
   type ReactNode,
 } from "react";
 
-import { previewVoice } from "./character-api.js";
+import { previewVoice, uploadCharacterAvatar } from "./character-api.js";
 import {
   buildCreateCharacterRequest,
   builtInAvatarChoices,
@@ -44,6 +46,13 @@ type VoicePreviewState =
     }
   | { status: "error"; voiceProfileId: string; message: string };
 
+type AvatarUploadState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "error"; message: string };
+
+const avatarContentTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+
 export default function CharacterEditor({
   user,
   character,
@@ -63,9 +72,13 @@ export default function CharacterEditor({
   const [voicePreview, setVoicePreview] = useState<VoicePreviewState>({
     status: "idle",
   });
+  const [avatarUpload, setAvatarUpload] = useState<AvatarUploadState>({
+    status: "idle",
+  });
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewAbortRef = useRef<AbortController | null>(null);
   const previewObjectUrlRef = useRef<string | null>(null);
+  const avatarAbortRef = useRef<AbortController | null>(null);
   const matchingVoices = useMemo(
     () =>
       voices.filter(
@@ -77,6 +90,7 @@ export default function CharacterEditor({
   useEffect(
     () => () => {
       previewAbortRef.current?.abort();
+      avatarAbortRef.current?.abort();
       previewAudioRef.current?.pause();
       if (previewObjectUrlRef.current) {
         URL.revokeObjectURL(previewObjectUrlRef.current);
@@ -167,12 +181,59 @@ export default function CharacterEditor({
   };
 
   const chooseAvatar = (choice: (typeof builtInAvatarChoices)[number]) => {
+    avatarAbortRef.current?.abort();
+    avatarAbortRef.current = null;
+    setAvatarUpload({ status: "idle" });
     setForm((current) => ({
       ...current,
       avatarUrl: choice.value,
       accentColor: choice.accentColor,
       visualBackground: choice.background,
     }));
+  };
+
+  const uploadAvatar = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) return;
+    if (
+      !avatarContentTypes.has(file.type) ||
+      file.size === 0 ||
+      file.size > CHARACTER_AVATAR_MAX_BYTES
+    ) {
+      setAvatarUpload({
+        status: "error",
+        message: "请选择不超过 5 MB 的 JPG、PNG 或 WebP 图片。",
+      });
+      input.value = "";
+      return;
+    }
+
+    avatarAbortRef.current?.abort();
+    const controller = new AbortController();
+    avatarAbortRef.current = controller;
+    setAvatarUpload({ status: "loading" });
+    try {
+      const uploaded = await uploadCharacterAvatar(file, controller.signal);
+      if (controller.signal.aborted) return;
+      setForm((current) => ({
+        ...current,
+        avatarUrl: uploaded.avatarUrl,
+      }));
+      setAvatarUpload({ status: "idle" });
+      setValidationError("");
+    } catch {
+      if (controller.signal.aborted) return;
+      setAvatarUpload({
+        status: "error",
+        message: "形象上传失败，请检查图片后重试。",
+      });
+    } finally {
+      if (avatarAbortRef.current === controller) {
+        avatarAbortRef.current = null;
+      }
+      input.value = "";
+    }
   };
 
   return (
@@ -184,7 +245,10 @@ export default function CharacterEditor({
         <div>
           <p className="product-eyebrow">STRUCTURED CHARACTER CARD</p>
           <h1>{character ? `编辑 ${character.name}` : "创建角色"}</h1>
-          <p>每一项都能查看和修改，保存后会共同组成角色的稳定人设。</p>
+          <p>
+            默认只需填写角色名称；选择完整 Prompt 高级模式后，再填写一段角色
+            Prompt。
+          </p>
         </div>
         <span className="editor-owner-note">
           {user.accountType === "admin"
@@ -212,15 +276,20 @@ export default function CharacterEditor({
             description="先给角色一个清楚、容易记住的轮廓。"
           >
             <div className="form-grid two-columns">
-              <Field label="角色名称" htmlFor="character-name">
+              <Field label="角色名称" htmlFor="character-name" required>
                 <input
                   id="character-name"
                   maxLength={80}
+                  aria-required="true"
                   value={form.name}
                   onChange={(event) => change("name", event.target.value)}
                 />
               </Field>
-              <Field label="一句话简介" htmlFor="character-description">
+              <Field
+                label="一句话简介"
+                htmlFor="character-description"
+                optional
+              >
                 <input
                   id="character-description"
                   maxLength={600}
@@ -231,104 +300,181 @@ export default function CharacterEditor({
                 />
               </Field>
             </div>
-            <Field label="人物背景" htmlFor="character-background">
-              <textarea
-                id="character-background"
-                rows={4}
-                maxLength={4000}
-                value={form.background}
-                onChange={(event) => change("background", event.target.value)}
-              />
+            <Field label="人设编辑方式" htmlFor="character-persona-mode">
+              <select
+                id="character-persona-mode"
+                value={form.personaMode}
+                onChange={(event) =>
+                  change(
+                    "personaMode",
+                    event.target.value as CharacterFormValue["personaMode"],
+                  )
+                }
+              >
+                <option value="structured">结构化编辑</option>
+                <option value="custom_prompt">完整 Prompt（高级）</option>
+              </select>
             </Field>
-            <div className="form-grid two-columns">
-              <Field label="性格特点（每行一项）" htmlFor="character-traits">
-                <textarea
-                  id="character-traits"
-                  rows={4}
-                  value={form.personalityTraits}
-                  onChange={(event) =>
-                    change("personalityTraits", event.target.value)
-                  }
-                />
-              </Field>
-              <Field label="与用户的关系" htmlFor="character-relationship">
-                <textarea
-                  id="character-relationship"
-                  rows={4}
-                  maxLength={1000}
-                  value={form.relationship}
-                  onChange={(event) =>
-                    change("relationship", event.target.value)
-                  }
-                />
-              </Field>
-            </div>
+            {form.personaMode === "structured" && (
+              <>
+                <Field label="人物背景" htmlFor="character-background" optional>
+                  <textarea
+                    id="character-background"
+                    rows={4}
+                    maxLength={4000}
+                    value={form.background}
+                    onChange={(event) =>
+                      change("background", event.target.value)
+                    }
+                  />
+                </Field>
+                <div className="form-grid two-columns">
+                  <Field
+                    label="性格特点（每行一项）"
+                    htmlFor="character-traits"
+                    optional
+                  >
+                    <textarea
+                      id="character-traits"
+                      rows={4}
+                      value={form.personalityTraits}
+                      onChange={(event) =>
+                        change("personalityTraits", event.target.value)
+                      }
+                    />
+                  </Field>
+                  <Field
+                    label="与用户的关系"
+                    htmlFor="character-relationship"
+                    optional
+                  >
+                    <textarea
+                      id="character-relationship"
+                      rows={4}
+                      maxLength={1000}
+                      value={form.relationship}
+                      onChange={(event) =>
+                        change("relationship", event.target.value)
+                      }
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
           </EditorSection>
 
-          <EditorSection
-            eyebrow="EXPRESSION"
-            title="表达方式"
-            description="决定角色怎么说、为什么说，以及说话时带着怎样的情绪。"
-          >
-            <div className="form-grid two-columns">
-              <Field label="说话习惯" htmlFor="character-speaking-style">
+          {form.personaMode === "custom_prompt" && (
+            <EditorSection
+              eyebrow="ADVANCED PROMPT"
+              title="完整角色 Prompt"
+              description="这段文本会直接取代结构化的人物背景、性格、关系、表达方式、目标和示例台词。"
+            >
+              <Field
+                label="角色 Prompt"
+                htmlFor="character-custom-prompt"
+                required
+              >
                 <textarea
-                  id="character-speaking-style"
-                  rows={4}
-                  maxLength={1000}
-                  value={form.speakingStyle}
+                  id="character-custom-prompt"
+                  className="custom-prompt-editor"
+                  rows={18}
+                  maxLength={12000}
+                  aria-required="true"
+                  placeholder="直接写入完整的人设与行为指令，例如：你是……你与用户的关系是……回答时……"
+                  value={form.customPrompt}
                   onChange={(event) =>
-                    change("speakingStyle", event.target.value)
+                    change("customPrompt", event.target.value)
                   }
                 />
               </Field>
-              <Field label="情绪风格" htmlFor="character-emotional-style">
-                <textarea
-                  id="character-emotional-style"
-                  rows={4}
-                  maxLength={1000}
-                  value={form.emotionalStyle}
-                  onChange={(event) =>
-                    change("emotionalStyle", event.target.value)
-                  }
-                />
-              </Field>
-              <Field label="对话目标（每行一项）" htmlFor="character-goals">
-                <textarea
-                  id="character-goals"
-                  rows={5}
-                  value={form.conversationGoals}
-                  onChange={(event) =>
-                    change("conversationGoals", event.target.value)
-                  }
-                />
-              </Field>
-              <Field label="示例台词（每行一句）" htmlFor="character-samples">
-                <textarea
-                  id="character-samples"
-                  rows={5}
-                  value={form.sampleLines}
-                  onChange={(event) =>
-                    change("sampleLines", event.target.value)
-                  }
-                />
-              </Field>
-            </div>
-            <details className="advanced-fields">
-              <summary>高级角色提示</summary>
-              <Field label="补充指令（选填）" htmlFor="character-advanced">
-                <textarea
-                  id="character-advanced"
-                  rows={5}
-                  maxLength={4000}
-                  value={form.advancedInstructions}
-                  onChange={(event) =>
-                    change("advancedInstructions", event.target.value)
-                  }
-                />
-              </Field>
-            </details>
-          </EditorSection>
+              <p className="field-help">
+                角色名称仍用于列表显示；开场、沉默追问、声音和形象继续作为独立运行配置保存。
+              </p>
+            </EditorSection>
+          )}
+
+          {form.personaMode === "structured" && (
+            <EditorSection
+              eyebrow="EXPRESSION"
+              title="表达方式"
+              description="决定角色怎么说、为什么说，以及说话时带着怎样的情绪。"
+            >
+              <div className="form-grid two-columns">
+                <Field
+                  label="说话习惯"
+                  htmlFor="character-speaking-style"
+                  optional
+                >
+                  <textarea
+                    id="character-speaking-style"
+                    rows={4}
+                    maxLength={1000}
+                    value={form.speakingStyle}
+                    onChange={(event) =>
+                      change("speakingStyle", event.target.value)
+                    }
+                  />
+                </Field>
+                <Field
+                  label="情绪风格"
+                  htmlFor="character-emotional-style"
+                  optional
+                >
+                  <textarea
+                    id="character-emotional-style"
+                    rows={4}
+                    maxLength={1000}
+                    value={form.emotionalStyle}
+                    onChange={(event) =>
+                      change("emotionalStyle", event.target.value)
+                    }
+                  />
+                </Field>
+                <Field
+                  label="对话目标（每行一项）"
+                  htmlFor="character-goals"
+                  optional
+                >
+                  <textarea
+                    id="character-goals"
+                    rows={5}
+                    value={form.conversationGoals}
+                    onChange={(event) =>
+                      change("conversationGoals", event.target.value)
+                    }
+                  />
+                </Field>
+                <Field
+                  label="示例台词（每行一句）"
+                  htmlFor="character-samples"
+                  optional
+                >
+                  <textarea
+                    id="character-samples"
+                    rows={5}
+                    value={form.sampleLines}
+                    onChange={(event) =>
+                      change("sampleLines", event.target.value)
+                    }
+                  />
+                </Field>
+              </div>
+              <details className="advanced-fields">
+                <summary>高级角色提示</summary>
+                <Field label="补充指令（选填）" htmlFor="character-advanced">
+                  <textarea
+                    id="character-advanced"
+                    rows={5}
+                    maxLength={4000}
+                    value={form.advancedInstructions}
+                    onChange={(event) =>
+                      change("advancedInstructions", event.target.value)
+                    }
+                  />
+                </Field>
+              </details>
+            </EditorSection>
+          )}
 
           <EditorSection
             eyebrow="CONVERSATION"
@@ -516,6 +662,34 @@ export default function CharacterEditor({
                 ))}
               </div>
             </fieldset>
+            <div className="avatar-upload-panel">
+              <img src={form.avatarUrl} alt="当前角色形象预览" />
+              <div>
+                <strong>上传自定义形象</strong>
+                <p>支持 JPG、PNG、WebP，最大 5 MB。</p>
+                <label
+                  className={`secondary-button avatar-upload-button${
+                    avatarUpload.status === "loading" ? " disabled" : ""
+                  }`}
+                >
+                  {avatarUpload.status === "loading" ? "正在上传…" : "选择图片"}
+                  <input
+                    className="avatar-upload-input"
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    disabled={saving || avatarUpload.status === "loading"}
+                    onChange={(event) => void uploadAvatar(event)}
+                  />
+                </label>
+                <span className="avatar-upload-status" aria-live="polite">
+                  {avatarUpload.status === "error"
+                    ? avatarUpload.message
+                    : form.avatarUrl.startsWith("/api/media/")
+                      ? "已使用上传的形象"
+                      : "当前使用内置形象"}
+                </span>
+              </div>
+            </div>
           </EditorSection>
 
           <div className="editor-submit-row">
@@ -529,7 +703,7 @@ export default function CharacterEditor({
             <button
               className="product-primary-button"
               type="submit"
-              disabled={saving}
+              disabled={saving || avatarUpload.status === "loading"}
             >
               {saving ? "正在保存…" : character ? "保存角色" : "创建角色"}
             </button>
@@ -566,15 +740,22 @@ function EditorSection({
 function Field({
   label,
   htmlFor,
+  required = false,
+  optional = false,
   children,
 }: {
   label: string;
   htmlFor: string;
+  required?: boolean;
+  optional?: boolean;
   children: ReactNode;
 }) {
   return (
     <label className="character-field" htmlFor={htmlFor}>
-      <span>{label}</span>
+      <span>
+        {label}
+        {required ? "（必填）" : optional ? "（选填）" : ""}
+      </span>
       {children}
     </label>
   );

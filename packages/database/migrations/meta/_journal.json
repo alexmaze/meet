@@ -50,6 +50,13 @@
       "when": 1786377600000,
       "tag": "0006_qwen_system_voices",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786381200000,
+      "tag": "0007_optional_character_fields",
+      "breakpoints": true
     }
   ]
 }

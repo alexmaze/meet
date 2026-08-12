@@ -1,7 +1,11 @@
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
-import { mediaIdParamsSchema, type UserAccount } from "@meet/protocol";
+import {
+  CHARACTER_AVATAR_MAX_BYTES,
+  mediaIdParamsSchema,
+  type UserAccount,
+} from "@meet/protocol";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import {
@@ -20,6 +24,32 @@ export async function registerMediaRoutes(
   auth: AuthService,
   media: MediaService,
 ): Promise<void> {
+  app.post(
+    "/api/media/character-avatars",
+    { bodyLimit: CHARACTER_AVATAR_MAX_BYTES },
+    async (request, reply) => {
+      noStore(reply);
+      const actor = await authenticateActor(request, reply, config, auth);
+      if (!actor) return;
+      const contentType = request.headers["content-type"]
+        ?.split(";", 1)[0]
+        ?.trim()
+        .toLowerCase();
+      if (!Buffer.isBuffer(request.body) || !contentType) {
+        return invalidAvatarRequest(reply);
+      }
+      try {
+        const uploaded = await media.uploadCharacterAvatar(actor, {
+          body: request.body,
+          contentType,
+        });
+        return reply.code(201).send(uploaded);
+      } catch (error) {
+        return sendMediaError(reply, error);
+      }
+    },
+  );
+
   app.get("/api/media/:mediaId", async (request, reply) => {
     noStore(reply);
     const actor = await authenticateActor(request, reply, config, auth);
@@ -117,6 +147,13 @@ function invalidRequest(reply: FastifyReply) {
   return reply.code(400).send({
     code: "INVALID_REQUEST",
     message: "请输入有效的媒体标识。",
+  });
+}
+
+function invalidAvatarRequest(reply: FastifyReply) {
+  return reply.code(400).send({
+    code: "MEDIA_INVALID_CHARACTER_AVATAR",
+    message: "请选择有效的 JPG、PNG 或 WebP 图片，文件不能超过 5 MB。",
   });
 }
 

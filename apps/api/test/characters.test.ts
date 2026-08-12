@@ -5,6 +5,7 @@ import {
   type CharacterAggregate,
   type CharacterCatalog,
   type CharacterRecord,
+  type MediaObjectRecord,
 } from "@meet/database";
 import type {
   Character,
@@ -24,6 +25,7 @@ import { hashSessionToken } from "../src/auth/session-token.js";
 import type { CharacterRepository } from "../src/characters/repository.js";
 import { buildApp } from "../src/app.js";
 import type { AppConfig } from "../src/config.js";
+import type { MediaRepository } from "../src/media/repository.js";
 
 const now = new Date("2026-08-09T06:00:00.000Z");
 const admin = account("4d1c2e31-ad0e-4fa9-9ae8-ae3497069116", "admin", "admin");
@@ -197,6 +199,73 @@ describe("character routes", () => {
     await app.close();
   });
 
+  it("接受只有名称的角色卡，并不把空字段编译进运行时提示", async () => {
+    const repository = seededCharacters();
+    const app = await testApp(repository);
+    const input = createInput();
+    const response = await request(app, adult, "POST", "/api/characters", {
+      ...input,
+      name: "小麦",
+      description: "",
+      persona: {
+        background: "",
+        personalityTraits: [],
+        relationship: "",
+        speakingStyle: "",
+        emotionalStyle: "",
+        conversationGoals: [],
+        sampleLines: [],
+      },
+      openingLine: null,
+    });
+    expect(response.statusCode).toBe(201);
+
+    const character = response.json<{ character: Character }>().character;
+    const runtime = await request(
+      app,
+      adult,
+      "GET",
+      `/api/characters/${character.id}/runtime`,
+    );
+    expect(runtime.statusCode).toBe(200);
+    expect(runtime.body).toContain("你正在扮演角色“小麦”");
+    expect(runtime.body).not.toContain("【人物背景】");
+    expect(runtime.body).not.toContain("【示例台词】");
+    await app.close();
+  });
+
+  it("完整 Prompt 模式直接使用自定义文本并跳过结构化人设编译", async () => {
+    const repository = seededCharacters();
+    const app = await testApp(repository);
+    const input = createInput();
+    const customPrompt =
+      "你是远山，一位沉稳的旅行向导。先询问用户偏好，再给出简洁建议。";
+    const response = await request(app, adult, "POST", "/api/characters", {
+      ...input,
+      name: "远山",
+      persona: {
+        ...input.persona,
+        definitionMode: "custom_prompt",
+        customPrompt,
+      },
+    });
+    expect(response.statusCode).toBe(201);
+
+    const character = response.json<{ character: Character }>().character;
+    const runtime = await request(
+      app,
+      adult,
+      "GET",
+      `/api/characters/${character.id}/runtime`,
+    );
+    expect(runtime.statusCode).toBe(200);
+    expect(runtime.body).toContain(customPrompt);
+    expect(runtime.body).not.toContain("【人物背景】");
+    expect(runtime.body).not.toContain("你正在扮演角色“远山”");
+    expect(runtime.body).toContain("【对话策略】");
+    await app.close();
+  });
+
   it("returns 403 for every child write route before repository mutation", async () => {
     const repository = seededCharacters();
     const mutationSpies = [
@@ -260,6 +329,47 @@ describe("character routes", () => {
       code: "CHARACTER_PROFILE_INVALID",
     });
     await app.close();
+  });
+
+  it("retains an owned uploaded avatar before saving and rejects another account's media", async () => {
+    const uploadedAvatarId = "2fd4cbb6-fce4-40e2-9141-22f3a1bc2051";
+    const avatarUrl = `/api/media/${uploadedAvatarId}/content`;
+    const ownedMedia = avatarMediaRepository(adult.id, uploadedAvatarId);
+    const repository = seededCharacters();
+    const app = await testApp(repository, undefined, ownedMedia);
+    const response = await request(app, adult, "POST", "/api/characters", {
+      ...createInput(),
+      visualProfile: { ...createInput().visualProfile, avatarUrl },
+    });
+    expect(response.statusCode).toBe(201);
+    expect(ownedMedia.retain).toHaveBeenCalledWith(
+      adult.id,
+      uploadedAvatarId,
+      expect.any(Date),
+    );
+    await app.close();
+
+    const otherMedia = avatarMediaRepository(otherAdult.id, uploadedAvatarId);
+    const isolatedRepository = seededCharacters();
+    const isolatedApp = await testApp(
+      isolatedRepository,
+      undefined,
+      otherMedia,
+    );
+    const rejected = await request(
+      isolatedApp,
+      adult,
+      "POST",
+      "/api/characters",
+      {
+        ...createInput(),
+        visualProfile: { ...createInput().visualProfile, avatarUrl },
+      },
+    );
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json()).toMatchObject({ code: "CHARACTER_AVATAR_INVALID" });
+    expect(isolatedRepository.createCalls).toBe(0);
+    await isolatedApp.close();
   });
 
   it("allows only owners to edit/share/delete and protects revisions and builtins", async () => {
@@ -930,14 +1040,51 @@ function createInput(): CreateCharacterRequest {
 async function testApp(
   characters: MemoryCharacterRepository,
   fetchFunction?: typeof globalThis.fetch,
+  mediaRepository?: MediaRepository,
 ) {
   return buildApp({
     config,
     authRepository,
     characterRepository: characters,
+    mediaRepository,
+    mediaStore: null,
     fetchFunction,
     logger: false,
   });
+}
+
+function avatarMediaRepository(
+  ownerUserId: string,
+  id: string,
+): MediaRepository {
+  const media: MediaObjectRecord = {
+    id,
+    ownerUserId,
+    conversationId: null,
+    kind: "character_avatar",
+    objectKey: "private/avatar-key",
+    contentType: "image/png",
+    sizeBytes: 8,
+    checksumSha256: "b".repeat(64),
+    retention: "temporary",
+    status: "available",
+    expiresAt: new Date("2026-08-11T06:00:00.000Z"),
+    deletedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  return {
+    createCharacterAvatar: vi.fn(async () => ({
+      kind: "created" as const,
+      media,
+    })),
+    findReadable: vi.fn(async () => media),
+    requestDelete: vi.fn(async () => ({
+      kind: "unchanged" as const,
+      media,
+    })),
+    retain: vi.fn(async () => ({ kind: "retained" as const, media })),
+  };
 }
 
 const tokens = new Map(

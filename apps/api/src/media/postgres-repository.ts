@@ -1,4 +1,5 @@
 import {
+  createMediaObject,
   findReadableMediaObject,
   requestMediaObjectDeletion,
   retainMediaObject,
@@ -13,6 +14,17 @@ export class PostgresMediaRepository implements MediaRepository {
     private readonly db: Database,
     private readonly onCleanup: MediaCleanupHook,
   ) {}
+
+  createCharacterAvatar(
+    input: Parameters<MediaRepository["createCharacterAvatar"]>[0],
+  ) {
+    return createMediaObject(this.db, {
+      ...input,
+      kind: "character_avatar",
+      retention: "temporary",
+      onCleanup: this.onCleanup,
+    });
+  }
 
   findReadable(
     actorUserId: string,

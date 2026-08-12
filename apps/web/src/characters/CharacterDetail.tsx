@@ -33,6 +33,7 @@ export default function CharacterDetail({
 }: CharacterDetailProps) {
   const actions = getCharacterActionVisibility(user, character.permissions);
   const policy = character.conversationPolicy;
+  const usesCustomPrompt = character.persona.definitionMode === "custom_prompt";
 
   return (
     <div
@@ -152,35 +153,46 @@ export default function CharacterDetail({
         <section className="detail-card detail-persona">
           <p className="product-eyebrow">PERSONA</p>
           <h2>角色设定</h2>
-          <DetailField label="背景" value={character.persona.background} />
-          <DetailField
-            label="与我的关系"
-            value={character.persona.relationship}
-          />
-          <DetailField
-            label="说话方式"
-            value={character.persona.speakingStyle}
-          />
-          <DetailField
-            label="情绪风格"
-            value={character.persona.emotionalStyle}
-          />
-          <div className="detail-field">
-            <h3>性格</h3>
-            <div className="trait-list">
-              {character.persona.personalityTraits.map((trait) => (
-                <span key={trait}>{trait}</span>
-              ))}
+          {usesCustomPrompt ? (
+            <div className="detail-field">
+              <h3>完整 Prompt</h3>
+              <pre className="detail-custom-prompt">
+                {character.persona.customPrompt}
+              </pre>
             </div>
-          </div>
-          <div className="detail-field">
-            <h3>对话目标</h3>
-            <ul>
-              {character.persona.conversationGoals.map((goal) => (
-                <li key={goal}>{goal}</li>
-              ))}
-            </ul>
-          </div>
+          ) : (
+            <>
+              <DetailField label="背景" value={character.persona.background} />
+              <DetailField
+                label="与我的关系"
+                value={character.persona.relationship}
+              />
+              <DetailField
+                label="说话方式"
+                value={character.persona.speakingStyle}
+              />
+              <DetailField
+                label="情绪风格"
+                value={character.persona.emotionalStyle}
+              />
+              <div className="detail-field">
+                <h3>性格</h3>
+                <div className="trait-list">
+                  {character.persona.personalityTraits.map((trait) => (
+                    <span key={trait}>{trait}</span>
+                  ))}
+                </div>
+              </div>
+              <div className="detail-field">
+                <h3>对话目标</h3>
+                <ul>
+                  {character.persona.conversationGoals.map((goal) => (
+                    <li key={goal}>{goal}</li>
+                  ))}
+                </ul>
+              </div>
+            </>
+          )}
         </section>
 
         <div className="detail-side-stack">
@@ -222,15 +234,17 @@ export default function CharacterDetail({
             <small>{character.providerProfile.displayName}</small>
           </section>
 
-          <section className="detail-card">
-            <p className="product-eyebrow">SAMPLE LINES</p>
-            <h2>示例台词</h2>
-            <ul className="sample-lines">
-              {character.persona.sampleLines.map((line) => (
-                <li key={line}>“{line}”</li>
-              ))}
-            </ul>
-          </section>
+          {!usesCustomPrompt && (
+            <section className="detail-card">
+              <p className="product-eyebrow">SAMPLE LINES</p>
+              <h2>示例台词</h2>
+              <ul className="sample-lines">
+                {character.persona.sampleLines.map((line) => (
+                  <li key={line}>“{line}”</li>
+                ))}
+              </ul>
+            </section>
+          )}
         </div>
       </div>
     </div>

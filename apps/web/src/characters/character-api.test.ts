@@ -6,6 +6,7 @@ import {
   parseCharacterList,
   parseCharacterRuntime,
   previewVoice,
+  uploadCharacterAvatar,
 } from "./character-api.js";
 
 const ids = {
@@ -168,5 +169,51 @@ describe("previewVoice", () => {
     ).rejects.toMatchObject({
       code: "INVALID_VOICE_PREVIEW_RESPONSE",
     });
+  });
+});
+
+describe("uploadCharacterAvatar", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("uploads the raw image with authentication and parses the private media URL", async () => {
+    const mediaId = "2fd4cbb6-fce4-40e2-9141-22f3a1bc2051";
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            media: {
+              id: mediaId,
+              ownerUserId: "4d1c2e31-ad0e-4fa9-9ae8-ae3497069117",
+              conversationId: null,
+              kind: "character_avatar",
+              contentType: "image/png",
+              sizeBytes: 8,
+              retention: "temporary",
+              expiresAt: "2026-08-11T05:20:00.000Z",
+              createdAt: "2026-08-10T05:20:00.000Z",
+            },
+            avatarUrl: `/api/media/${mediaId}/content`,
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const file = new File([new Uint8Array([0x89, 0x50])], "avatar.png", {
+      type: "image/png",
+    });
+
+    const uploaded = await uploadCharacterAvatar(file);
+
+    expect(uploaded.avatarUrl).toBe(`/api/media/${mediaId}/content`);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/media/character-avatars",
+      expect.objectContaining({
+        method: "POST",
+        body: file,
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: expect.objectContaining({ "Content-Type": "image/png" }),
+      }),
+    );
   });
 });

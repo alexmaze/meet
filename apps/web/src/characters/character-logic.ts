@@ -5,6 +5,7 @@ import {
   type CharacterPermissions,
   type CharacterRuntimeResponse,
   type CreateCharacterRequest,
+  type PersonaDefinitionMode,
   type ProviderProfile,
   type QwenRealtimeModel,
   type UserAccount,
@@ -21,6 +22,8 @@ export type CharacterActionVisibility = CharacterPermissions & {
 export type CharacterFormValue = {
   name: string;
   description: string;
+  personaMode: PersonaDefinitionMode;
+  customPrompt: string;
   background: string;
   personalityTraits: string;
   relationship: string;
@@ -111,6 +114,8 @@ export function createEmptyCharacterForm(
   return {
     name: "",
     description: "",
+    personaMode: "structured",
+    customPrompt: "",
     background: "",
     personalityTraits: "",
     relationship: "",
@@ -135,6 +140,8 @@ export function characterToForm(character: Character): CharacterFormValue {
   return {
     name: character.name,
     description: character.description,
+    personaMode: character.persona.definitionMode ?? "structured",
+    customPrompt: character.persona.customPrompt ?? "",
     background: character.persona.background,
     personalityTraits: character.persona.personalityTraits.join("\n"),
     relationship: character.persona.relationship,
@@ -161,10 +168,13 @@ export function buildCreateCharacterRequest(
 ):
   { ok: true; value: CreateCharacterRequest } | { ok: false; message: string } {
   const advancedInstructions = form.advancedInstructions.trim();
+  const customPrompt = form.customPrompt.trim();
   const candidate = {
     name: form.name,
     description: form.description,
     persona: {
+      definitionMode: form.personaMode,
+      ...(customPrompt ? { customPrompt } : {}),
       background: form.background,
       personalityTraits: splitLines(form.personalityTraits),
       relationship: form.relationship,
@@ -245,6 +255,12 @@ export function presentCharacterError(
 
   if (error.status === 403) return "你没有执行这个操作的权限。";
   if (error.status === 404) return "这个角色不存在或你无法访问。";
+  if (error.code === "CHARACTER_AVATAR_INVALID") {
+    return "上传的角色形象已失效，请重新上传。";
+  }
+  if (error.code === "CHARACTER_AVATAR_UNAVAILABLE") {
+    return "暂时无法保存上传的角色形象，请稍后重试。";
+  }
   if (error.status === 409) {
     return operation === "save" || operation === "share"
       ? "角色已在其他页面更新，请重新打开后再修改。"
@@ -268,16 +284,8 @@ function splitLines(value: string): string[] {
 
 function getCharacterFormError(form: CharacterFormValue): string {
   if (!form.name.trim()) return "请输入角色名称。";
-  if (!form.description.trim()) return "请输入角色简介。";
-  if (!form.background.trim()) return "请输入角色背景。";
-  if (!splitLines(form.personalityTraits).length)
-    return "请至少填写一个性格特点。";
-  if (!form.relationship.trim()) return "请描述角色与用户的关系。";
-  if (!form.speakingStyle.trim()) return "请描述角色的说话习惯。";
-  if (!form.emotionalStyle.trim()) return "请描述角色的情绪风格。";
-  if (!splitLines(form.conversationGoals).length)
-    return "请至少填写一个对话目标。";
-  if (!splitLines(form.sampleLines).length) return "请至少填写一句示例台词。";
+  if (form.personaMode === "custom_prompt" && !form.customPrompt.trim())
+    return "请输入完整的角色 Prompt。";
   if (!form.providerProfileId || !form.voiceProfileId)
     return "请选择实时模型和角色声音。";
   return "请检查角色卡中内容的长度和格式。";

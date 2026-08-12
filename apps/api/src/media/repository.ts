@@ -1,4 +1,5 @@
 import type {
+  CreateMediaObjectResult,
   MediaCleanupHook,
   MediaObjectRecord,
   RequestMediaObjectDeletionResult,
@@ -6,6 +7,15 @@ import type {
 } from "@meet/database";
 
 export interface MediaRepository {
+  createCharacterAvatar(input: {
+    ownerUserId: string;
+    objectKey: string;
+    contentType: string;
+    sizeBytes: number;
+    checksumSha256: string;
+    expiresAt: Date;
+    createdAt: Date;
+  }): Promise<CreateMediaObjectResult>;
   findReadable(
     actorUserId: string,
     actorCanReadChildren: boolean,

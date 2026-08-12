@@ -9,19 +9,41 @@ export const characterVisibilitySchema = z.enum([
 export type CharacterVisibility = z.infer<typeof characterVisibilitySchema>;
 
 const trimmedText = (maximum: number) => z.string().trim().min(1).max(maximum);
+const optionalTrimmedText = (maximum: number) => z.string().trim().max(maximum);
+
+export const personaDefinitionModeSchema = z.enum([
+  "structured",
+  "custom_prompt",
+]);
+
+export type PersonaDefinitionMode = z.infer<typeof personaDefinitionModeSchema>;
 
 export const personaDefinitionSchema = z
   .object({
-    background: trimmedText(4_000),
-    personalityTraits: z.array(trimmedText(120)).min(1).max(12),
-    relationship: trimmedText(1_000),
-    speakingStyle: trimmedText(1_000),
-    emotionalStyle: trimmedText(1_000),
-    conversationGoals: z.array(trimmedText(500)).min(1).max(8),
-    sampleLines: z.array(trimmedText(500)).min(1).max(12),
+    definitionMode: personaDefinitionModeSchema.optional(),
+    customPrompt: trimmedText(12_000).optional(),
+    background: optionalTrimmedText(4_000),
+    personalityTraits: z.array(trimmedText(120)).max(12),
+    relationship: optionalTrimmedText(1_000),
+    speakingStyle: optionalTrimmedText(1_000),
+    emotionalStyle: optionalTrimmedText(1_000),
+    conversationGoals: z.array(trimmedText(500)).max(8),
+    sampleLines: z.array(trimmedText(500)).max(12),
     advancedInstructions: trimmedText(4_000).optional(),
   })
   .strict()
+  .superRefine((persona, context) => {
+    if (
+      persona.definitionMode === "custom_prompt" &&
+      !persona.customPrompt?.trim()
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["customPrompt"],
+        message: "完整 Prompt 模式需要填写 Prompt 文本。",
+      });
+    }
+  })
   .refine(
     (persona) => {
       const values = [
@@ -67,13 +89,26 @@ export const characterBackgroundSchema = z.enum([
   "sunset",
 ]);
 
-// 头像只接受站内绝对路径；媒体上传接入后仍由 API 返回站内路径。
-export const characterAvatarPathSchema = z
+// 头像只接受站内绝对路径；上传头像通过需要登录的媒体读取接口提供。
+export const builtInCharacterAvatarPathSchema = z
   .string()
   .trim()
   .min(1)
   .max(120)
   .regex(/^\/avatars\/[A-Za-z0-9_-]+\.svg$/);
+
+export const uploadedCharacterAvatarPathSchema = z
+  .string()
+  .trim()
+  .max(120)
+  .regex(
+    /^\/api\/media\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/content$/,
+  );
+
+export const characterAvatarPathSchema = z.union([
+  builtInCharacterAvatarPathSchema,
+  uploadedCharacterAvatarPathSchema,
+]);
 
 export const visualProfileSchema = z
   .object({
@@ -165,7 +200,7 @@ export const characterSummarySchema = z
     systemVersion: z.number().int().positive().nullable(),
     visibility: characterVisibilitySchema,
     name: trimmedText(80),
-    description: trimmedText(600),
+    description: optionalTrimmedText(600),
     revision: z.number().int().positive(),
     visualProfile: visualProfileSchema,
     voiceProfile: voiceProfileSchema,
@@ -194,7 +229,7 @@ export type Character = z.infer<typeof characterSchema>;
 
 const editableCharacterFields = {
   name: trimmedText(80),
-  description: trimmedText(600),
+  description: optionalTrimmedText(600),
   persona: personaDefinitionSchema,
   openingLine: trimmedText(500).nullable(),
   providerProfileId: z.uuid(),

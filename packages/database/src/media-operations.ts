@@ -1,8 +1,9 @@
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, exists, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { Database } from "./client.js";
 import type { DatabaseTransaction } from "./conversation-operations.js";
 import {
+  characters,
   conversations,
   mediaObjects,
   userAccounts,
@@ -140,6 +141,24 @@ export async function findReadableMediaObject(
                 ]),
               )
             : eq(mediaObjects.ownerUserId, input.actorUserId),
+          and(
+            eq(mediaObjects.kind, "character_avatar"),
+            exists(
+              db
+                .select({ id: characters.id })
+                .from(characters)
+                .where(
+                  and(
+                    isNull(characters.deletedAt),
+                    or(
+                      inArray(characters.visibility, ["builtin", "family"]),
+                      eq(characters.ownerUserId, input.actorUserId),
+                    ),
+                    sql`${characters.visualProfile}->>'avatarUrl' = '/api/media/' || ${mediaObjects.id}::text || '/content'`,
+                  ),
+                ),
+            ),
+          ),
         ),
       ),
     )

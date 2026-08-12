@@ -1,5 +1,15 @@
 import { z } from "zod";
 
+export const CHARACTER_AVATAR_MAX_BYTES = 5 * 1024 * 1024;
+export const characterAvatarContentTypeSchema = z.enum([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+export type CharacterAvatarContentType = z.infer<
+  typeof characterAvatarContentTypeSchema
+>;
+
 export const mediaObjectKindSchema = z.enum([
   "call_recording",
   "conversation_image",
@@ -29,3 +39,18 @@ export const mediaIdParamsSchema = z.object({ mediaId: z.uuid() }).strict();
 export const mediaObjectResponseSchema = z.object({
   media: mediaObjectSchema,
 });
+
+export const characterAvatarUploadResponseSchema = z
+  .object({
+    media: mediaObjectSchema,
+    avatarUrl: z
+      .string()
+      .regex(
+        /^\/api\/media\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/content$/,
+      ),
+  })
+  .strict();
+
+export type CharacterAvatarUploadResponse = z.infer<
+  typeof characterAvatarUploadResponseSchema
+>;
