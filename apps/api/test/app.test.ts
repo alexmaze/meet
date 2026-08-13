@@ -125,6 +125,38 @@ const characterWebSocketUrl = `/api/characters/${testCharacter.character.id}/rea
 const voicePreviewUrl = `/api/characters/voices/${testCharacter.voiceProfile.id}/preview`;
 
 describe("Meet API", () => {
+  it("reports provider readiness without exposing realtime secrets", async () => {
+    const app = await buildApp({
+      config: {
+        ...config,
+        doubao: {
+          enabled: true,
+          apiKey: "never-return-this-doubao-key",
+          model: "1.2.6.1",
+          requestTimeoutMs: 15_000,
+        },
+      },
+      authRepository,
+      logger: false,
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/realtime/providers",
+      headers: authHeaders,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      providers: [
+        { provider: "qwen", enabled: true, configured: true },
+        { provider: "doubao", enabled: true, configured: true },
+      ],
+    });
+    expect(response.body).not.toContain("never-return-this-key");
+    expect(response.body).not.toContain("never-return-this-doubao-key");
+    await app.close();
+  });
+
   it("returns authenticated realtime config without secrets", async () => {
     const app = await buildApp({ config, authRepository, logger: false });
     const response = await app.inject({
@@ -742,6 +774,23 @@ describe("Meet API", () => {
     });
 
     expect(loaded.qwen.endpoint).toBe("realtime.example.com");
+  });
+
+  it("loads the fixed Doubao full-duplex model without exposing the key", () => {
+    const loaded = loadConfig({
+      DOUBAO_REALTIME_ENABLED: "true",
+      DOUBAO_SPEECH_API_KEY: "server-only-doubao-key",
+    });
+
+    expect(loaded.doubao).toMatchObject({
+      enabled: true,
+      apiKey: "server-only-doubao-key",
+      model: "1.2.6.1",
+      requestTimeoutMs: 15_000,
+    });
+    expect(() => loadConfig({ DOUBAO_REALTIME_MODEL: "latest" })).toThrow(
+      /DOUBAO_REALTIME_MODEL/,
+    );
   });
 
   it("rejects an endpoint containing an upstream path", () => {

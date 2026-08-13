@@ -1,4 +1,5 @@
 import {
+  doubaoRealtimeModelSchema,
   qwenRealtimeModelSchema,
   qwenRealtimeRegionSchema,
   type QwenRealtimeModel,
@@ -102,6 +103,18 @@ const envSchema = z.object({
     .default(
       "你是一位自然、耐心、有角色感的中文聊天伙伴。先听清用户再回答，默认简短口语化，不要像客服或说明书。",
     ),
+  DOUBAO_REALTIME_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  DOUBAO_SPEECH_API_KEY: optionalSecretSchema,
+  DOUBAO_REALTIME_MODEL: doubaoRealtimeModelSchema.default("1.2.6.1"),
+  DOUBAO_REALTIME_REQUEST_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .max(60_000)
+    .default(15_000),
   MEDIA_LOCAL_DIR: z.string().trim().min(1).default("./data/media"),
 });
 
@@ -129,6 +142,12 @@ export type AppConfig = {
     model: QwenRealtimeModel;
     voice: string;
     instructions: string;
+    requestTimeoutMs: number;
+  };
+  doubao?: {
+    enabled: boolean;
+    apiKey?: string;
+    model: "1.2.6.1";
     requestTimeoutMs: number;
   };
   media?: {
@@ -171,6 +190,12 @@ export function loadConfig(
       voice: env.QWEN_REALTIME_VOICE,
       instructions: env.QWEN_REALTIME_INSTRUCTIONS,
       requestTimeoutMs: env.QWEN_REALTIME_REQUEST_TIMEOUT_MS,
+    },
+    doubao: {
+      enabled: env.DOUBAO_REALTIME_ENABLED,
+      apiKey: env.DOUBAO_SPEECH_API_KEY,
+      model: env.DOUBAO_REALTIME_MODEL,
+      requestTimeoutMs: env.DOUBAO_REALTIME_REQUEST_TIMEOUT_MS,
     },
     media: {
       localDirectory: resolve(env.MEDIA_LOCAL_DIR),

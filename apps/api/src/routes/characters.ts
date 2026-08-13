@@ -3,6 +3,7 @@ import {
   conversationRealtimeQuerySchema,
   createCharacterRequestSchema,
   deleteCharacterRequestSchema,
+  doubaoRealtimeModelSchema,
   emptyCharacterActionRequestSchema,
   qwenRealtimeModelSchema,
   updateCharacterRequestSchema,
@@ -30,6 +31,14 @@ import {
 } from "../conversations/service.js";
 import type { AppConfig } from "../config.js";
 import {
+  generateDoubaoVoicePreview,
+  DoubaoVoicePreviewError,
+} from "../doubao-voice-preview.js";
+import {
+  relayDoubaoWebSocket,
+  type DoubaoWebSocketFactory,
+} from "../doubao-websocket.js";
+import {
   generateQwenVoicePreview,
   QwenVoicePreviewError,
 } from "../qwen-voice-preview.js";
@@ -50,13 +59,15 @@ export async function registerCharacterRoutes(
   conversationService: ConversationService,
   fetchFunction?: FetchFunction,
   qwenWebSocketFactory?: QwenWebSocketFactory,
+  doubaoWebSocketFactory?: DoubaoWebSocketFactory,
 ): Promise<void> {
   const realtimeHandshakeRateLimiter = new LoginRateLimiter(20, 60_000);
   const voicePreviewRateLimiter = new LoginRateLimiter(10, 60_000);
   const websocketContexts = new WeakMap<
     FastifyRequest,
     {
-      model: ReturnType<typeof qwenRealtimeModelSchema.parse>;
+      provider: "qwen" | "doubao";
+      model: string;
       voice: string;
       instructions: string;
       relationshipContext?: string;
@@ -102,18 +113,31 @@ export async function registerCharacterRoutes(
           actor,
           params.data.voiceProfileId,
         );
-        const model = qwenRealtimeModelSchema.safeParse(runtime.model);
-        if (runtime.provider !== "qwen" || !model.success) {
+        const qwenModel = qwenRealtimeModelSchema.safeParse(runtime.model);
+        const doubaoModel = doubaoRealtimeModelSchema.safeParse(runtime.model);
+        if (
+          (runtime.provider !== "qwen" || !qwenModel.success) &&
+          (runtime.provider !== "doubao" || !doubaoModel.success)
+        ) {
           throw new CharacterServiceError(
             "CHARACTER_REALTIME_UNAVAILABLE",
             "该声音当前不支持在线试听。",
             409,
           );
         }
-        if (!config.qwen.enabled) {
+        if (runtime.provider === "qwen" && !config.qwen.enabled) {
           return reply.code(503).send({
             code: "REALTIME_SPIKE_DISABLED",
             message: "千问实时服务未启用。",
+          });
+        }
+        if (
+          runtime.provider === "doubao" &&
+          (!config.doubao?.enabled || !config.doubao.apiKey)
+        ) {
+          return reply.code(503).send({
+            code: "DOUBAO_NOT_CONFIGURED",
+            message: "服务端尚未配置豆包实时语音服务。",
           });
         }
 
@@ -128,12 +152,20 @@ export async function registerCharacterRoutes(
           });
         }
 
-        const wav = await generateQwenVoicePreview({
-          config: config.qwen,
-          model: model.data,
-          voice: runtime.voice,
-          webSocketFactory: qwenWebSocketFactory,
-        });
+        const wav =
+          runtime.provider === "doubao" && doubaoModel.success && config.doubao
+            ? await generateDoubaoVoicePreview({
+                config: config.doubao,
+                model: doubaoModel.data,
+                voice: runtime.voice,
+                webSocketFactory: doubaoWebSocketFactory,
+              })
+            : await generateQwenVoicePreview({
+                config: config.qwen,
+                model: qwenRealtimeModelSchema.parse(runtime.model),
+                voice: runtime.voice,
+                webSocketFactory: qwenWebSocketFactory,
+              });
         return reply
           .type("audio/wav")
           .header("Content-Length", String(wav.byteLength))
@@ -143,6 +175,16 @@ export async function registerCharacterRoutes(
           request.log.warn(
             { code: error.code },
             "Qwen voice preview generation failed",
+          );
+          return reply.code(error.statusCode).send({
+            code: error.code,
+            message: error.message,
+          });
+        }
+        if (error instanceof DoubaoVoicePreviewError) {
+          request.log.warn(
+            { code: error.code, diagnostic: error.diagnostic },
+            "Doubao voice preview generation failed",
           );
           return reply.code(error.statusCode).send({
             code: error.code,
@@ -437,26 +479,43 @@ export async function registerCharacterRoutes(
             query.data.conversationId,
             params.data.characterId,
           );
-          const model = qwenRealtimeModelSchema.safeParse(
-            runtime.realtime.model,
-          );
-          if (runtime.realtime.provider !== "qwen" || !model.success) {
+          const provider = runtime.realtime.provider;
+          const modelIsValid =
+            (provider === "qwen" &&
+              qwenRealtimeModelSchema.safeParse(runtime.realtime.model)
+                .success) ||
+            (provider === "doubao" &&
+              doubaoRealtimeModelSchema.safeParse(runtime.realtime.model)
+                .success);
+          if (!modelIsValid || (provider !== "qwen" && provider !== "doubao")) {
             throw new CharacterServiceError(
               "CHARACTER_REALTIME_UNAVAILABLE",
-              "该角色当前没有可用的千问实时模型。",
+              "该角色当前没有可用的实时语音模型。",
               409,
             );
           }
-          if (!config.qwen.enabled) {
+          if (provider === "qwen" && !config.qwen.enabled) {
             return reply.code(503).send({
               code: "REALTIME_SPIKE_DISABLED",
               message: "千问实时服务未启用。",
             });
           }
-          if (!config.qwen.apiKey || !config.qwen.endpoint) {
+          if (
+            provider === "qwen" &&
+            (!config.qwen.apiKey || !config.qwen.endpoint)
+          ) {
             return reply.code(503).send({
               code: "QWEN_NOT_CONFIGURED",
               message: "服务端尚未配置千问实时服务。",
+            });
+          }
+          if (
+            provider === "doubao" &&
+            (!config.doubao?.enabled || !config.doubao.apiKey)
+          ) {
+            return reply.code(503).send({
+              code: "DOUBAO_NOT_CONFIGURED",
+              message: "服务端尚未配置豆包实时语音服务。",
             });
           }
 
@@ -472,7 +531,8 @@ export async function registerCharacterRoutes(
           }
 
           websocketContexts.set(request, {
-            model: model.data,
+            provider,
+            model: runtime.realtime.model,
             voice: runtime.realtime.voice,
             instructions: runtime.realtime.instructions,
             relationshipContext: continuity.relationshipContext,
@@ -490,16 +550,27 @@ export async function registerCharacterRoutes(
         socket.close(1011, "Realtime context missing");
         return;
       }
+      const runtime = {
+        voice: context.voice,
+        instructions: context.instructions,
+        relationshipContext: context.relationshipContext,
+        history: context.history,
+      };
+      if (context.provider === "doubao" && config.doubao) {
+        relayDoubaoWebSocket({
+          client: socket,
+          config: config.doubao,
+          model: doubaoRealtimeModelSchema.parse(context.model),
+          runtime,
+          webSocketFactory: doubaoWebSocketFactory,
+        });
+        return;
+      }
       relayQwenWebSocket({
         client: socket,
         config: config.qwen,
-        model: context.model,
-        runtime: {
-          voice: context.voice,
-          instructions: context.instructions,
-          relationshipContext: context.relationshipContext,
-          history: context.history,
-        },
+        model: qwenRealtimeModelSchema.parse(context.model),
+        runtime,
         webSocketFactory: qwenWebSocketFactory,
       });
     },

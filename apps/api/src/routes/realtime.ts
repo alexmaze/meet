@@ -25,4 +25,19 @@ export async function registerRealtimeRoutes(
       defaultInstructions: config.qwen.instructions,
     }),
   );
+
+  app.get("/api/realtime/providers", { preHandler: requireAuth }, async () => ({
+    providers: [
+      {
+        provider: "qwen" as const,
+        enabled: config.qwen.enabled,
+        configured: Boolean(config.qwen.apiKey && config.qwen.endpoint),
+      },
+      {
+        provider: "doubao" as const,
+        enabled: Boolean(config.doubao?.enabled),
+        configured: Boolean(config.doubao?.apiKey),
+      },
+    ],
+  }));
 }

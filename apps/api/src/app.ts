@@ -24,6 +24,7 @@ import { CharacterService } from "./characters/service.js";
 import { PostgresConversationRepository } from "./conversations/postgres-repository.js";
 import type { ConversationRepository } from "./conversations/repository.js";
 import { ConversationService } from "./conversations/service.js";
+import type { DoubaoWebSocketFactory } from "./doubao-websocket.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import { PostgresMemberRepository } from "./members/postgres-repository.js";
 import type { AdminMemberRepository } from "./members/repository.js";
@@ -62,6 +63,7 @@ export type BuildAppOptions = {
   conversationCompletionHook?: ConversationCompletionHook | null;
   mediaCleanupHook?: MediaCleanupHook | null;
   qwenWebSocketFactory?: QwenWebSocketFactory;
+  doubaoWebSocketFactory?: DoubaoWebSocketFactory;
   logger?: boolean;
 };
 
@@ -226,6 +228,7 @@ export async function buildApp(
     conversations,
     options.fetchFunction,
     options.qwenWebSocketFactory,
+    options.doubaoWebSocketFactory,
   );
   await registerConversationRoutes(app, config, auth, conversations);
   await registerMemoryRoutes(app, config, auth, memories);

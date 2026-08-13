@@ -1,5 +1,6 @@
 import {
   createCharacterRequestSchema,
+  doubaoRealtimeModelSchema,
   qwenRealtimeModelSchema,
   type Character,
   type CharacterPermissions,
@@ -7,7 +8,7 @@ import {
   type CreateCharacterRequest,
   type PersonaDefinitionMode,
   type ProviderProfile,
-  type QwenRealtimeModel,
+  type RealtimeProviderKind,
   type UserAccount,
   type VisualProfile,
   type VoiceProfile,
@@ -48,13 +49,15 @@ export type RealtimeLaunchOptions = {
   voice: string;
   instructions: string;
   assistantStarts: boolean;
+  openingText?: string;
 };
 
 export type RuntimeLaunchMapping =
   | {
       ok: true;
       value: RealtimeLaunchOptions;
-      model: QwenRealtimeModel;
+      provider: Extract<RealtimeProviderKind, "qwen" | "doubao">;
+      model: string;
     }
   | { ok: false; message: string };
 
@@ -105,7 +108,9 @@ export function createEmptyCharacterForm(
   providers: ProviderProfile[],
   voices: VoiceProfile[],
 ): CharacterFormValue {
-  const provider = providers[0];
+  const provider =
+    providers.find((candidate) => candidate.provider === "qwen") ??
+    providers[0];
   const voice = voices.find(
     (candidate) => candidate.providerProfileId === provider?.id,
   );
@@ -214,23 +219,31 @@ export function buildCreateCharacterRequest(
 export function mapRuntimeToLaunchOptions(
   runtime: CharacterRuntimeResponse,
 ): RuntimeLaunchMapping {
-  if (runtime.realtime.provider !== "qwen") {
+  const provider = runtime.realtime.provider;
+  if (provider !== "qwen" && provider !== "doubao") {
     return { ok: false, message: "当前浏览器暂不支持这个角色的实时模型。" };
   }
 
-  const model = qwenRealtimeModelSchema.safeParse(runtime.realtime.model);
+  const model =
+    provider === "qwen"
+      ? qwenRealtimeModelSchema.safeParse(runtime.realtime.model)
+      : doubaoRealtimeModelSchema.safeParse(runtime.realtime.model);
   if (!model.success) {
     return { ok: false, message: "这个角色的实时模型暂不可用。" };
   }
 
   return {
     ok: true,
+    provider,
     model: model.data,
     value: {
       characterId: runtime.character.id,
       voice: runtime.realtime.voice,
       instructions: runtime.realtime.instructions,
       assistantStarts: runtime.realtime.firstSpeaker === "assistant",
+      ...(runtime.realtime.openingLine
+        ? { openingText: runtime.realtime.openingLine }
+        : {}),
     },
   };
 }

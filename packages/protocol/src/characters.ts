@@ -330,6 +330,7 @@ export const characterRuntimeResponseSchema = z
         voice: trimmedText(120),
         instructions: trimmedText(16_000),
         firstSpeaker: firstSpeakerSchema,
+        openingLine: trimmedText(500).nullable().optional(),
       })
       .strict(),
   })

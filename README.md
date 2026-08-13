@@ -11,7 +11,7 @@ Meet 是一个私有部署、供家庭内部使用的 AI 实时语音角色扮�
 
 ## 当前状态
 
-项目已经完成需求基线、技术栈选择并进入 MVP 业务开发阶段。当前代码可以启动 React PWA、Fastify API 和独立 `pg-boss` Worker，并通过带账号认证的 Fastify WebSocket 中继连接 `qwen-audio-3.0-realtime-plus`；浏览器发送 16 kHz PCM，使用可清空的 24 kHz PCM 播放队列，免提模式默认使用 `smart_turn`，默认音色为 `longanqian`。WebRTC 链路保留为实验与诊断路径。第一版默认继续使用这个模型实现完整业务闭环，同时保留 Provider Adapter，不把角色、会话和记忆永久绑定到千问。账号、家庭成员、三个预置角色、结构化角色卡、角色权限、角色首页、实时通话、会话/消息持久化、私人历史、最近历史续聊、约 30 秒断线恢复，以及会话摘要、分级长期记忆和记忆审阅页面已经实现。MediaStore、本地私有对象目录、媒体元数据、受权读取/保留/删除和 `media.expire` 幂等清理基础也已完成；按次录音采集与历史回放仍待接入。真实凭据与手机、桌面设备实测和业务开发并行，不再阻塞需求推进。
+项目已经完成需求基线、技术栈选择并进入 MVP 业务开发阶段。当前代码可以启动 React PWA、Fastify API 和独立 `pg-boss` Worker，并通过带账号认证的 Fastify WebSocket 中继连接 `qwen-audio-3.0-realtime-plus` 或豆包实时语音 3.0 全双工版本；浏览器发送 16 kHz PCM，使用可清空的 24 kHz PCM 播放队列。千问仍是三个预置角色和第一版的默认 Provider，豆包作为显式可选的中文角色表现对照组，不在故障时静默切换。WebRTC 链路保留为实验与诊断路径。账号、家庭成员、三个预置角色、结构化角色卡、角色权限、角色首页、实时通话、会话/消息持久化、私人历史、最近历史续聊、约 30 秒断线恢复，以及会话摘要、分级长期记忆和记忆审阅页面已经实现。MediaStore、本地私有对象目录、媒体元数据、受权读取/保留/删除和 `media.expire` 幂等清理基础也已完成；按次录音采集与历史回放仍待接入。真实凭据与手机、桌面设备实测和业务开发并行，不再阻塞需求推进。
 
 已经确认的方向：
 
@@ -75,7 +75,7 @@ Meet 是一个私有部署、供家庭内部使用的 AI 实时语音角色扮�
 - 通话页使用大幅角色立绘、模糊延展背景、悬浮当前字幕和底部固定控制栏；
 - 第一版默认使用千问 `qwen-audio-3.0-realtime-plus` 实现纯语音角色体验；
 - Qwen-Audio 不支持图片输入，拍题和教学图片保留 Qwen3.5 Omni Plus Realtime 或独立视觉分析回退；
-- 使用豆包 S2S-SC 做中文角色表现的对比测试；
+- 支持豆包实时语音 3.0 全双工版本（Seeduplex，模型 `1.2.6.1`），用于中文角色表现对比测试；
 - 从第一天保留模型供应商和音色的可替换边界；
 - 应用不实现完整数据备份，部署时依赖云服务器磁盘快照。
 
@@ -87,6 +87,7 @@ Meet 是一个私有部署、供家庭内部使用的 AI 实时语音角色扮�
 - [已确认的产品与模型决策](docs/decisions/0001-product-and-model-strategy.md)
 - [业务开发与第一版默认实时模型决策](docs/decisions/0025-business-development-and-default-realtime-model.md)
 - [Qwen WebSocket PCM 与确定性打断决策](docs/decisions/0026-qwen-websocket-pcm-playback.md)
+- [豆包全双工实时语音 Provider 决策](docs/decisions/0028-doubao-full-duplex-realtime-provider.md)
 
 ## 本地运行
 
@@ -153,10 +154,23 @@ QWEN_ANALYSIS_REQUEST_TIMEOUT_MS=60000
 
 WebRTC 实验路径的设置、协议说明和已知限制见 [千问 WebRTC 技术验证](docs/spikes/qwen-realtime-webrtc.md)；默认传输与打断边界见 [ADR-0026](docs/decisions/0026-qwen-websocket-pcm-playback.md)。
 
+### 豆包全双工实时语音
+
+先在火山引擎新版豆包语音控制台取得 API Key，再在服务端 `.env` 配置：
+
+```dotenv
+DOUBAO_REALTIME_ENABLED=true
+DOUBAO_SPEECH_API_KEY=在服务端填写真实值
+DOUBAO_REALTIME_MODEL=1.2.6.1
+DOUBAO_REALTIME_REQUEST_TIMEOUT_MS=15000
+```
+
+运行 `pnpm db:migrate` 后，角色编辑器会出现“豆包实时语音 3.0 全双工” Provider 及 Vivi、小何、云舟、小天四个音色。API Key 只用于 API 到 `wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue` 的上游连接，不返回浏览器，也不得提交到版本库。豆包链路使用 16 kHz PCM 输入、24 kHz PCM 输出、显式 `response.cancel` 打断和 `session.close` 优雅关闭。详细边界见 [ADR-0028](docs/decisions/0028-doubao-full-duplex-realtime-provider.md)。
+
 ## 下一步
 
 1. 在已完成的 MediaStore、媒体元数据和 `media.expire` 清理基础上接入按次录音采集、结束时保留、历史回放与删除；录音封装格式和临时缓冲期限在实现前单独确认。
-2. 继续将当前千问链路收敛到 Provider Adapter 边界，并为后续图像能力与供应商对照保留清晰接口。
+2. 使用同一组角色脚本在真实手机、平板和桌面浏览器上盲测千问与豆包，记录首音延迟、语义打断、情绪、人设和实际用量，再决定是否调整默认 Provider。
 3. 在基础角色闭环稳定后补充 AI 快速创建、头像上传与生成，以及角色卡导入导出。
 4. 单独确认管理员停用与恢复家庭账号的产品方式，再实现对应状态流转和会话撤销，不从当前数据库状态字段直接猜测交互。
 5. 在业务开发期间并行完成手机与桌面设备实测、延迟和打断记录、图片能力路由，以及 Qwen-Audio Flash 与豆包对照；这些结果用于验收和后续默认模型调整，不再阻塞业务切片。

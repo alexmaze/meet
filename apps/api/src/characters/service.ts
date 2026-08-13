@@ -263,6 +263,7 @@ export class CharacterService {
         voice: aggregate.voiceProfile.providerVoiceId,
         instructions,
         firstSpeaker: aggregate.character.conversationPolicy.firstSpeaker,
+        openingLine: aggregate.character.openingLine,
       },
     };
   }

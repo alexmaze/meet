@@ -57,6 +57,13 @@
       "when": 1786381200000,
       "tag": "0007_optional_character_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786539000000,
+      "tag": "0008_doubao_duplex_provider",
+      "breakpoints": true
     }
   ]
 }

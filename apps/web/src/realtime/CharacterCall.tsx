@@ -1,11 +1,11 @@
 import type {
   CharacterRuntimeResponse,
   ConversationMode,
-  QwenRealtimePublicConfig,
   RealtimeConnectionState,
+  RealtimeProvidersResponse,
   TranscriptSegment,
 } from "@meet/protocol";
-import { qwenRealtimePublicConfigSchema } from "@meet/protocol";
+import { realtimeProvidersResponseSchema } from "@meet/protocol";
 import {
   useCallback,
   useEffect,
@@ -25,8 +25,11 @@ import {
 import {
   initialClientSnapshot,
   type InputMode,
+  type RealtimeClient,
+  type RealtimeClientCallbacks,
   type RealtimeClientSnapshot,
 } from "./QwenRealtimeClient.js";
+import { DoubaoRealtimeClient } from "./DoubaoRealtimeClient.js";
 import { QwenWebSocketRealtimeClient } from "./QwenWebSocketRealtimeClient.js";
 
 type EventLogEntry = {
@@ -88,7 +91,7 @@ export default function CharacterCall({
   onUnauthorized,
 }: CharacterCallProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
-  const clientRef = useRef<QwenWebSocketRealtimeClient | null>(null);
+  const clientRef = useRef<RealtimeClient | null>(null);
   const persistenceRef = useRef<ConversationPersistence | null>(null);
   const [snapshot, setSnapshot] = useState<RealtimeClientSnapshot>(
     initialClientSnapshot,
@@ -109,8 +112,8 @@ export default function CharacterCall({
   const [eventLog, setEventLog] = useState<EventLogEntry[]>([]);
   const [errorMessage, setErrorMessage] = useState("");
   const [persistenceError, setPersistenceError] = useState("");
-  const [publicConfig, setPublicConfig] =
-    useState<QwenRealtimePublicConfig | null>(null);
+  const [providerConfig, setProviderConfig] =
+    useState<RealtimeProvidersResponse | null>(null);
   const [configError, setConfigError] = useState("");
 
   const character = runtime.character;
@@ -119,7 +122,7 @@ export default function CharacterCall({
   useEffect(() => {
     const controller = new AbortController();
     setConfigError("");
-    void fetch("/api/realtime/qwen/config", {
+    void fetch("/api/realtime/providers", {
       credentials: "same-origin",
       cache: "no-store",
       headers: { Accept: "application/json" },
@@ -133,7 +136,7 @@ export default function CharacterCall({
         if (!response.ok) {
           throw new Error("无法确认实时服务状态。");
         }
-        const parsed = qwenRealtimePublicConfigSchema.safeParse(
+        const parsed = realtimeProvidersResponseSchema.safeParse(
           await response.json(),
         );
         if (!parsed.success) {
@@ -141,7 +144,7 @@ export default function CharacterCall({
         }
         return parsed.data;
       })
-      .then(setPublicConfig)
+      .then(setProviderConfig)
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
         const message =
@@ -157,6 +160,12 @@ export default function CharacterCall({
       });
     return () => controller.abort();
   }, [onUnauthorized]);
+
+  const selectedProviderConfig = launch.ok
+    ? providerConfig?.providers.find(
+        ({ provider }) => provider === launch.provider,
+      )
+    : undefined;
 
   const refreshMicrophones = useCallback(async (): Promise<void> => {
     if (!navigator.mediaDevices?.enumerateDevices) {
@@ -309,8 +318,8 @@ export default function CharacterCall({
       !audioRef.current ||
       hasClient ||
       !launch.ok ||
-      !publicConfig?.enabled ||
-      !publicConfig.configured
+      !selectedProviderConfig?.enabled ||
+      !selectedProviderConfig.configured
     )
       return;
     setErrorMessage("");
@@ -344,7 +353,7 @@ export default function CharacterCall({
       return;
     }
 
-    const client = new QwenWebSocketRealtimeClient(audioRef.current, {
+    const callbacks: RealtimeClientCallbacks = {
       onSnapshot: (nextSnapshot) => {
         setSnapshot(nextSnapshot);
         if (nextSnapshot.connection === "active") setErrorMessage("");
@@ -364,7 +373,11 @@ export default function CharacterCall({
       onError: (error) => setErrorMessage(error.message),
       onUnauthorized,
       onBeforeReconnect: flushPersistence,
-    });
+    };
+    const client: RealtimeClient =
+      launch.provider === "doubao"
+        ? new DoubaoRealtimeClient(audioRef.current, callbacks)
+        : new QwenWebSocketRealtimeClient(audioRef.current, callbacks);
 
     clientRef.current = client;
     setHasClient(true);
@@ -477,13 +490,15 @@ export default function CharacterCall({
             (!launch.ok ? launch.message : errorMessage || persistenceError)}
         </div>
       )}
-      {publicConfig && (!publicConfig.enabled || !publicConfig.configured) && (
-        <div className="call-error" role="status">
-          {!publicConfig.enabled
-            ? "实时通话当前未启用，请联系家庭管理员检查服务配置。"
-            : "实时模型尚未配置完成，请联系家庭管理员检查服务端密钥与 Endpoint。"}
-        </div>
-      )}
+      {selectedProviderConfig &&
+        (!selectedProviderConfig.enabled ||
+          !selectedProviderConfig.configured) && (
+          <div className="call-error" role="status">
+            {!selectedProviderConfig.enabled
+              ? "实时通话当前未启用，请联系家庭管理员检查服务配置。"
+              : "实时模型尚未配置完成，请联系家庭管理员检查服务端密钥与连接配置。"}
+          </div>
+        )}
 
       <footer className="immersive-call-controls">
         <div className="call-mode-switch" aria-label="通话记忆模式">
@@ -529,8 +544,8 @@ export default function CharacterCall({
               type="button"
               disabled={
                 !launch.ok ||
-                !publicConfig?.enabled ||
-                !publicConfig.configured ||
+                !selectedProviderConfig?.enabled ||
+                !selectedProviderConfig.configured ||
                 Boolean(configError)
               }
               onClick={() => void startCall()}

@@ -24,15 +24,18 @@ import {
 
 export type InputMode = "hands_free" | "push_to_talk";
 
-export type QwenRealtimeOptions = {
+export type RealtimeClientOptions = {
   characterId: string;
   conversationId: string;
   voice: string;
   instructions: string;
   inputMode: InputMode;
   assistantStarts: boolean;
+  openingText?: string;
   audioInputDeviceId?: string;
 };
+
+export type QwenRealtimeOptions = RealtimeClientOptions;
 
 export type RealtimeClientSnapshot = {
   connection: RealtimeConnectionState;
@@ -58,7 +61,7 @@ export const initialClientSnapshot: RealtimeClientSnapshot = {
 
 type Direction = "client" | "server";
 
-export type QwenRealtimeCallbacks = {
+export type RealtimeClientCallbacks = {
   onSnapshot?: (snapshot: RealtimeClientSnapshot) => void;
   onTranscript?: (transcript: PendingTranscript) => void;
   onProviderEvent?: (direction: Direction, event: unknown) => void;
@@ -66,6 +69,17 @@ export type QwenRealtimeCallbacks = {
   onUnauthorized?: () => void;
   onBeforeReconnect?: () => Promise<void>;
 };
+
+export type QwenRealtimeCallbacks = RealtimeClientCallbacks;
+
+export interface RealtimeClient {
+  start(options: RealtimeClientOptions): Promise<void>;
+  close(): Promise<void>;
+  retry(): void;
+  interrupt(): void;
+  setMicrophoneMuted(muted: boolean): void;
+  setPushToTalkActive(active: boolean): void;
+}
 
 export class QwenRealtimeClient {
   private peerConnection: RTCPeerConnection | null = null;

@@ -201,6 +201,7 @@ describe("mapRuntimeToLaunchOptions", () => {
   it("只映射角色 ID 与会话运行时值，不形成可编辑模型参数", () => {
     expect(mapRuntimeToLaunchOptions(runtime)).toEqual({
       ok: true,
+      provider: "qwen",
       model: "qwen-audio-3.0-realtime-plus",
       value: {
         characterId: runtime.character.id,
@@ -211,10 +212,32 @@ describe("mapRuntimeToLaunchOptions", () => {
     });
   });
 
+  it("映射豆包全双工运行时", () => {
+    const doubao = {
+      ...runtime,
+      realtime: {
+        ...runtime.realtime,
+        provider: "doubao" as const,
+        model: "1.2.6.1",
+        voice: "zh_female_vv_jupiter_bigtts",
+        openingLine: "你好，我们今天聊点什么？",
+      },
+    };
+    expect(mapRuntimeToLaunchOptions(doubao)).toMatchObject({
+      ok: true,
+      provider: "doubao",
+      model: "1.2.6.1",
+      value: {
+        voice: "zh_female_vv_jupiter_bigtts",
+        openingText: "你好，我们今天聊点什么？",
+      },
+    });
+  });
+
   it("把尚未实现的供应商转换为可展示错误，不在渲染时抛异常", () => {
     const unsupported = {
       ...runtime,
-      realtime: { ...runtime.realtime, provider: "doubao" as const },
+      realtime: { ...runtime.realtime, provider: "openai" as const },
     };
     expect(mapRuntimeToLaunchOptions(unsupported)).toEqual({
       ok: false,

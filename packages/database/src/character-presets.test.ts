@@ -13,6 +13,9 @@ import {
   BUILTIN_VOICE_PROFILES,
   DEFAULT_PROVIDER_PROFILE,
   DEFAULT_QWEN_PROVIDER_PROFILE_ID,
+  DOUBAO_DUPLEX_PROVIDER_PROFILE,
+  DOUBAO_DUPLEX_PROVIDER_PROFILE_ID,
+  DOUBAO_VOICE_PROFILES,
   getBuiltinCharacterPreset,
 } from "./character-presets.js";
 
@@ -73,5 +76,28 @@ describe("built-in character presets", () => {
       expect(voiceStyleSchema.safeParse(voice.style).success).toBe(true);
       expect(voice.providerProfileId).toBe(DEFAULT_QWEN_PROVIDER_PROFILE_ID);
     }
+  });
+
+  it("exposes the Doubao full-duplex profile without changing the default", () => {
+    expect(DOUBAO_DUPLEX_PROVIDER_PROFILE).toMatchObject({
+      id: DOUBAO_DUPLEX_PROVIDER_PROFILE_ID,
+      provider: "doubao",
+      model: "1.2.6.1",
+    });
+    expect(
+      DOUBAO_VOICE_PROFILES.map(({ providerVoiceId }) => providerVoiceId),
+    ).toEqual([
+      "zh_female_vv_jupiter_bigtts",
+      "zh_female_xiaohe_jupiter_bigtts",
+      "zh_male_yunzhou_jupiter_bigtts",
+      "zh_male_xiaotian_jupiter_bigtts",
+    ]);
+    expect(
+      DOUBAO_VOICE_PROFILES.every(
+        ({ providerProfileId }) =>
+          providerProfileId === DOUBAO_DUPLEX_PROVIDER_PROFILE_ID,
+      ),
+    ).toBe(true);
+    expect(DEFAULT_PROVIDER_PROFILE.provider).toBe("qwen");
   });
 });

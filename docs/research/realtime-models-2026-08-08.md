@@ -13,7 +13,7 @@
 - 纯语音首选验证：`qwen-audio-3.0-realtime-plus`；
 - 同系列成本对照：`qwen-audio-3.0-realtime-flash`；
 - 图片与教学多模态候选：`qwen3.5-omni-plus-realtime`；
-- 最重要的角色表现对照：豆包 S2S-SC；
+- 最重要的角色表现对照：豆包实时语音 3.0 全双工版本（Seeduplex）；
 - OpenAI Realtime 只适合作为具备受支持地区条件时的可选适配器；
 - Gemini Live 可作为成本和多语言对照，但不是角色聊天首选；
 - ElevenLabs 更适合在后期作为专业克隆音色方案。
@@ -75,7 +75,7 @@ Qwen3.5 Omni Plus Realtime 不再是纯语音首选验证模型，但继续承�
 
 ## 豆包实时语音
 
-`S2S-SC` 的产品定位直接面向强角色、情感陪伴、人设一致性和声音复刻，和 Meet 的目标高度一致。官方宣称裸模型延迟约 700ms、整体约 1 秒，实际体验仍需在目标网络和设备上测量。
+早期调研使用 `S2S-SC` 名称。当前接入对象已经更新为豆包实时语音 3.0 全双工版本（Seeduplex），使用固定模型版本 `1.2.6.1` 和标准化 Realtime JSON 事件协议。它仍直接面向低延迟、角色感与自然语音交互，实际体验需要在目标网络和设备上测量。
 
 优势：
 
@@ -87,7 +87,7 @@ Qwen3.5 Omni Plus Realtime 不再是纯语音首选验证模型，但继续承�
 不确定项：
 
 - 公开价格不如千问透明；
-- 浏览器端接入和事件协议需要通过实际样例验证；
+- 新全双工协议的生产权限、并发时长额度和 `extension` 专有配置仍需通过真实账号验证；
 - 官方效果描述不能代替盲听测试。
 
 官方资料：
@@ -95,6 +95,8 @@ Qwen3.5 Omni Plus Realtime 不再是纯语音首选验证模型，但继续承�
 - <https://www.volcengine.com/product/realtime-voice-model>
 - <https://www.volcengine.com/docs/6561/1594360?lang=zh>
 - <https://www.volcengine.com/docs/6561/1594356?lang=zh>
+- <https://docs.volcengine.com/docs/6561/2549778?lang=zh>
+- <https://docs.volcengine.com/docs/6561/2549732?lang=zh>
 
 ## OpenAI GPT-Realtime
 

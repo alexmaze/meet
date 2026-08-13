@@ -45,3 +45,21 @@ export const realtimeErrorSchema = z.object({
 });
 
 export type RealtimeError = z.infer<typeof realtimeErrorSchema>;
+
+export const realtimeProviderAvailabilitySchema = z
+  .object({
+    provider: z.enum(["qwen", "doubao"]),
+    enabled: z.boolean(),
+    configured: z.boolean(),
+  })
+  .strict();
+
+export const realtimeProvidersResponseSchema = z
+  .object({
+    providers: z.array(realtimeProviderAvailabilitySchema),
+  })
+  .strict();
+
+export type RealtimeProvidersResponse = z.infer<
+  typeof realtimeProvidersResponseSchema
+>;

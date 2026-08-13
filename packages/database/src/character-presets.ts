@@ -8,6 +8,8 @@ import type {
 
 export const DEFAULT_QWEN_PROVIDER_PROFILE_ID =
   "31c9ad8e-0e8b-4e2d-8c14-318d36d617b1";
+export const DOUBAO_DUPLEX_PROVIDER_PROFILE_ID =
+  "31c9ad8e-0e8b-4e2d-8c14-318d36d617b2";
 
 export const BUILTIN_CHARACTER_IDS = {
   hero: "c437c71e-f209-4f7d-8f98-1c1e239d4101",
@@ -23,10 +25,17 @@ export const BUILTIN_VOICE_PROFILE_IDS = {
   livelyFemale: "be8f77ec-a61e-4be0-8b70-8c7cb9e51105",
 } as const;
 
+export const DOUBAO_VOICE_PROFILE_IDS = {
+  vivi: "be8f77ec-a61e-4be0-8b70-8c7cb9e51201",
+  xiaohe: "be8f77ec-a61e-4be0-8b70-8c7cb9e51202",
+  yunzhou: "be8f77ec-a61e-4be0-8b70-8c7cb9e51203",
+  xiaotian: "be8f77ec-a61e-4be0-8b70-8c7cb9e51204",
+} as const;
+
 export type ProviderProfileSeed = {
   id: string;
   systemKey: string;
-  provider: "qwen";
+  provider: "qwen" | "doubao";
   model: string;
   displayName: string;
   capabilities: ProviderCapabilities;
@@ -38,6 +47,19 @@ export const DEFAULT_PROVIDER_PROFILE: ProviderProfileSeed = {
   provider: "qwen",
   model: "qwen-audio-3.0-realtime-plus",
   displayName: "千问 Audio 3.0 Realtime Plus",
+  capabilities: {
+    audioInput: true,
+    textInput: true,
+    imageInput: false,
+  },
+};
+
+export const DOUBAO_DUPLEX_PROVIDER_PROFILE: ProviderProfileSeed = {
+  id: DOUBAO_DUPLEX_PROVIDER_PROFILE_ID,
+  systemKey: "provider.doubao.seeduplex-1.2.6.1",
+  provider: "doubao",
+  model: "1.2.6.1",
+  displayName: "豆包实时语音 3.0 全双工",
   capabilities: {
     audioInput: true,
     textInput: true,
@@ -124,6 +146,65 @@ export const BUILTIN_VOICE_PROFILES: VoiceProfileSeed[] = [
       energy: "high",
       warmth: "medium",
       emotionInstruction: "亲切活泼、明快自然，表达有朝气但不过分夸张。",
+    },
+  },
+];
+
+export const DOUBAO_VOICE_PROFILES: VoiceProfileSeed[] = [
+  {
+    id: DOUBAO_VOICE_PROFILE_IDS.vivi,
+    systemKey: "voice.doubao.vivi-jupiter",
+    providerProfileId: DOUBAO_DUPLEX_PROVIDER_PROFILE_ID,
+    type: "preset",
+    providerVoiceId: "zh_female_vv_jupiter_bigtts",
+    displayName: "Vivi",
+    style: {
+      pace: "normal",
+      energy: "medium",
+      warmth: "medium",
+      emotionInstruction: "自然、有亲和力，适合日常陪伴和角色对话。",
+    },
+  },
+  {
+    id: DOUBAO_VOICE_PROFILE_IDS.xiaohe,
+    systemKey: "voice.doubao.xiaohe-jupiter",
+    providerProfileId: DOUBAO_DUPLEX_PROVIDER_PROFILE_ID,
+    type: "preset",
+    providerVoiceId: "zh_female_xiaohe_jupiter_bigtts",
+    displayName: "小何",
+    style: {
+      pace: "normal",
+      energy: "medium",
+      warmth: "high",
+      emotionInstruction: "亲切、温暖、表达清晰，适合耐心交流。",
+    },
+  },
+  {
+    id: DOUBAO_VOICE_PROFILE_IDS.yunzhou,
+    systemKey: "voice.doubao.yunzhou-jupiter",
+    providerProfileId: DOUBAO_DUPLEX_PROVIDER_PROFILE_ID,
+    type: "preset",
+    providerVoiceId: "zh_male_yunzhou_jupiter_bigtts",
+    displayName: "云舟",
+    style: {
+      pace: "normal",
+      energy: "medium",
+      warmth: "medium",
+      emotionInstruction: "沉稳自然、有角色感，回应不过度播音化。",
+    },
+  },
+  {
+    id: DOUBAO_VOICE_PROFILE_IDS.xiaotian,
+    systemKey: "voice.doubao.xiaotian-jupiter",
+    providerProfileId: DOUBAO_DUPLEX_PROVIDER_PROFILE_ID,
+    type: "preset",
+    providerVoiceId: "zh_male_xiaotian_jupiter_bigtts",
+    displayName: "小天",
+    style: {
+      pace: "normal",
+      energy: "high",
+      warmth: "medium",
+      emotionInstruction: "明快、有活力，保持自然口语节奏。",
     },
   },
 ];
