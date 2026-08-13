@@ -1,7 +1,11 @@
 import {
+  mem0DiagnosticsResponseSchema,
+  mem0SearchResponseSchema,
   memoryListResponseSchema,
   memoryResponseSchema,
   type CharacterMemory,
+  type Mem0DiagnosticsResponse,
+  type Mem0SearchResponse,
   type ReviewMemoryRequest,
 } from "@meet/protocol";
 
@@ -48,6 +52,39 @@ export async function reviewMemory(
   const body = await readBody(response);
   if (!response.ok) throw apiError(response, body);
   return memoryResponseSchema.parse(body).memory;
+}
+
+export async function getMem0Diagnostics(
+  signal?: AbortSignal,
+): Promise<Mem0DiagnosticsResponse> {
+  const response = await fetch("/api/memories/mem0?limit=200", {
+    credentials: "include",
+    headers: { Accept: "application/json" },
+    signal,
+  });
+  const body = await readBody(response);
+  if (!response.ok) throw apiError(response, body);
+  return mem0DiagnosticsResponseSchema.parse(body);
+}
+
+export async function searchMem0(input: {
+  characterId: string;
+  query: string;
+  limit?: number;
+  threshold?: number;
+}): Promise<Mem0SearchResponse> {
+  const response = await fetch("/api/memories/mem0/search", {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ limit: 8, threshold: 0, ...input }),
+  });
+  const body = await readBody(response);
+  if (!response.ok) throw apiError(response, body);
+  return mem0SearchResponseSchema.parse(body);
 }
 
 async function readBody(response: Response): Promise<unknown> {

@@ -20,6 +20,7 @@ export interface ConversationAnalyzer {
   summarize(input: {
     characterName: string;
     messages: AnalysisMessage[];
+    previousSummary?: string;
   }): Promise<string>;
   extractMemories(input: {
     characterName: string;
@@ -78,11 +79,22 @@ export class OpenAICompatibleConversationAnalyzer implements ConversationAnalyze
   async summarize(input: {
     characterName: string;
     messages: AnalysisMessage[];
+    previousSummary?: string;
   }): Promise<string> {
-    if (input.messages.length === 0) return "本次通话没有已确认的文字记录。";
+    if (input.messages.length === 0) {
+      return input.previousSummary ?? "本次通话没有已确认的文字记录。";
+    }
     const output = await this.requestJson(
-      '你负责压缩家庭私有角色对话。请只依据提供的转写生成 JSON，不补充未出现的事实。摘要应保留关键话题、已完成事项、未完话题、用户明确表达的偏好和角色作出的承诺；忽略寒暄与重复内容。被打断的角色句子只能按实际保存文本处理。返回 {"summary":"..."}。',
-      `角色：${input.characterName}\n\n转写：\n${buildAnalysisTranscript(input.messages)}`,
+      '你负责压缩家庭私有角色对话。请只依据已有摘要和新增转写生成一份可独立阅读的更新后摘要，不补充未出现的事实。摘要应保留关键话题、已完成事项、未完话题、用户明确表达的偏好和角色作出的承诺；忽略寒暄与重复内容。被打断的角色句子只能按实际保存文本处理。返回 {"summary":"..."}。',
+      [
+        `角色：${input.characterName}`,
+        input.previousSummary
+          ? `已有摘要：\n${input.previousSummary}`
+          : undefined,
+        `新增转写：\n${buildAnalysisTranscript(input.messages)}`,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
     );
     return summaryOutputSchema.parse(output).summary;
   }

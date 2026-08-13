@@ -6,8 +6,10 @@ import {
   findReadableConversation,
   isGuardianReadableHistoryTarget,
   loadConversationRealtimeContext,
+  loadActiveCharacterMemoriesByIds,
   listConversations,
   type Database,
+  type ConversationCheckpointHook,
   type ConversationCompletionHook,
 } from "@meet/database";
 
@@ -17,6 +19,7 @@ export class PostgresConversationRepository implements ConversationRepository {
   constructor(
     private readonly db: Database,
     private readonly onCompleted?: ConversationCompletionHook,
+    private readonly onCheckpoint?: ConversationCheckpointHook,
   ) {}
 
   create(
@@ -55,11 +58,27 @@ export class PostgresConversationRepository implements ConversationRepository {
     actorUserId: string,
     conversationId: string,
     characterId: string,
+    runtimeSnapshot?: Parameters<
+      ConversationRepository["loadRealtimeContext"]
+    >[3],
   ) {
     return loadConversationRealtimeContext(this.db, {
       actorUserId,
       conversationId,
       characterId,
+      runtimeSnapshot,
+    });
+  }
+
+  loadActiveMemoriesByIds(
+    actorUserId: string,
+    characterId: string,
+    memoryIds: string[],
+  ) {
+    return loadActiveCharacterMemoriesByIds(this.db, {
+      userId: actorUserId,
+      characterId,
+      memoryIds,
     });
   }
 
@@ -74,6 +93,7 @@ export class PostgresConversationRepository implements ConversationRepository {
       conversationId,
       messages,
       updatedAt,
+      onCheckpoint: this.onCheckpoint,
     });
   }
 

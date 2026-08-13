@@ -63,4 +63,46 @@ describe("conversation analyzer", () => {
       expect.any(Object),
     );
   });
+
+  it("merges an earlier checkpoint with only the new transcript", async () => {
+    const fetchFunction = vi.fn(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      expect(body.messages[1]?.content).toContain(
+        "已有摘要：\n用户已经完成第一题。",
+      );
+      expect(body.messages[1]?.content).toContain("新增转写：");
+      expect(body.messages[1]?.content).toContain("[21] 用户：继续第二题");
+      return new Response(
+        JSON.stringify({
+          choices: [
+            { message: { content: '{"summary":"用户继续完成第二题。"}' } },
+          ],
+        }),
+      );
+    });
+    const analyzer = new QwenConversationAnalyzer({
+      apiKey: "secret-key",
+      baseUrl: "https://dashscope.example/v1",
+      model: "qwen-plus",
+      requestTimeoutMs: 10_000,
+      fetchFunction,
+    });
+
+    await expect(
+      analyzer.summarize({
+        characterName: "林老师",
+        previousSummary: "用户已经完成第一题。",
+        messages: [
+          {
+            sequence: 21,
+            role: "user",
+            status: "completed",
+            text: "继续第二题",
+          },
+        ],
+      }),
+    ).resolves.toBe("用户继续完成第二题。");
+  });
 });

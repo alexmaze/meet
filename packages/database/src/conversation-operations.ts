@@ -1,14 +1,19 @@
 import type {
   AppendConversationMessagesRequest,
   ConversationMode,
+  ConversationRuntimeSnapshot,
+  ConversationStatus,
 } from "@meet/protocol";
-import { and, asc, desc, eq, inArray, isNull, or } from "drizzle-orm";
+import { conversationRuntimeSnapshotSchema } from "@meet/protocol";
+import { and, asc, desc, eq, gt, inArray, isNull, or } from "drizzle-orm";
 
 import type { Database } from "./client.js";
 import {
   characters,
   characterMemories,
   conversationMessages,
+  conversationRuntimeSnapshots,
+  conversationSummaryCheckpoints,
   conversationSummaries,
   conversations,
   providerProfiles,
@@ -33,13 +38,23 @@ export type ConversationDetailAggregate = ConversationAggregate & {
 export type ConversationContinuityMessage = Pick<
   ConversationMessageRecord,
   "id" | "conversationId" | "role" | "text" | "status" | "createdAt"
->;
+> & { conversationStatus: ConversationStatus };
 
 export type ConversationRealtimeContext = {
   mode: ConversationMode;
+  runtimeSnapshot: ConversationRuntimeSnapshot | null;
+  checkpoint: {
+    id: string;
+    content: string;
+    sourceLastSequence: number;
+  } | null;
   messages: ConversationContinuityMessage[];
-  summaries: Array<{ content: string; updatedAt: Date }>;
-  memories: Array<{ content: string; updatedAt: Date }>;
+  summaries: Array<{
+    conversationId: string;
+    content: string;
+    updatedAt: Date;
+  }>;
+  memories: Array<{ id: string; content: string; updatedAt: Date }>;
 };
 
 export const CONVERSATION_CONTINUITY_MESSAGE_LIMIT = 24;
@@ -226,99 +241,182 @@ export async function loadConversationRealtimeContext(
     actorUserId: string;
     conversationId: string;
     characterId: string;
+    runtimeSnapshot?: ConversationRuntimeSnapshot;
   },
 ): Promise<ConversationRealtimeContext | null> {
-  const [current] = await db
-    .select({ mode: conversations.mode })
-    .from(conversations)
-    .where(
-      and(
-        eq(conversations.id, input.conversationId),
-        eq(conversations.userId, input.actorUserId),
-        eq(conversations.characterId, input.characterId),
-        eq(conversations.status, "active"),
-      ),
-    )
-    .limit(1);
-  if (!current) return null;
-  const recentFirst = await db
-    .select({
-      id: conversationMessages.id,
-      conversationId: conversationMessages.conversationId,
-      role: conversationMessages.role,
-      text: conversationMessages.text,
-      status: conversationMessages.status,
-      createdAt: conversationMessages.createdAt,
-    })
-    .from(conversationMessages)
-    .innerJoin(
-      conversations,
-      eq(conversationMessages.conversationId, conversations.id),
-    )
-    .where(
-      and(
-        eq(conversations.userId, input.actorUserId),
-        current.mode === "temporary"
-          ? eq(conversations.id, input.conversationId)
-          : and(
-              eq(conversations.characterId, input.characterId),
-              eq(conversations.mode, "normal"),
-            ),
-        eq(conversationMessages.userId, input.actorUserId),
-      ),
-    )
-    .orderBy(desc(conversations.startedAt), desc(conversationMessages.sequence))
-    .limit(CONVERSATION_CONTINUITY_MESSAGE_LIMIT);
+  return db.transaction(async (tx) => {
+    const [current] = await tx
+      .select({ mode: conversations.mode })
+      .from(conversations)
+      .where(
+        and(
+          eq(conversations.id, input.conversationId),
+          eq(conversations.userId, input.actorUserId),
+          eq(conversations.characterId, input.characterId),
+          eq(conversations.status, "active"),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!current) return null;
 
-  if (current.mode === "temporary") {
+    const [storedSnapshot] = await tx
+      .select({ snapshot: conversationRuntimeSnapshots.snapshot })
+      .from(conversationRuntimeSnapshots)
+      .where(
+        eq(conversationRuntimeSnapshots.conversationId, input.conversationId),
+      )
+      .limit(1);
+    let runtimeSnapshot = storedSnapshot
+      ? conversationRuntimeSnapshotSchema.parse(storedSnapshot.snapshot)
+      : null;
+    if (!runtimeSnapshot && input.runtimeSnapshot) {
+      runtimeSnapshot = conversationRuntimeSnapshotSchema.parse(
+        input.runtimeSnapshot,
+      );
+      await tx.insert(conversationRuntimeSnapshots).values({
+        conversationId: input.conversationId,
+        snapshot: runtimeSnapshot,
+      });
+    }
+
+    const [checkpointRow] = await tx
+      .select({
+        id: conversationSummaryCheckpoints.id,
+        content: conversationSummaryCheckpoints.content,
+        sourceLastSequence: conversationSummaryCheckpoints.sourceLastSequence,
+      })
+      .from(conversationSummaryCheckpoints)
+      .where(
+        and(
+          eq(
+            conversationSummaryCheckpoints.conversationId,
+            input.conversationId,
+          ),
+          eq(conversationSummaryCheckpoints.status, "completed"),
+        ),
+      )
+      .orderBy(desc(conversationSummaryCheckpoints.sourceLastSequence))
+      .limit(1);
+    const checkpoint =
+      checkpointRow?.content === null || checkpointRow === undefined
+        ? null
+        : {
+            id: checkpointRow.id,
+            content: checkpointRow.content,
+            sourceLastSequence: checkpointRow.sourceLastSequence,
+          };
+
+    const recentFirst = await tx
+      .select({
+        id: conversationMessages.id,
+        conversationId: conversationMessages.conversationId,
+        role: conversationMessages.role,
+        text: conversationMessages.text,
+        status: conversationMessages.status,
+        createdAt: conversationMessages.createdAt,
+        conversationStatus: conversations.status,
+      })
+      .from(conversationMessages)
+      .innerJoin(
+        conversations,
+        eq(conversationMessages.conversationId, conversations.id),
+      )
+      .where(
+        and(
+          eq(conversations.userId, input.actorUserId),
+          current.mode === "temporary"
+            ? and(
+                eq(conversations.id, input.conversationId),
+                checkpoint
+                  ? gt(
+                      conversationMessages.sequence,
+                      checkpoint.sourceLastSequence,
+                    )
+                  : undefined,
+              )
+            : or(
+                and(
+                  eq(conversations.id, input.conversationId),
+                  checkpoint
+                    ? gt(
+                        conversationMessages.sequence,
+                        checkpoint.sourceLastSequence,
+                      )
+                    : undefined,
+                ),
+                and(
+                  eq(conversations.characterId, input.characterId),
+                  eq(conversations.mode, "normal"),
+                  eq(conversations.status, "completed"),
+                ),
+              ),
+          eq(conversationMessages.userId, input.actorUserId),
+        ),
+      )
+      .orderBy(
+        desc(conversations.startedAt),
+        desc(conversationMessages.sequence),
+      )
+      .limit(CONVERSATION_CONTINUITY_MESSAGE_LIMIT);
+
+    if (current.mode === "temporary") {
+      return {
+        mode: current.mode,
+        runtimeSnapshot,
+        checkpoint,
+        messages: recentFirst.reverse(),
+        summaries: [],
+        memories: [],
+      };
+    }
+    const summaries = await tx
+      .select({
+        conversationId: conversationSummaries.conversationId,
+        content: conversationSummaries.content,
+        updatedAt: conversationSummaries.updatedAt,
+      })
+      .from(conversationSummaries)
+      .innerJoin(
+        conversations,
+        eq(conversationSummaries.conversationId, conversations.id),
+      )
+      .where(
+        and(
+          eq(conversationSummaries.userId, input.actorUserId),
+          eq(conversationSummaries.characterId, input.characterId),
+          eq(conversations.mode, "normal"),
+          eq(conversations.status, "completed"),
+        ),
+      )
+      .orderBy(desc(conversationSummaries.updatedAt))
+      .limit(CONVERSATION_CONTINUITY_SUMMARY_LIMIT);
+    const memories = await tx
+      .select({
+        id: characterMemories.id,
+        content: characterMemories.content,
+        updatedAt: characterMemories.updatedAt,
+      })
+      .from(characterMemories)
+      .where(
+        and(
+          eq(characterMemories.userId, input.actorUserId),
+          eq(characterMemories.characterId, input.characterId),
+          eq(characterMemories.status, "active"),
+        ),
+      )
+      .orderBy(desc(characterMemories.updatedAt))
+      .limit(CONVERSATION_CONTINUITY_MEMORY_LIMIT);
+
     return {
       mode: current.mode,
+      runtimeSnapshot,
+      checkpoint,
       messages: recentFirst.reverse(),
-      summaries: [],
-      memories: [],
+      summaries,
+      memories,
     };
-  }
-  const summaries = await db
-    .select({
-      content: conversationSummaries.content,
-      updatedAt: conversationSummaries.updatedAt,
-    })
-    .from(conversationSummaries)
-    .innerJoin(
-      conversations,
-      eq(conversationSummaries.conversationId, conversations.id),
-    )
-    .where(
-      and(
-        eq(conversationSummaries.userId, input.actorUserId),
-        eq(conversationSummaries.characterId, input.characterId),
-        eq(conversations.mode, "normal"),
-      ),
-    )
-    .orderBy(desc(conversationSummaries.updatedAt))
-    .limit(CONVERSATION_CONTINUITY_SUMMARY_LIMIT);
-  const memories = await db
-    .select({
-      content: characterMemories.content,
-      updatedAt: characterMemories.updatedAt,
-    })
-    .from(characterMemories)
-    .where(
-      and(
-        eq(characterMemories.userId, input.actorUserId),
-        eq(characterMemories.characterId, input.characterId),
-        eq(characterMemories.status, "active"),
-      ),
-    )
-    .orderBy(desc(characterMemories.updatedAt))
-    .limit(CONVERSATION_CONTINUITY_MEMORY_LIMIT);
-
-  return {
-    mode: current.mode,
-    messages: recentFirst.reverse(),
-    summaries: summaries.reverse(),
-    memories,
-  };
+  });
 }
 
 export async function appendConversationMessages(
@@ -328,6 +426,7 @@ export async function appendConversationMessages(
     conversationId: string;
     messages: AppendConversationMessagesRequest["messages"];
     updatedAt?: Date;
+    onCheckpoint?: ConversationCheckpointHook;
   },
 ): Promise<AppendConversationMessagesResult> {
   const updatedAt = input.updatedAt ?? new Date();
@@ -390,6 +489,14 @@ export async function appendConversationMessages(
         updatedAt,
       })
       .where(eq(conversations.id, input.conversationId));
+    if (input.onCheckpoint) {
+      const aggregate = await findConversationAggregate(
+        tx,
+        input.conversationId,
+      );
+      if (!aggregate) throw new Error("Updated conversation was not readable.");
+      await input.onCheckpoint(tx, aggregate);
+    }
     return { kind: "appended", acknowledgedSequence };
   });
 }
@@ -501,6 +608,11 @@ export type DatabaseTransaction = Parameters<
 >[0];
 
 export type ConversationCompletionHook = (
+  transaction: DatabaseTransaction,
+  conversation: ConversationAggregate,
+) => Promise<void>;
+
+export type ConversationCheckpointHook = (
   transaction: DatabaseTransaction,
   conversation: ConversationAggregate,
 ) => Promise<void>;

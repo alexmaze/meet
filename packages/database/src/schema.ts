@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type {
   ConversationPolicy,
+  ConversationRuntimeSnapshot,
   PersonaDefinition,
   ProviderCapabilities,
   VisualProfile,
@@ -75,11 +76,14 @@ export const modelConnectionAdapterEnum = pgEnum("model_connection_adapter", [
   "qwen_realtime",
   "doubao_realtime",
   "openai_chat_completions",
+  "openai_embeddings",
+  "builtin_fastembed",
 ]);
 
 export const modelProfileKindEnum = pgEnum("model_profile_kind", [
   "realtime_voice",
   "text",
+  "embedding",
 ]);
 
 export const modelConfigurationStatusEnum = pgEnum(
@@ -91,6 +95,7 @@ export const modelPurposeEnum = pgEnum("model_purpose", [
   "realtime_default",
   "conversation_summary",
   "memory_extraction",
+  "memory_embedding",
 ]);
 
 export const aiWorkStatusEnum = pgEnum("ai_work_status", [
@@ -378,7 +383,7 @@ export const modelConnections = pgTable(
     check("model_connections_revision_positive", sql`${table.revision} > 0`),
     check(
       "model_connections_has_configuration",
-      sql`(${table.endpoint} IS NOT NULL AND ${table.apiKey} IS NOT NULL) OR (${table.pendingEndpoint} IS NOT NULL AND ${table.pendingApiKey} IS NOT NULL)`,
+      sql`${table.adapter} = 'builtin_fastembed' OR (${table.endpoint} IS NOT NULL AND ${table.apiKey} IS NOT NULL) OR (${table.pendingEndpoint} IS NOT NULL AND ${table.pendingApiKey} IS NOT NULL)`,
     ),
   ],
 );
@@ -399,6 +404,7 @@ export const providerProfiles = pgTable(
     status: modelConfigurationStatusEnum("status").notNull().default("draft"),
     revision: integer("revision").notNull().default(1),
     verifiedAt: timestamp("verified_at", { withTimezone: true }),
+    embeddingDimensions: integer("embedding_dimensions"),
     everEnabled: boolean("ever_enabled").notNull().default(false),
     createdByUserId: uuid("created_by_user_id").references(
       () => userAccounts.id,
@@ -427,6 +433,10 @@ export const providerProfiles = pgTable(
       sql`length(btrim(${table.model})) > 0`,
     ),
     check("provider_profiles_revision_positive", sql`${table.revision} > 0`),
+    check(
+      "provider_profiles_embedding_dimensions_valid",
+      sql`(${table.kind} = 'embedding' AND ${table.embeddingDimensions} BETWEEN 1 AND 4096) OR (${table.kind} <> 'embedding' AND ${table.embeddingDimensions} IS NULL)`,
+    ),
   ],
 );
 
@@ -668,6 +678,19 @@ export const conversations = pgTable(
   ],
 );
 
+export const conversationRuntimeSnapshots = pgTable(
+  "conversation_runtime_snapshots",
+  {
+    conversationId: uuid("conversation_id")
+      .primaryKey()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    snapshot: jsonb("snapshot").$type<ConversationRuntimeSnapshot>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+);
+
 export const conversationMessages = pgTable(
   "conversation_messages",
   {
@@ -884,6 +907,68 @@ export const conversationSummaries = pgTable(
   ],
 );
 
+export type ConversationSummaryCheckpointStatus =
+  "waiting_configuration" | "queued" | "completed" | "failed";
+
+export const conversationSummaryCheckpoints = pgTable(
+  "conversation_summary_checkpoints",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    sourceLastSequence: integer("source_last_sequence").notNull(),
+    sourceMessageCount: integer("source_message_count").notNull(),
+    status: varchar("status", { length: 32 })
+      .$type<ConversationSummaryCheckpointStatus>()
+      .notNull(),
+    modelProfileId: uuid("model_profile_id").references(
+      () => providerProfiles.id,
+      { onDelete: "restrict" },
+    ),
+    content: text("content"),
+    analyzerModel: varchar("analyzer_model", { length: 120 }),
+    lastErrorCode: varchar("last_error_code", { length: 120 }),
+    queuedAt: timestamp("queued_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex(
+      "conversation_summary_checkpoints_conversation_sequence_unique",
+    ).on(table.conversationId, table.sourceLastSequence),
+    index("conversation_summary_checkpoints_status_idx").on(table.status),
+    index(
+      "conversation_summary_checkpoints_conversation_status_sequence_idx",
+    ).on(table.conversationId, table.status, table.sourceLastSequence),
+    check(
+      "conversation_summary_checkpoints_source_counters_positive",
+      sql`${table.sourceLastSequence} > 0 AND ${table.sourceMessageCount} > 0`,
+    ),
+    check(
+      "conversation_summary_checkpoints_status_valid",
+      sql`${table.status} IN ('waiting_configuration', 'queued', 'completed', 'failed')`,
+    ),
+    check(
+      "conversation_summary_checkpoints_binding_matches_status",
+      sql`(${table.status} = 'waiting_configuration' AND ${table.modelProfileId} IS NULL) OR (${table.status} <> 'waiting_configuration' AND ${table.modelProfileId} IS NOT NULL)`,
+    ),
+    check(
+      "conversation_summary_checkpoints_content_matches_status",
+      sql`(${table.status} = 'completed' AND ${table.content} IS NOT NULL AND length(btrim(${table.content})) > 0 AND ${table.analyzerModel} IS NOT NULL AND ${table.completedAt} IS NOT NULL) OR (${table.status} <> 'completed' AND ${table.content} IS NULL AND ${table.completedAt} IS NULL)`,
+    ),
+    check(
+      "conversation_summary_checkpoints_queue_time_matches_status",
+      sql`(${table.status} = 'waiting_configuration' AND ${table.queuedAt} IS NULL) OR (${table.status} <> 'waiting_configuration' AND ${table.queuedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+
 export const characterMemories = pgTable(
   "character_memories",
   {
@@ -949,6 +1034,53 @@ export const characterMemories = pgTable(
   ],
 );
 
+export type MemoryIndexStatus = "pending" | "synced" | "failed";
+
+export const memoryIndexEntries = pgTable(
+  "memory_index_entries",
+  {
+    memoryId: uuid("memory_id")
+      .primaryKey()
+      .references(() => characterMemories.id, { onDelete: "cascade" }),
+    provider: varchar("provider", { length: 32 }).notNull().default("mem0"),
+    externalId: varchar("external_id", { length: 256 }),
+    indexedFingerprint: varchar("indexed_fingerprint", { length: 64 }),
+    indexRevision: varchar("index_revision", { length: 64 }),
+    status: varchar("status", { length: 32 })
+      .$type<MemoryIndexStatus>()
+      .notNull()
+      .default("pending"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lastErrorCode: varchar("last_error_code", { length: 120 }),
+    syncedAt: timestamp("synced_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("memory_index_entries_external_id_unique").on(table.externalId),
+    index("memory_index_entries_status_updated_idx").on(
+      table.status,
+      table.updatedAt,
+    ),
+    check(
+      "memory_index_entries_provider_valid",
+      sql`${table.provider} = 'mem0'`,
+    ),
+    check(
+      "memory_index_entries_status_valid",
+      sql`${table.status} IN ('pending', 'synced', 'failed')`,
+    ),
+    check(
+      "memory_index_entries_attempt_count_nonnegative",
+      sql`${table.attemptCount} >= 0`,
+    ),
+  ],
+);
+
 export type UserAccount = typeof userAccounts.$inferSelect;
 export type NewUserAccount = typeof userAccounts.$inferInsert;
 export type PasswordCredential = typeof passwordCredentials.$inferSelect;
@@ -971,6 +1103,8 @@ export type CharacterAuditEvent = typeof characterAuditEvents.$inferSelect;
 export type NewCharacterAuditEvent = typeof characterAuditEvents.$inferInsert;
 export type ConversationRecord = typeof conversations.$inferSelect;
 export type NewConversationRecord = typeof conversations.$inferInsert;
+export type ConversationRuntimeSnapshotRecord =
+  typeof conversationRuntimeSnapshots.$inferSelect;
 export type ConversationMessageRecord =
   typeof conversationMessages.$inferSelect;
 export type NewConversationMessageRecord =
@@ -981,7 +1115,10 @@ export type ConversationSummaryRecord =
   typeof conversationSummaries.$inferSelect;
 export type NewConversationSummaryRecord =
   typeof conversationSummaries.$inferInsert;
+export type ConversationSummaryCheckpointRecord =
+  typeof conversationSummaryCheckpoints.$inferSelect;
 export type AiWorkItemRecord = typeof aiWorkItems.$inferSelect;
 export type NewAiWorkItemRecord = typeof aiWorkItems.$inferInsert;
 export type CharacterMemoryRecord = typeof characterMemories.$inferSelect;
 export type NewCharacterMemoryRecord = typeof characterMemories.$inferInsert;
+export type MemoryIndexEntryRecord = typeof memoryIndexEntries.$inferSelect;

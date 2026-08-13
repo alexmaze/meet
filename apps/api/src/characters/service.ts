@@ -103,6 +103,10 @@ export class CharacterService {
     return toCharacter(character, actor);
   }
 
+  async assertVisible(actor: UserAccount, characterId: string): Promise<void> {
+    await this.findAggregate(actor, characterId);
+  }
+
   async catalog(): Promise<{
     realtimeModels: RealtimeModelProfile[];
     voices: VoiceProfile[];

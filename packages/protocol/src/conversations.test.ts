@@ -2,11 +2,36 @@ import { describe, expect, it } from "vitest";
 
 import {
   appendConversationMessagesRequestSchema,
+  conversationRuntimeSnapshotSchema,
   conversationRealtimeQuerySchema,
   createConversationRequestSchema,
 } from "./conversations.js";
 
 describe("conversation protocol", () => {
+  it("validates a provider-neutral runtime snapshot", () => {
+    const snapshot = {
+      characterRevision: 3,
+      realtimeModelProfileId: "c437c71e-f209-4f7d-8f98-1c1e239d4201",
+      provider: "qwen",
+      model: "qwen-audio-3.0-realtime-plus",
+      voice: "longanqian",
+      instructions: "保持角色设定。",
+      firstSpeaker: "assistant",
+      openingLine: "你好。",
+      contextPolicyVersion: "context-v1",
+    };
+    expect(conversationRuntimeSnapshotSchema.parse(snapshot)).toMatchObject({
+      characterRevision: 3,
+      provider: "qwen",
+    });
+    expect(() =>
+      conversationRuntimeSnapshotSchema.parse({
+        ...snapshot,
+        contextPolicyVersion: "unknown-policy",
+      }),
+    ).toThrow();
+  });
+
   it("accepts client-owned stable ids and a temporary conversation mode", () => {
     expect(
       createConversationRequestSchema.parse({

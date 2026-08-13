@@ -4,10 +4,12 @@ import type { MemoryStatus, ReviewMemoryRequest } from "@meet/protocol";
 import { and, desc, eq, inArray, ne } from "drizzle-orm";
 
 import type { Database } from "./client.js";
+import type { MemoryIndexHook } from "./memory-index-operations.js";
 import {
   characterMemories,
   characters,
   conversationMessages,
+  conversationSummaryCheckpoints,
   conversationSummaries,
   conversations,
   userAccounts,
@@ -27,6 +29,10 @@ export type CharacterMemoryAggregate = {
 export type CompletedConversationForAnalysis = {
   conversation: ConversationRecord;
   characterName: string;
+  checkpoint: {
+    content: string;
+    sourceLastSequence: number;
+  } | null;
   messages: ConversationMessageRecord[];
 };
 
@@ -95,6 +101,28 @@ export async function listCharacterMemories(
     .limit(input.limit);
 }
 
+export async function loadActiveCharacterMemoriesByIds(
+  db: Database,
+  input: { userId: string; characterId: string; memoryIds: string[] },
+): Promise<Array<{ id: string; content: string; updatedAt: Date }>> {
+  if (input.memoryIds.length === 0) return [];
+  return db
+    .select({
+      id: characterMemories.id,
+      content: characterMemories.content,
+      updatedAt: characterMemories.updatedAt,
+    })
+    .from(characterMemories)
+    .where(
+      and(
+        eq(characterMemories.userId, input.userId),
+        eq(characterMemories.characterId, input.characterId),
+        eq(characterMemories.status, "active"),
+        inArray(characterMemories.id, input.memoryIds),
+      ),
+    );
+}
+
 export async function reviewCharacterMemory(
   db: Database,
   input: {
@@ -102,6 +130,7 @@ export async function reviewCharacterMemory(
     memoryId: string;
     review: ReviewMemoryRequest;
     reviewedAt?: Date;
+    onIndex?: MemoryIndexHook;
   },
 ): Promise<ReviewCharacterMemoryResult> {
   const reviewedAt = input.reviewedAt ?? new Date();
@@ -161,6 +190,15 @@ export async function reviewCharacterMemory(
         updatedAt: reviewedAt,
       })
       .where(eq(characterMemories.id, stored.id));
+    const [updated] = await tx
+      .select()
+      .from(characterMemories)
+      .where(eq(characterMemories.id, stored.id))
+      .limit(1);
+    if (!updated) throw new Error("Updated memory was not readable.");
+    if (updated.status === "active" || stored.status === "active") {
+      await input.onIndex?.(tx, updated);
+    }
     const aggregate = await findMemoryAggregate(tx, stored.id);
     if (!aggregate) throw new Error("Updated memory was not readable.");
     return { kind: "updated", memory: aggregate };
@@ -189,12 +227,36 @@ export async function loadCompletedConversationForAnalysis(
     )
     .limit(1);
   if (!record) return null;
+  const [checkpoint] = await db
+    .select({
+      content: conversationSummaryCheckpoints.content,
+      sourceLastSequence: conversationSummaryCheckpoints.sourceLastSequence,
+    })
+    .from(conversationSummaryCheckpoints)
+    .where(
+      and(
+        eq(conversationSummaryCheckpoints.conversationId, input.conversationId),
+        eq(conversationSummaryCheckpoints.status, "completed"),
+      ),
+    )
+    .orderBy(desc(conversationSummaryCheckpoints.sourceLastSequence))
+    .limit(1);
   const messages = await db
     .select()
     .from(conversationMessages)
     .where(eq(conversationMessages.conversationId, input.conversationId))
     .orderBy(conversationMessages.sequence);
-  return { ...record, messages };
+  return {
+    ...record,
+    checkpoint:
+      checkpoint?.content === null || checkpoint === undefined
+        ? null
+        : {
+            content: checkpoint.content,
+            sourceLastSequence: checkpoint.sourceLastSequence,
+          },
+    messages,
+  };
 }
 
 export async function upsertConversationSummary(
@@ -238,6 +300,7 @@ export async function upsertExtractedMemories(
     analyzerProfileId?: string;
     memories: ExtractedMemoryInput[];
     updatedAt?: Date;
+    onIndex?: MemoryIndexHook;
   },
 ): Promise<void> {
   if (input.memories.length === 0) return;
@@ -261,7 +324,7 @@ export async function upsertExtractedMemories(
         continue;
       }
       if (stored) {
-        await tx
+        const [updated] = await tx
           .update(characterMemories)
           .set({
             sourceConversationId: input.conversationId,
@@ -275,10 +338,14 @@ export async function upsertExtractedMemories(
                 : "suggested",
             updatedAt,
           })
-          .where(eq(characterMemories.id, stored.id));
+          .where(eq(characterMemories.id, stored.id))
+          .returning();
+        if (updated?.status === "active") {
+          await input.onIndex?.(tx, updated);
+        }
         continue;
       }
-      await tx
+      const [inserted] = await tx
         .insert(characterMemories)
         .values({
           userId: input.userId,
@@ -293,7 +360,11 @@ export async function upsertExtractedMemories(
           status: candidate.status,
           updatedAt,
         })
-        .onConflictDoNothing();
+        .onConflictDoNothing()
+        .returning();
+      if (inserted?.status === "active") {
+        await input.onIndex?.(tx, inserted);
+      }
     }
   });
 }

@@ -1,4 +1,6 @@
 import {
+  mem0DiagnosticsQuerySchema,
+  mem0SearchRequestSchema,
   memoryIdParamsSchema,
   memoryListQuerySchema,
   reviewMemoryRequestSchema,
@@ -30,6 +32,32 @@ export async function registerMemoryRoutes(
     if (!query.success) return invalidRequest(reply);
     try {
       return { memories: await memories.list(actor, query.data) };
+    } catch (error) {
+      return sendMemoryError(reply, error);
+    }
+  });
+
+  app.get("/api/memories/mem0", async (request, reply) => {
+    noStore(reply);
+    const actor = await authenticateActor(request, reply, config, auth);
+    if (!actor) return;
+    const query = mem0DiagnosticsQuerySchema.safeParse(request.query);
+    if (!query.success) return invalidRequest(reply);
+    try {
+      return await memories.mem0Diagnostics(actor, query.data);
+    } catch (error) {
+      return sendMemoryError(reply, error);
+    }
+  });
+
+  app.post("/api/memories/mem0/search", async (request, reply) => {
+    noStore(reply);
+    const actor = await authenticateActor(request, reply, config, auth);
+    if (!actor) return;
+    const input = mem0SearchRequestSchema.safeParse(request.body);
+    if (!input.success) return invalidRequest(reply);
+    try {
+      return await memories.searchMem0(actor, input.data);
     } catch (error) {
       return sendMemoryError(reply, error);
     }

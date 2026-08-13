@@ -1,6 +1,7 @@
 import type {
   AppendConversationMessagesRequest,
   ConversationMessage,
+  ConversationRuntimeSnapshot,
   ConversationSummary,
   CreateConversationRequest,
   UserAccount,
@@ -13,10 +14,19 @@ import type {
   ConversationAggregate,
   ConversationDetailAggregate,
   ConversationMessageRecord,
+  ConversationRealtimeContext,
 } from "@meet/database";
+import {
+  resolveSemanticMemoryStore,
+  type SemanticMemoryStoreSource,
+} from "@meet/memory";
 import type { ZodType } from "zod";
 
 import type { ConversationRepository } from "./repository.js";
+import {
+  assembleConversationContext,
+  type ContextDiagnostics,
+} from "./context-assembler.js";
 
 export type ConversationServiceErrorCode =
   | "CONVERSATION_NOT_FOUND"
@@ -39,22 +49,25 @@ export class ConversationServiceError extends Error {
 
 export type ConversationRealtimeLaunchContext = {
   mode: "normal" | "temporary";
+  runtimeSnapshot: ConversationRuntimeSnapshot | null;
   relationshipContext?: string;
   messages: Array<{
     id: string;
     role: "user" | "assistant";
     text: string;
   }>;
+  diagnostics: ContextDiagnostics;
 };
-
-const CONTINUITY_CHARACTER_BUDGET = 12_000;
-const CONTINUITY_MESSAGE_CHARACTER_LIMIT = 2_000;
-const RELATIONSHIP_CONTEXT_CHARACTER_BUDGET = 8_000;
 
 export class ConversationService {
   constructor(
     private readonly repository: ConversationRepository | null,
     private readonly now: () => Date = () => new Date(),
+    private readonly semanticMemoryStore?: SemanticMemoryStoreSource,
+    private readonly semanticMemoryOptions: {
+      limit: number;
+      threshold?: number;
+    } = { limit: 8, threshold: 0.35 },
   ) {}
 
   async create(
@@ -116,28 +129,142 @@ export class ConversationService {
     actor: UserAccount,
     conversationId: string,
     characterId: string,
+    runtimeSnapshot?: ConversationRuntimeSnapshot,
   ): Promise<ConversationRealtimeLaunchContext> {
     const context = await this.call((repository) =>
-      repository.loadRealtimeContext(actor.id, conversationId, characterId),
+      runtimeSnapshot
+        ? repository.loadRealtimeContext(
+            actor.id,
+            conversationId,
+            characterId,
+            runtimeSnapshot,
+          )
+        : repository.loadRealtimeContext(actor.id, conversationId, characterId),
     );
     if (!context) throw notFound();
-    const messages =
-      context.mode === "temporary"
-        ? context.messages.filter(
-            (message) => message.conversationId === conversationId,
-          )
-        : context.messages;
+    const effectiveRuntimeSnapshot =
+      context.runtimeSnapshot ?? runtimeSnapshot ?? null;
+    const messages = context.messages.filter((message) => {
+      if (message.conversationId === conversationId) return true;
+      return (
+        context.mode === "normal" && message.conversationStatus === "completed"
+      );
+    });
+    const recall = await this.recallMemories(
+      actor.id,
+      characterId,
+      conversationId,
+      context,
+    );
+    const assembled = assembleConversationContext({
+      runtimeSnapshot: effectiveRuntimeSnapshot,
+      messages,
+      summaries: context.mode === "normal" ? context.summaries : [],
+      memories: context.mode === "normal" ? recall.memories : [],
+      checkpoint: context.checkpoint,
+    });
+    assembled.diagnostics.memoryRecall = recall.diagnostics;
     return {
       mode: context.mode,
-      relationshipContext:
-        context.mode === "normal"
-          ? buildRelationshipContext(
-              context.summaries ?? [],
-              context.memories ?? [],
-            )
-          : undefined,
-      messages: boundContinuityMessages(messages),
+      runtimeSnapshot: effectiveRuntimeSnapshot,
+      relationshipContext: assembled.relationshipContext,
+      messages: assembled.messages,
+      diagnostics: assembled.diagnostics,
     };
+  }
+
+  private async recallMemories(
+    actorUserId: string,
+    characterId: string,
+    conversationId: string,
+    context: ConversationRealtimeContext,
+  ): Promise<{
+    memories: ConversationRealtimeContext["memories"];
+    diagnostics: ContextDiagnostics["memoryRecall"];
+  }> {
+    if (context.mode !== "normal" || !this.semanticMemoryStore) {
+      return {
+        memories: context.memories,
+        diagnostics: {
+          mode: "disabled",
+          queryMessageCount: 0,
+          hitCount: 0,
+        },
+      };
+    }
+    let store;
+    try {
+      store = await resolveSemanticMemoryStore(this.semanticMemoryStore);
+    } catch {
+      return {
+        memories: context.memories,
+        diagnostics: {
+          mode: "fallback",
+          queryMessageCount: 0,
+          hitCount: 0,
+        },
+      };
+    }
+    if (!store) {
+      return {
+        memories: context.memories,
+        diagnostics: {
+          mode: "disabled",
+          queryMessageCount: 0,
+          hitCount: 0,
+        },
+      };
+    }
+    const query = buildMemoryRecallQuery(context.messages, conversationId);
+    if (!query.text) {
+      return {
+        memories: context.memories,
+        diagnostics: {
+          mode: "fallback",
+          queryMessageCount: 0,
+          hitCount: 0,
+        },
+      };
+    }
+    try {
+      const hits = await store.search({
+        userId: actorUserId,
+        characterId,
+        query: query.text,
+        limit: this.semanticMemoryOptions.limit,
+        threshold: this.semanticMemoryOptions.threshold,
+      });
+      const memoryIds = hits
+        .map(({ localMemoryId }) => localMemoryId)
+        .filter((id): id is string => Boolean(id && UUID_PATTERN.test(id)));
+      const semanticMemories = await this.call((repository) =>
+        repository.loadActiveMemoriesByIds(actorUserId, characterId, memoryIds),
+      );
+      const byId = new Map(
+        semanticMemories.map((memory) => [memory.id, memory]),
+      );
+      const ranked = memoryIds.flatMap((id) => {
+        const memory = byId.get(id);
+        return memory ? [memory] : [];
+      });
+      return {
+        memories: mergeMemories(ranked, context.memories),
+        diagnostics: {
+          mode: "semantic",
+          queryMessageCount: query.messageCount,
+          hitCount: ranked.length,
+        },
+      };
+    } catch {
+      return {
+        memories: context.memories,
+        diagnostics: {
+          mode: "fallback",
+          queryMessageCount: query.messageCount,
+          hitCount: 0,
+        },
+      };
+    }
   }
 
   async appendMessages(
@@ -199,46 +326,41 @@ export class ConversationService {
   }
 }
 
-function boundContinuityMessages(
-  messages: Array<{
-    id: string;
-    role: "user" | "assistant";
-    text: string;
-  }>,
-): ConversationRealtimeLaunchContext["messages"] {
-  const selected: ConversationRealtimeLaunchContext["messages"] = [];
-  let remaining = CONTINUITY_CHARACTER_BUDGET;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (remaining <= 0) break;
-    const message = messages[index];
-    if (!message) continue;
-    const text = message.text
-      .trim()
-      .slice(0, Math.min(CONTINUITY_MESSAGE_CHARACTER_LIMIT, remaining));
-    if (!text) continue;
-    selected.push({ id: message.id, role: message.role, text });
-    remaining -= text.length;
-  }
-  return selected.reverse();
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function buildMemoryRecallQuery(
+  messages: ConversationRealtimeContext["messages"],
+  conversationId: string,
+): { text: string; messageCount: number } {
+  const currentUserMessages = messages.filter(
+    (message) =>
+      message.conversationId === conversationId && message.role === "user",
+  );
+  const candidates =
+    currentUserMessages.length > 0
+      ? currentUserMessages
+      : messages.filter((message) => message.role === "user");
+  const selected = candidates.slice(-6);
+  const text = selected
+    .map((message) => message.text.trim())
+    .filter(Boolean)
+    .join("\n")
+    .slice(-1_600)
+    .trim();
+  return { text, messageCount: selected.length };
 }
 
-function buildRelationshipContext(
-  summaries: Array<{ content: string }>,
-  memories: Array<{ content: string }>,
-): string | undefined {
-  const sections: string[] = [];
-  if (memories.length > 0) {
-    sections.push(
-      `已确认长期记忆：\n${memories.map((memory) => `- ${memory.content.trim()}`).join("\n")}`,
-    );
-  }
-  if (summaries.length > 0) {
-    sections.push(
-      `此前通话摘要：\n${summaries.map((summary) => `- ${summary.content.trim()}`).join("\n")}`,
-    );
-  }
-  if (sections.length === 0) return undefined;
-  return sections.join("\n\n").slice(0, RELATIONSHIP_CONTEXT_CHARACTER_BUDGET);
+function mergeMemories<T extends { id: string }>(
+  semantic: T[],
+  recent: T[],
+): T[] {
+  const seen = new Set<string>();
+  return [...semantic, ...recent].filter((memory) => {
+    if (seen.has(memory.id)) return false;
+    seen.add(memory.id);
+    return true;
+  });
 }
 
 function toDetail(detail: ConversationDetailAggregate) {

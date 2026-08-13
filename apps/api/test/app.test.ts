@@ -114,8 +114,13 @@ const conversationRepository = {
   findReadable: vi.fn(async () => null),
   loadRealtimeContext: vi.fn(async () => ({
     mode: "normal" as const,
+    runtimeSnapshot: null,
+    checkpoint: null,
     messages: [],
+    summaries: [],
+    memories: [],
   })),
+  loadActiveMemoriesByIds: vi.fn(async () => []),
   appendMessages: vi.fn(async () => ({ kind: "not_found" as const })),
   complete: vi.fn(async () => ({ kind: "not_found" as const })),
   delete: vi.fn(async () => false),
@@ -349,6 +354,8 @@ describe("Meet API", () => {
       ...conversationRepository,
       loadRealtimeContext: vi.fn(async () => ({
         mode: "normal" as const,
+        runtimeSnapshot: null,
+        checkpoint: null,
         messages: [
           {
             id: "9bb6162e-e85c-4e5d-a3ff-000000000001",
@@ -356,6 +363,7 @@ describe("Meet API", () => {
             role: "user" as const,
             text: "我周五要考试。",
             status: "completed" as const,
+            conversationStatus: "active" as const,
             createdAt: new Date("2026-08-09T05:00:00.000Z"),
           },
           {
@@ -364,9 +372,12 @@ describe("Meet API", () => {
             role: "assistant" as const,
             text: "记得，我们先复习分数。",
             status: "completed" as const,
+            conversationStatus: "active" as const,
             createdAt: new Date("2026-08-09T05:00:01.000Z"),
           },
         ],
+        summaries: [],
+        memories: [],
       })),
     } satisfies ConversationRepository;
     const app = await buildApp({
@@ -843,6 +854,19 @@ describe("Meet API", () => {
     expect(
       loadConfig({ MEDIA_LOCAL_DIR: "./private-media" }).media?.localDirectory,
     ).toMatch(/private-media$/);
+    expect(
+      loadConfig({
+        EMBEDDING_LOCAL_CACHE_DIR: "./private-embedding-models",
+      }).embedding?.localCacheDirectory,
+    ).toMatch(/private-embedding-models$/);
+  });
+
+  it("does not read retired Mem0 embedding environment variables", () => {
+    const config = loadConfig({
+      MEM0_ENABLED: "true",
+      MEM0_EMBEDDING_API_KEY: "legacy-key",
+    });
+    expect(config).not.toHaveProperty("memory");
   });
 });
 

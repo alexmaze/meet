@@ -1,32 +1,45 @@
 import type {
   ConversationAggregate,
+  ConversationCheckpointHook,
   ConversationCompletionHook,
   DatabaseTransaction,
   MediaCleanupHook,
   MediaCleanupRequest,
+  MemoryIndexHook,
 } from "@meet/database";
 import {
   aiWorkItems,
+  conversationMessages,
+  conversationSummaryCheckpoints,
   conversations,
   modelConnections,
   modelPurposeBindings,
+  listMemoriesRequiringIndex,
+  prepareMemoryIndexEntry,
   providerProfiles,
+  type ConversationSummaryCheckpointRecord,
   type Database,
 } from "@meet/database";
 import type { ModelPurpose } from "@meet/protocol";
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, gt, sql, sum } from "drizzle-orm";
 import { fromDrizzle, PgBoss } from "pg-boss";
 
 import {
+  CONVERSATION_CHECKPOINT_DEAD_LETTER_QUEUE,
+  CONVERSATION_CHECKPOINT_QUEUE,
   CONVERSATION_FINALIZE_DEAD_LETTER_QUEUE,
   CONVERSATION_FINALIZE_QUEUE,
   MEMORY_EXTRACT_DEAD_LETTER_QUEUE,
   MEMORY_EXTRACT_QUEUE,
+  MEMORY_INDEX_SYNC_DEAD_LETTER_QUEUE,
+  MEMORY_INDEX_SYNC_QUEUE,
   MEDIA_EXPIRE_DEAD_LETTER_QUEUE,
   MEDIA_EXPIRE_QUEUE,
+  conversationCheckpointJobSchema,
   conversationFinalizeJobSchema,
   mediaExpireJobSchema,
   memoryExtractJobSchema,
+  memoryIndexSyncJobSchema,
 } from "./schemas.js";
 
 export type JobErrorHandler = (error: Error) => void;
@@ -43,10 +56,16 @@ export async function createMeetJobBoss(
 }
 
 export async function ensureMeetQueues(boss: PgBoss): Promise<void> {
+  await boss.createQueue(CONVERSATION_CHECKPOINT_DEAD_LETTER_QUEUE, {
+    deleteAfterSeconds: 30 * 24 * 60 * 60,
+  });
   await boss.createQueue(CONVERSATION_FINALIZE_DEAD_LETTER_QUEUE, {
     deleteAfterSeconds: 30 * 24 * 60 * 60,
   });
   await boss.createQueue(MEMORY_EXTRACT_DEAD_LETTER_QUEUE, {
+    deleteAfterSeconds: 30 * 24 * 60 * 60,
+  });
+  await boss.createQueue(MEMORY_INDEX_SYNC_DEAD_LETTER_QUEUE, {
     deleteAfterSeconds: 30 * 24 * 60 * 60,
   });
   await boss.createQueue(MEDIA_EXPIRE_DEAD_LETTER_QUEUE, {
@@ -62,6 +81,16 @@ export async function ensureMeetQueues(boss: PgBoss): Promise<void> {
     deadLetter: CONVERSATION_FINALIZE_DEAD_LETTER_QUEUE,
     notify: true,
   });
+  await boss.createQueue(CONVERSATION_CHECKPOINT_QUEUE, {
+    retryLimit: 4,
+    retryDelay: 10,
+    retryBackoff: true,
+    expireInSeconds: 5 * 60,
+    retentionSeconds: 14 * 24 * 60 * 60,
+    deleteAfterSeconds: 7 * 24 * 60 * 60,
+    deadLetter: CONVERSATION_CHECKPOINT_DEAD_LETTER_QUEUE,
+    notify: true,
+  });
   await boss.createQueue(MEMORY_EXTRACT_QUEUE, {
     retryLimit: 4,
     retryDelay: 10,
@@ -70,6 +99,16 @@ export async function ensureMeetQueues(boss: PgBoss): Promise<void> {
     retentionSeconds: 14 * 24 * 60 * 60,
     deleteAfterSeconds: 7 * 24 * 60 * 60,
     deadLetter: MEMORY_EXTRACT_DEAD_LETTER_QUEUE,
+    notify: true,
+  });
+  await boss.createQueue(MEMORY_INDEX_SYNC_QUEUE, {
+    retryLimit: 6,
+    retryDelay: 15,
+    retryBackoff: true,
+    expireInSeconds: 2 * 60,
+    retentionSeconds: 14 * 24 * 60 * 60,
+    deleteAfterSeconds: 7 * 24 * 60 * 60,
+    deadLetter: MEMORY_INDEX_SYNC_DEAD_LETTER_QUEUE,
     notify: true,
   });
   await boss.createQueue(MEDIA_EXPIRE_QUEUE, {
@@ -82,6 +121,104 @@ export async function ensureMeetQueues(boss: PgBoss): Promise<void> {
     deadLetter: MEDIA_EXPIRE_DEAD_LETTER_QUEUE,
     notify: true,
   });
+}
+
+export const CONVERSATION_CHECKPOINT_MESSAGE_INTERVAL = 20;
+export const CONVERSATION_CHECKPOINT_CHARACTER_INTERVAL = 12_000;
+
+export class ConversationCheckpointJobPublisher {
+  constructor(private readonly boss: PgBoss) {}
+
+  readonly enqueue: ConversationCheckpointHook = async (
+    transaction,
+    aggregate,
+  ) => {
+    const conversation = aggregate.conversation;
+    const [latest] = await transaction
+      .select({
+        sourceLastSequence: conversationSummaryCheckpoints.sourceLastSequence,
+        sourceMessageCount: conversationSummaryCheckpoints.sourceMessageCount,
+      })
+      .from(conversationSummaryCheckpoints)
+      .where(eq(conversationSummaryCheckpoints.conversationId, conversation.id))
+      .orderBy(desc(conversationSummaryCheckpoints.sourceLastSequence))
+      .limit(1);
+    const previousSequence = latest?.sourceLastSequence ?? 0;
+    const previousMessageCount = latest?.sourceMessageCount ?? 0;
+    const messageDelta = conversation.messageCount - previousMessageCount;
+    if (messageDelta < CONVERSATION_CHECKPOINT_MESSAGE_INTERVAL) {
+      const [characters] = await transaction
+        .select({
+          value: sum(sql<number>`length(${conversationMessages.text})`),
+        })
+        .from(conversationMessages)
+        .where(
+          and(
+            eq(conversationMessages.conversationId, conversation.id),
+            gt(conversationMessages.sequence, previousSequence),
+          ),
+        );
+      if (
+        !shouldCreateConversationCheckpoint(
+          messageDelta,
+          Number(characters?.value ?? 0),
+        )
+      ) {
+        return;
+      }
+    }
+
+    const [binding] = await transaction
+      .select({ modelProfileId: modelPurposeBindings.modelProfileId })
+      .from(modelPurposeBindings)
+      .innerJoin(
+        providerProfiles,
+        and(
+          eq(modelPurposeBindings.modelProfileId, providerProfiles.id),
+          eq(providerProfiles.kind, "text"),
+          eq(providerProfiles.status, "enabled"),
+        ),
+      )
+      .innerJoin(
+        modelConnections,
+        and(
+          eq(providerProfiles.connectionId, modelConnections.id),
+          eq(modelConnections.status, "enabled"),
+        ),
+      )
+      .where(eq(modelPurposeBindings.purpose, "conversation_summary"))
+      .limit(1);
+    const queuedAt = binding ? new Date() : null;
+    const [checkpoint] = await transaction
+      .insert(conversationSummaryCheckpoints)
+      .values({
+        conversationId: conversation.id,
+        sourceLastSequence: conversation.lastSequence,
+        sourceMessageCount: conversation.messageCount,
+        status: binding ? "queued" : "waiting_configuration",
+        modelProfileId: binding?.modelProfileId ?? null,
+        queuedAt,
+      })
+      .onConflictDoNothing()
+      .returning();
+    if (!checkpoint || !binding) return;
+    await sendCheckpointJob(
+      this.boss,
+      transaction,
+      checkpoint,
+      conversation.userId,
+    );
+  };
+}
+
+export function shouldCreateConversationCheckpoint(
+  messageDelta: number,
+  characterDelta: number,
+): boolean {
+  return (
+    messageDelta >= CONVERSATION_CHECKPOINT_MESSAGE_INTERVAL ||
+    characterDelta >= CONVERSATION_CHECKPOINT_CHARACTER_INTERVAL
+  );
 }
 
 export class MediaCleanupJobPublisher {
@@ -112,6 +249,45 @@ export class MediaCleanupJobPublisher {
       startAfter: request.notBefore,
     });
     if (!jobId) throw new Error("Media cleanup job was not created.");
+  }
+}
+
+export class MemoryIndexJobPublisher {
+  constructor(private readonly boss: PgBoss) {}
+
+  readonly enqueue: MemoryIndexHook = async (transaction, memory) => {
+    await prepareMemoryIndexEntry(transaction, memory.id);
+    const payload = memoryIndexSyncJobSchema.parse({
+      idempotencyKey: `${MEMORY_INDEX_SYNC_QUEUE}:${memory.id}:${memory.contentFingerprint}:${memory.status}`,
+      memoryId: memory.id,
+    });
+    const jobId = await this.boss.send(MEMORY_INDEX_SYNC_QUEUE, payload, {
+      db: fromDrizzle(transaction, sql),
+    });
+    if (!jobId) throw new Error("Memory index sync job was not created.");
+  };
+}
+
+export class MemoryIndexJobReconciler {
+  constructor(
+    private readonly boss: PgBoss,
+    private readonly db: Database,
+    private readonly indexRevision?: string,
+  ) {}
+
+  async enqueueOutstanding(limit = 1_000): Promise<number> {
+    const memories = await listMemoriesRequiringIndex(
+      this.db,
+      limit,
+      this.indexRevision,
+    );
+    const publisher = new MemoryIndexJobPublisher(this.boss);
+    for (const memory of memories) {
+      await this.db.transaction((transaction) =>
+        publisher.enqueue(transaction, memory),
+      );
+    }
+    return memories.length;
   }
 }
 
@@ -245,8 +421,32 @@ export class ModelBindingJobReconciler {
   ) {}
 
   async enqueueWaiting(purpose: ModelPurpose, modelProfileId: string) {
-    if (purpose === "realtime_default") return;
+    if (purpose === "realtime_default" || purpose === "memory_embedding") {
+      return;
+    }
     await this.db.transaction(async (tx) => {
+      if (purpose === "conversation_summary") {
+        const checkpoints = await tx
+          .update(conversationSummaryCheckpoints)
+          .set({
+            modelProfileId,
+            status: "queued",
+            queuedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            eq(conversationSummaryCheckpoints.status, "waiting_configuration"),
+          )
+          .returning();
+        for (const checkpoint of checkpoints) {
+          await sendCheckpointJob(
+            this.boss,
+            tx,
+            checkpoint,
+            await conversationUserId(tx, checkpoint.conversationId),
+          );
+        }
+      }
       const waiting = await tx
         .update(aiWorkItems)
         .set({
@@ -286,6 +486,29 @@ export class ModelBindingJobReconciler {
       }
     });
   }
+}
+
+export async function sendCheckpointJob(
+  boss: PgBoss,
+  transaction: DatabaseTransaction,
+  checkpoint: ConversationSummaryCheckpointRecord,
+  userId: string,
+): Promise<void> {
+  if (!checkpoint.modelProfileId) {
+    throw new Error("Conversation checkpoint has no text model binding.");
+  }
+  const payload = conversationCheckpointJobSchema.parse({
+    idempotencyKey: `${CONVERSATION_CHECKPOINT_QUEUE}:${checkpoint.conversationId}:${checkpoint.sourceLastSequence}`,
+    checkpointId: checkpoint.id,
+    conversationId: checkpoint.conversationId,
+    userId,
+    targetSequence: checkpoint.sourceLastSequence,
+    modelProfileId: checkpoint.modelProfileId,
+  });
+  const jobId = await boss.send(CONVERSATION_CHECKPOINT_QUEUE, payload, {
+    db: fromDrizzle(transaction, sql),
+  });
+  if (!jobId) throw new Error("Conversation checkpoint job was not created.");
 }
 
 async function conversationUserId(

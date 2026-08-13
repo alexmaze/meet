@@ -2,18 +2,30 @@ import fastifyCookie from "@fastify/cookie";
 import fastifyWebsocket from "@fastify/websocket";
 import {
   createDatabaseClient,
+  resolveMemoryEmbeddingConfiguration,
+  type ConversationCheckpointHook,
   type ConversationCompletionHook,
   type DatabaseClient,
   type MediaCleanupHook,
+  type MemoryIndexHook,
 } from "@meet/database";
 import {
   ConversationCompletionJobPublisher,
+  ConversationCheckpointJobPublisher,
   MediaCleanupJobPublisher,
+  MemoryIndexJobPublisher,
+  MemoryIndexJobReconciler,
   ModelBindingJobReconciler,
   createMeetJobBoss,
 } from "@meet/jobs";
 import { LocalMediaStore, type MediaStore } from "@meet/media";
-import { CHARACTER_AVATAR_MAX_BYTES } from "@meet/protocol";
+import {
+  ManagedEmbeddedMem0SemanticMemoryStoreResolver,
+  resolveSemanticMemoryStore,
+  type SemanticMemoryStore,
+  type SemanticMemoryStoreSource,
+} from "@meet/memory";
+import { CHARACTER_AVATAR_MAX_BYTES, type ModelPurpose } from "@meet/protocol";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { PostgresAuthRepository } from "./auth/postgres-repository.js";
@@ -64,7 +76,10 @@ export type BuildAppOptions = {
   mediaStore?: MediaStore | null;
   databaseClient?: DatabaseClient | null;
   conversationCompletionHook?: ConversationCompletionHook | null;
+  conversationCheckpointHook?: ConversationCheckpointHook | null;
   mediaCleanupHook?: MediaCleanupHook | null;
+  memoryIndexHook?: MemoryIndexHook | null;
+  semanticMemoryStore?: SemanticMemoryStore | null;
   qwenWebSocketFactory?: QwenWebSocketFactory;
   doubaoWebSocketFactory?: DoubaoWebSocketFactory;
   logger?: boolean;
@@ -80,13 +95,18 @@ export async function buildApp(
       : null;
   const databaseClient = options.databaseClient ?? ownedDatabaseClient;
   const needsConversationJobs =
-    options.conversationCompletionHook === undefined &&
-    options.conversationRepository === undefined;
+    options.conversationRepository === undefined &&
+    (options.conversationCompletionHook === undefined ||
+      options.conversationCheckpointHook === undefined);
   const needsMediaJobs =
     options.mediaCleanupHook === undefined &&
     options.mediaRepository === undefined;
+  const needsMemoryIndexJobs =
+    Boolean(config.database.url) &&
+    options.memoryRepository === undefined &&
+    options.memoryIndexHook === undefined;
   const ownedJobBoss =
-    (needsConversationJobs || needsMediaJobs) &&
+    (needsConversationJobs || needsMediaJobs || needsMemoryIndexJobs) &&
     databaseClient &&
     config.database.url
       ? await createMeetJobBoss(config.database.url)
@@ -97,12 +117,43 @@ export async function buildApp(
         ? new ConversationCompletionJobPublisher(ownedJobBoss).enqueue
         : undefined
       : (options.conversationCompletionHook ?? undefined);
+  const conversationCheckpointHook =
+    options.conversationCheckpointHook === undefined
+      ? ownedJobBoss
+        ? new ConversationCheckpointJobPublisher(ownedJobBoss).enqueue
+        : undefined
+      : (options.conversationCheckpointHook ?? undefined);
   const mediaCleanupHook =
     options.mediaCleanupHook === undefined
       ? ownedJobBoss
         ? new MediaCleanupJobPublisher(ownedJobBoss).enqueue
         : undefined
       : (options.mediaCleanupHook ?? undefined);
+  const memoryIndexHook =
+    options.memoryIndexHook === undefined
+      ? ownedJobBoss
+        ? new MemoryIndexJobPublisher(ownedJobBoss).enqueue
+        : undefined
+      : (options.memoryIndexHook ?? undefined);
+  const ownedSemanticMemoryStoreResolver =
+    options.semanticMemoryStore === undefined
+      ? databaseClient && config.database.url
+        ? new ManagedEmbeddedMem0SemanticMemoryStoreResolver({
+            databaseUrl: config.database.url,
+            loadConfiguration: () =>
+              resolveMemoryEmbeddingConfiguration(databaseClient.db),
+            requestTimeoutMs: 1_500,
+            builtinRequestTimeoutMs: 30_000,
+            localEmbeddingCacheDirectory:
+              config.embedding?.localCacheDirectory ??
+              "./data/embedding-models",
+          })
+        : undefined
+      : undefined;
+  const semanticMemoryStore: SemanticMemoryStoreSource | undefined =
+    options.semanticMemoryStore === undefined
+      ? ownedSemanticMemoryStoreResolver
+      : (options.semanticMemoryStore ?? undefined);
   const authRepository =
     options.authRepository === undefined
       ? databaseClient
@@ -127,13 +178,14 @@ export async function buildApp(
         ? new PostgresConversationRepository(
             databaseClient.db,
             conversationCompletionHook,
+            conversationCheckpointHook,
           )
         : null
       : options.conversationRepository;
   const memoryRepository =
     options.memoryRepository === undefined
       ? databaseClient
-        ? new PostgresMemoryRepository(databaseClient.db)
+        ? new PostgresMemoryRepository(databaseClient.db, memoryIndexHook)
         : null
       : options.memoryRepository;
   const mediaRepository =
@@ -192,26 +244,54 @@ export async function buildApp(
   });
   const auth = new AuthService(authRepository, config.auth.sessionTtlMs);
   const members = new MemberService(memberRepository);
-  const conversations = new ConversationService(conversationRepository);
-  const memories = new MemoryService(memoryRepository);
+  const conversations = new ConversationService(
+    conversationRepository,
+    undefined,
+    semanticMemoryStore,
+    { limit: 8, threshold: 0.35 },
+  );
+  const memories = new MemoryService(
+    memoryRepository,
+    undefined,
+    semanticMemoryStore,
+  );
   const media = new MediaService(mediaRepository, mediaStore);
   const characters = new CharacterService(characterRepository, media);
   const modelBindingReconciler =
     ownedJobBoss && databaseClient
       ? new ModelBindingJobReconciler(ownedJobBoss, databaseClient.db)
       : null;
+  const reconcileBinding = async (
+    purpose: ModelPurpose,
+    modelProfileId: string,
+  ) => {
+    if (purpose !== "memory_embedding") {
+      await modelBindingReconciler?.enqueueWaiting(purpose, modelProfileId);
+      return;
+    }
+    const store = await resolveSemanticMemoryStore(semanticMemoryStore);
+    if (store && ownedJobBoss && databaseClient) {
+      await new MemoryIndexJobReconciler(
+        ownedJobBoss,
+        databaseClient.db,
+        store.indexRevision,
+      ).enqueueOutstanding();
+    }
+  };
   const modelSettings = new ModelSettingsService(
     databaseClient?.db ?? null,
     options.fetchFunction,
     options.qwenWebSocketFactory,
     options.doubaoWebSocketFactory,
-    modelBindingReconciler?.enqueueWaiting.bind(modelBindingReconciler),
+    reconcileBinding,
     options.config,
+    config.embedding?.localCacheDirectory ?? "./data/embedding-models",
   );
 
-  if (ownedJobBoss || ownedDatabaseClient) {
+  if (ownedJobBoss || ownedDatabaseClient || ownedSemanticMemoryStoreResolver) {
     app.addHook("onClose", async () => {
       await ownedJobBoss?.stop();
+      await ownedSemanticMemoryStoreResolver?.close();
       await ownedDatabaseClient?.close();
     });
   }

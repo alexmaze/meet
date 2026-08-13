@@ -13,6 +13,7 @@
     "@meet/database": "workspace:*",
     "@meet/jobs": "workspace:*",
     "@meet/media": "workspace:*",
+    "@meet/memory": "workspace:*",
     "drizzle-orm": "0.45.1",
     "pg-boss": "12.27.0",
     "zod": "4.4.3"

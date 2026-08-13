@@ -1,14 +1,22 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { createDatabaseClient } from "@meet/database";
+import {
+  createDatabaseClient,
+  resolveMemoryEmbeddingConfiguration,
+} from "@meet/database";
 import {
   CONVERSATION_FINALIZE_QUEUE,
+  CONVERSATION_CHECKPOINT_QUEUE,
   MEDIA_EXPIRE_QUEUE,
   MEMORY_EXTRACT_QUEUE,
+  MEMORY_INDEX_SYNC_QUEUE,
+  MemoryIndexJobPublisher,
+  MemoryIndexJobReconciler,
   createMeetJobBoss,
 } from "@meet/jobs";
 import { LocalMediaStore } from "@meet/media";
+import { ManagedEmbeddedMem0SemanticMemoryStoreResolver } from "@meet/memory";
 
 import { loadWorkerConfig } from "./config.js";
 import { createWorkerHandlers } from "./handlers.js";
@@ -42,9 +50,21 @@ const database = createDatabaseClient({ connectionString: config.databaseUrl });
 const boss = await createMeetJobBoss(config.databaseUrl, (error) => {
   console.error("Meet Worker 队列错误", error);
 });
+const semanticMemoryStore = new ManagedEmbeddedMem0SemanticMemoryStoreResolver({
+  databaseUrl: config.databaseUrl,
+  loadConfiguration: () => resolveMemoryEmbeddingConfiguration(database.db),
+  requestTimeoutMs: 15_000,
+  builtinRequestTimeoutMs: 60_000,
+  localEmbeddingCacheDirectory: config.embedding.localCacheDirectory,
+});
+const memoryIndexPublisher = new MemoryIndexJobPublisher(boss);
 const handlers = createWorkerHandlers(
   database.db,
   new DatabaseConversationAnalyzerResolver(database.db),
+  {
+    memoryIndexHook: memoryIndexPublisher.enqueue,
+    semanticMemoryStore,
+  },
 );
 const expireMedia = createMediaExpirationHandler(
   new PostgresMediaCleanupRepository(database.db),
@@ -54,14 +74,37 @@ const expireMedia = createMediaExpirationHandler(
 await boss.work(CONVERSATION_FINALIZE_QUEUE, async (jobs) => {
   for (const job of jobs) await handlers.finalizeConversation(job.data);
 });
+await boss.work(CONVERSATION_CHECKPOINT_QUEUE, async (jobs) => {
+  for (const job of jobs) await handlers.checkpointConversation(job.data);
+});
 await boss.work(MEMORY_EXTRACT_QUEUE, async (jobs) => {
   for (const job of jobs) await handlers.extractMemories(job.data);
 });
+await boss.work(MEMORY_INDEX_SYNC_QUEUE, async (jobs) => {
+  for (const job of jobs) await handlers.syncMemoryIndex(job.data);
+});
+try {
+  const activeStore = await semanticMemoryStore.resolve();
+  if (activeStore) {
+    const queued = await new MemoryIndexJobReconciler(
+      boss,
+      database.db,
+      activeStore.indexRevision,
+    ).enqueueOutstanding();
+    if (queued > 0) {
+      console.info(`已补发 ${queued} 条 Mem0 记忆索引任务。`);
+    }
+  }
+} catch (error) {
+  console.error("Mem0 记忆索引补偿扫描失败", error);
+}
 await boss.work(MEDIA_EXPIRE_QUEUE, async (jobs) => {
   for (const job of jobs) await expireMedia(job.data);
 });
 
-console.info("Meet Worker 已启动，正在处理摘要、长期记忆与媒体清理任务。");
+console.info(
+  "Meet Worker 已启动，正在处理增量检查点、最终摘要、长期记忆、Mem0 索引与媒体清理任务。",
+);
 
 let closing = false;
 const close = async (signal: string): Promise<void> => {
@@ -69,6 +112,7 @@ const close = async (signal: string): Promise<void> => {
   closing = true;
   console.info(`Meet Worker 收到 ${signal}，正在停止。`);
   await boss.stop();
+  await semanticMemoryStore?.close();
   await database.close();
 };
 

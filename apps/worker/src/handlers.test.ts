@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyMemoryCandidate } from "./handlers.js";
+import {
+  classifyMemoryCandidate,
+  selectMessagesAfterCheckpoint,
+} from "./handlers.js";
+
+describe("incremental summary policy", () => {
+  it("only sends messages after the latest checkpoint to final summarization", () => {
+    const messages = [{ sequence: 19 }, { sequence: 20 }, { sequence: 21 }];
+    expect(selectMessagesAfterCheckpoint(messages, 20)).toEqual([
+      { sequence: 21 },
+    ]);
+    expect(selectMessagesAfterCheckpoint(messages)).toBe(messages);
+  });
+});
 
 describe("memory extraction policy", () => {
   it("only auto-saves explicit, stable, high-confidence facts", () => {

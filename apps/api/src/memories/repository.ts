@@ -1,5 +1,6 @@
 import type {
   CharacterMemoryAggregate,
+  MemoryIndexDiagnosticRecord,
   ReviewCharacterMemoryResult,
 } from "@meet/database";
 import type { ReviewMemoryRequest } from "@meet/protocol";
@@ -11,6 +12,11 @@ export interface MemoryRepository {
     limit: number,
   ): Promise<CharacterMemoryAggregate[]>;
   isGuardianReadableTarget(targetUserId: string): Promise<boolean>;
+  listIndexDiagnostics?(
+    targetUserId: string,
+    characterId: string | undefined,
+    limit: number,
+  ): Promise<MemoryIndexDiagnosticRecord[]>;
   review(
     actorUserId: string,
     memoryId: string,

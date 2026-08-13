@@ -7,7 +7,11 @@ import { hashSessionToken } from "../src/auth/session-token.js";
 import { buildApp } from "../src/app.js";
 import type { AppConfig } from "../src/config.js";
 import type { MemoryRepository } from "../src/memories/repository.js";
-import type { CharacterMemoryAggregate } from "@meet/database";
+import type {
+  CharacterMemoryAggregate,
+  MemoryIndexDiagnosticRecord,
+} from "@meet/database";
+import type { SemanticMemoryStore } from "@meet/memory";
 import { describe, expect, it, vi } from "vitest";
 
 const adult = account("4d1c2e31-ad0e-4fa9-9ae8-ae3497069117", "adult");
@@ -95,6 +99,107 @@ describe("memory routes", () => {
       ).statusCode,
     ).toBe(404);
     expect(fake.list).not.toHaveBeenCalledWith(otherAdultId, undefined, 100);
+    expect(
+      (
+        await injectAs(app, admin, {
+          method: "GET",
+          url: `/api/memories/mem0?userId=${otherAdultId}`,
+        })
+      ).statusCode,
+    ).toBe(404);
+    await app.close();
+  });
+
+  it("compares business memories with actual Mem0 records and tests search", async () => {
+    const fake = repository();
+    const aggregate = activeMemoryAggregate();
+    vi.mocked(fake.listIndexDiagnostics!).mockResolvedValue([
+      {
+        ...aggregate,
+        index: {
+          memoryId,
+          provider: "mem0",
+          externalId: "external-1",
+          indexedFingerprint: aggregate.memory.contentFingerprint,
+          indexRevision: "revision-1",
+          status: "synced",
+          attemptCount: 1,
+          lastErrorCode: null,
+          syncedAt: aggregate.memory.updatedAt,
+          createdAt: aggregate.memory.createdAt,
+          updatedAt: aggregate.memory.updatedAt,
+        },
+      },
+    ] satisfies MemoryIndexDiagnosticRecord[]);
+    const list = vi.fn(async () => [
+      {
+        externalId: "external-1",
+        localMemoryId: memoryId,
+        content: aggregate.memory.content,
+      },
+    ]);
+    const search = vi.fn(async () => [
+      {
+        externalId: "external-1",
+        localMemoryId: memoryId,
+        content: aggregate.memory.content,
+        score: 0.87,
+      },
+    ]);
+    const semanticMemoryStore: SemanticMemoryStore = {
+      indexRevision: "revision-1",
+      list,
+      search,
+      upsert: vi.fn(),
+      delete: vi.fn(),
+    };
+    const app = await testApp(fake, semanticMemoryStore);
+
+    const diagnostics = await injectAs(app, adult, {
+      method: "GET",
+      url: "/api/memories/mem0",
+    });
+    expect(diagnostics.statusCode).toBe(200);
+    expect(diagnostics.json()).toMatchObject({
+      enabled: true,
+      indexRevision: "revision-1",
+      items: [
+        {
+          memoryId,
+          indexStatus: "synced",
+          existsInMem0: true,
+          contentMatches: true,
+        },
+      ],
+      orphaned: [],
+    });
+    expect(list).toHaveBeenCalledWith({
+      userId: adult.id,
+      characterId: undefined,
+      limit: 100,
+    });
+
+    const searched = await injectAs(app, adult, {
+      method: "POST",
+      url: "/api/memories/mem0/search",
+      payload: {
+        characterId: aggregate.character.id,
+        query: "我喜欢什么？",
+        limit: 8,
+        threshold: 0,
+      },
+    });
+    expect(searched.statusCode).toBe(200);
+    expect(searched.json()).toMatchObject({
+      results: [{ externalId: "external-1", score: 0.87 }],
+    });
+    expect(search).toHaveBeenCalledWith({
+      userId: adult.id,
+      characterId: aggregate.character.id,
+      query: "我喜欢什么？",
+      limit: 8,
+      threshold: 0,
+    });
     await app.close();
   });
 
@@ -126,11 +231,20 @@ function repository(): MemoryRepository {
   const aggregate = memoryAggregate();
   return {
     list: vi.fn(async () => [aggregate]),
+    listIndexDiagnostics: vi.fn(async () => []),
     isGuardianReadableTarget: vi.fn(async () => false),
     review: vi.fn(async () => ({
       kind: "updated" as const,
       memory: aggregate,
     })),
+  };
+}
+
+function activeMemoryAggregate(): CharacterMemoryAggregate {
+  const aggregate = memoryAggregate();
+  return {
+    ...aggregate,
+    memory: { ...aggregate.memory, status: "active", confidence: 0.95 },
   };
 }
 
@@ -164,11 +278,15 @@ function memoryAggregate(): CharacterMemoryAggregate {
   };
 }
 
-async function testApp(memoryRepository: MemoryRepository) {
+async function testApp(
+  memoryRepository: MemoryRepository,
+  semanticMemoryStore?: SemanticMemoryStore | null,
+) {
   return buildApp({
     config,
     authRepository: authRepository(),
     memoryRepository,
+    semanticMemoryStore,
     logger: false,
   });
 }

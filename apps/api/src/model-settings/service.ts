@@ -18,6 +18,7 @@ import {
   type ProviderProfileRecord,
 } from "@meet/database";
 import {
+  BUILTIN_EMBEDDING_MODELS,
   modelSettingsResponseSchema,
   type CreateModelConnectionRequest,
   type CreateModelProfileRequest,
@@ -27,6 +28,7 @@ import {
   type UpdateModelProfileRequest,
   type UserAccount,
 } from "@meet/protocol";
+import { testBuiltinEmbeddingModel } from "@meet/memory";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 
@@ -67,6 +69,7 @@ export class ModelSettingsService {
       modelProfileId: string,
     ) => Promise<void>,
     private readonly explicitLegacyTestConfig?: AppConfig,
+    private readonly localEmbeddingCacheDirectory = "./data/embedding-models",
   ) {}
 
   assertAdmin(actor: UserAccount): void {
@@ -97,6 +100,7 @@ export class ModelSettingsService {
         status: profile.status,
         revision: profile.revision,
         verifiedAt: profile.verifiedAt?.toISOString() ?? null,
+        embeddingDimensions: profile.embeddingDimensions,
         referenceCount: profile.referenceCount,
         characterReferenceCount: profile.characterReferenceCount,
         purposeReferenceCount: profile.purposeReferenceCount,
@@ -119,6 +123,7 @@ export class ModelSettingsService {
           "realtime_default",
           "conversation_summary",
           "memory_extraction",
+          "memory_embedding",
         ] as const
       ).map((purpose) => ({
         purpose,
@@ -135,7 +140,7 @@ export class ModelSettingsService {
     input: CreateModelConnectionRequest,
   ) {
     this.assertAdmin(actor);
-    assertEndpoint(input.adapter, input.endpoint);
+    if (input.endpoint) assertEndpoint(input.adapter, input.endpoint);
     return toConnection(
       await createModelConnection(this.requireDb(), actor.id, input),
     );
@@ -147,12 +152,24 @@ export class ModelSettingsService {
     input: UpdateModelConnectionRequest,
   ): Promise<void> {
     this.assertAdmin(actor);
-    if (input.endpoint) {
-      const snapshot = await listModelSettings(this.requireDb());
-      const connection = snapshot.connections.find(
-        (candidate) => candidate.id === connectionId,
-      );
-      if (!connection) throw notFound();
+    const snapshot = await listModelSettings(this.requireDb());
+    const connection = snapshot.connections.find(
+      (candidate) => candidate.id === connectionId,
+    );
+    if (!connection) throw notFound();
+    if (connection.adapter === "builtin_fastembed") {
+      if (
+        input.endpoint !== undefined ||
+        input.apiKey !== undefined ||
+        input.compatibilityPreset !== undefined
+      ) {
+        throw new ModelSettingsServiceError(
+          "BUILTIN_EMBEDDING_CONNECTION_READ_ONLY",
+          "内置 Embedding 连接没有端点或密钥配置。",
+          400,
+        );
+      }
+    } else if (input.endpoint) {
       assertEndpoint(connection.adapter, input.endpoint);
     }
     const result = await stageModelConnectionUpdate(
@@ -195,6 +212,27 @@ export class ModelSettingsService {
     input: UpdateModelProfileRequest,
   ): Promise<void> {
     this.assertAdmin(actor);
+    const runtime = await findResolvedModelRuntime(
+      this.requireDb(),
+      profileId,
+      { requireEnabled: false },
+    );
+    if (!runtime) throw notFound();
+    if (
+      runtime.connection.adapter === "builtin_fastembed" &&
+      (input.model !== undefined || input.embeddingDimensions !== undefined)
+    ) {
+      const model = input.model ?? runtime.profile.model;
+      const dimensions =
+        input.embeddingDimensions ?? runtime.profile.embeddingDimensions;
+      if (!isBuiltinEmbeddingModel(model, dimensions)) {
+        throw new ModelSettingsServiceError(
+          "BUILTIN_EMBEDDING_MODEL_INVALID",
+          "内置模式只能使用应用内支持的模型与固定维度。",
+          400,
+        );
+      }
+    }
     const result = await updateModelProfile(
       this.requireDb(),
       actor.id,
@@ -269,7 +307,10 @@ export class ModelSettingsService {
     );
     if (!runtime) throw notFound();
     const connection = candidateConnection(runtime.connection);
-    if (!connection.endpoint || !connection.apiKey) {
+    if (
+      connection.adapter !== "builtin_fastembed" &&
+      (!connection.endpoint || !connection.apiKey)
+    ) {
       throw new ModelSettingsServiceError(
         "MODEL_CONNECTION_INCOMPLETE",
         "请先填写连接端点与 API 密钥。",
@@ -279,6 +320,13 @@ export class ModelSettingsService {
     try {
       if (runtime.profile.kind === "text") {
         await testTextModel(connection, runtime.profile, this.fetchFunction);
+      } else if (runtime.profile.kind === "embedding") {
+        await testEmbeddingModel(
+          connection,
+          runtime.profile,
+          this.fetchFunction,
+          this.localEmbeddingCacheDirectory,
+        );
       } else {
         if (!voiceProfileId) {
           throw new ModelSettingsServiceError(
@@ -308,7 +356,7 @@ export class ModelSettingsService {
       if (error instanceof ModelSettingsServiceError) throw error;
       throw new ModelSettingsServiceError(
         "MODEL_TEST_FAILED",
-        "模型连接测试失败，请检查端点、密钥、模型 ID 和音色权限。",
+        "模型连接测试失败，请检查端点、密钥、模型 ID、向量维度或音色权限。",
         409,
         { cause: sanitizeUpstreamError(error) },
       );
@@ -319,6 +367,21 @@ export class ModelSettingsService {
       profileId,
       voiceProfileId,
     );
+    if (runtime.profile.kind === "embedding" && this.enqueueWaiting) {
+      const [binding] = await this.requireDb()
+        .select({ purpose: modelPurposeBindings.purpose })
+        .from(modelPurposeBindings)
+        .where(
+          and(
+            eq(modelPurposeBindings.purpose, "memory_embedding"),
+            eq(modelPurposeBindings.modelProfileId, profileId),
+          ),
+        )
+        .limit(1);
+      if (binding) {
+        await this.enqueueWaiting("memory_embedding", profileId);
+      }
+    }
   }
 
   async bind(
@@ -519,8 +582,7 @@ function toConnection(record: ModelConnectionRecord) {
     id: record.id,
     adapter: record.adapter,
     displayName: record.displayName,
-    endpoint:
-      record.pendingEndpoint ?? record.endpoint ?? "https://invalid.local",
+    endpoint: record.pendingEndpoint ?? record.endpoint,
     compatibilityPreset:
       record.adapter === "openai_chat_completions"
         ? ((record.pendingCompatibilityPreset ??
@@ -558,11 +620,14 @@ function assertEndpoint(
     }
     return;
   }
-  if (adapter === "openai_chat_completions") {
+  if (
+    adapter === "openai_chat_completions" ||
+    adapter === "openai_embeddings"
+  ) {
     if (url.protocol !== "https:") {
       throw new ModelSettingsServiceError(
         "MODEL_ENDPOINT_INVALID",
-        "文本模型 Base URL 必须使用 HTTPS。",
+        "OpenAI-compatible Base URL 必须使用 HTTPS。",
         400,
       );
     }
@@ -626,6 +691,88 @@ async function testTextModel(
     .object({ ok: z.literal(true) })
     .parse(JSON.parse(content ?? ""));
   if (!parsed.ok) throw new Error("Text model test JSON was invalid.");
+}
+
+async function testEmbeddingModel(
+  connection: ActiveConnection,
+  profile: ProviderProfileRecord,
+  fetchFunction: FetchFunction,
+  localEmbeddingCacheDirectory: string,
+): Promise<void> {
+  const dimensions = profile.embeddingDimensions;
+  if (!dimensions) {
+    throw new ModelSettingsServiceError(
+      "EMBEDDING_DIMENSIONS_REQUIRED",
+      "Embedding 模型必须配置向量维度。",
+      400,
+    );
+  }
+  if (connection.adapter === "builtin_fastembed") {
+    if (!isBuiltinEmbeddingModel(profile.model, dimensions)) {
+      throw new ModelSettingsServiceError(
+        "BUILTIN_EMBEDDING_MODEL_INVALID",
+        "内置 Embedding 模型或维度不受支持。",
+        400,
+      );
+    }
+    await testBuiltinEmbeddingModel({
+      model: profile.model,
+      dimensions,
+      cacheDirectory: localEmbeddingCacheDirectory,
+    });
+    return;
+  }
+  if (connection.adapter !== "openai_embeddings") {
+    throw new ModelSettingsServiceError(
+      "MODEL_ADAPTER_MISMATCH",
+      "该连接不是 Embedding 连接。",
+      400,
+    );
+  }
+  const response = await fetchFunction(
+    `${connection.endpoint.replace(/\/$/, "")}/embeddings`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${connection.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: profile.model,
+        input: "Meet embedding configuration test",
+        encoding_format: "float",
+        dimensions,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`Embedding model test returned ${response.status}.`);
+  }
+  const payload = z
+    .object({
+      data: z
+        .array(
+          z.object({
+            embedding: z.array(z.number()).min(1),
+          }),
+        )
+        .min(1),
+    })
+    .parse(await response.json());
+  if (payload.data[0]?.embedding.length !== dimensions) {
+    throw new Error("Embedding model returned an unexpected dimension.");
+  }
+}
+
+function isBuiltinEmbeddingModel(
+  model: string,
+  dimensions: number | null,
+): boolean {
+  return BUILTIN_EMBEDDING_MODELS.some(
+    (candidate) =>
+      candidate.id === model && candidate.dimensions === dimensions,
+  );
 }
 
 function knownVoices(

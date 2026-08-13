@@ -1,6 +1,9 @@
 import type { QwenRealtimeModel, QwenRealtimeRegion } from "@meet/protocol";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { resolve } from "node:path";
+
+const workspaceRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
 const optionalDatabaseUrlSchema = z.preprocess(
   (value) =>
@@ -42,6 +45,11 @@ const envSchema = z.object({
     .max(3_600)
     .default(300),
   MEDIA_LOCAL_DIR: z.string().trim().min(1).default("./data/media"),
+  EMBEDDING_LOCAL_CACHE_DIR: z
+    .string()
+    .trim()
+    .min(1)
+    .default("./data/embedding-models"),
 });
 
 export type AppConfig = {
@@ -78,6 +86,9 @@ export type AppConfig = {
   };
   media?: {
     localDirectory: string;
+  };
+  embedding?: {
+    localCacheDirectory: string;
   };
 };
 
@@ -121,7 +132,13 @@ export function loadConfig(
       requestTimeoutMs: 15_000,
     },
     media: {
-      localDirectory: resolve(env.MEDIA_LOCAL_DIR),
+      localDirectory: resolve(workspaceRoot, env.MEDIA_LOCAL_DIR),
+    },
+    embedding: {
+      localCacheDirectory: resolve(
+        workspaceRoot,
+        env.EMBEDDING_LOCAL_CACHE_DIR,
+      ),
     },
   };
 }

@@ -8,13 +8,13 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "build:packages": "pnpm --filter @meet/protocol build && pnpm --filter @meet/database build && pnpm --filter @meet/media build && pnpm --filter @meet/jobs build",
+    "build:packages": "pnpm --filter @meet/protocol build && pnpm --filter @meet/database build && pnpm --filter @meet/media build && pnpm --filter @meet/memory build && pnpm --filter @meet/jobs build",
     "dev": "pnpm run build:packages && pnpm --parallel --filter @meet/api --filter @meet/worker --filter @meet/web dev",
     "dev:api": "pnpm run build:packages && pnpm --filter @meet/api dev",
     "dev:web": "pnpm run build:packages && pnpm --filter @meet/web dev",
     "dev:worker": "pnpm run build:packages && pnpm --filter @meet/worker dev",
     "build": "pnpm run build:packages && pnpm --filter @meet/api build && pnpm --filter @meet/worker build && pnpm --filter @meet/web build",
-    "typecheck": "pnpm run build:packages && pnpm --filter @meet/database typecheck && pnpm --filter @meet/media typecheck && pnpm --filter @meet/jobs typecheck && pnpm --filter @meet/api typecheck && pnpm --filter @meet/worker typecheck && pnpm --filter @meet/web typecheck",
+    "typecheck": "pnpm run build:packages && pnpm --filter @meet/database typecheck && pnpm --filter @meet/media typecheck && pnpm --filter @meet/memory typecheck && pnpm --filter @meet/jobs typecheck && pnpm --filter @meet/api typecheck && pnpm --filter @meet/worker typecheck && pnpm --filter @meet/web typecheck",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

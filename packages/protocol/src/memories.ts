@@ -55,3 +55,67 @@ export type ReviewMemoryRequest = z.infer<typeof reviewMemoryRequestSchema>;
 export const memoryResponseSchema = z.object({
   memory: characterMemorySchema,
 });
+
+export const mem0DiagnosticsQuerySchema = z
+  .object({
+    userId: z.uuid().optional(),
+    characterId: z.uuid().optional(),
+    limit: z.coerce.number().int().min(1).max(200).default(100),
+  })
+  .strict();
+
+export const mem0DiagnosticItemSchema = z.object({
+  memoryId: z.uuid(),
+  character: conversationCharacterSchema,
+  content: z.string(),
+  memoryStatus: memoryStatusSchema,
+  expectedInMem0: z.boolean(),
+  indexStatus: z.enum(["not_indexed", "pending", "synced", "failed"]),
+  externalId: z.string().nullable(),
+  indexRevision: z.string().nullable(),
+  attemptCount: z.number().int().nonnegative(),
+  lastErrorCode: z.string().nullable(),
+  syncedAt: z.iso.datetime().nullable(),
+  existsInMem0: z.boolean(),
+  mem0Content: z.string().nullable(),
+  contentMatches: z.boolean().nullable(),
+});
+
+export const mem0OrphanItemSchema = z.object({
+  externalId: z.string(),
+  localMemoryId: z.string().nullable(),
+  content: z.string(),
+});
+
+export const mem0DiagnosticsResponseSchema = z.object({
+  enabled: z.boolean(),
+  indexRevision: z.string().nullable(),
+  items: z.array(mem0DiagnosticItemSchema),
+  orphaned: z.array(mem0OrphanItemSchema),
+});
+export type Mem0DiagnosticsResponse = z.infer<
+  typeof mem0DiagnosticsResponseSchema
+>;
+
+export const mem0SearchRequestSchema = z
+  .object({
+    userId: z.uuid().optional(),
+    characterId: z.uuid(),
+    query: z.string().trim().min(1).max(1_000),
+    limit: z.number().int().min(1).max(20).default(8),
+    threshold: z.number().min(0).max(1).default(0),
+  })
+  .strict();
+
+export const mem0SearchResponseSchema = z.object({
+  indexRevision: z.string().nullable(),
+  results: z.array(
+    z.object({
+      externalId: z.string(),
+      localMemoryId: z.string().nullable(),
+      content: z.string(),
+      score: z.number().nullable(),
+    }),
+  ),
+});
+export type Mem0SearchResponse = z.infer<typeof mem0SearchResponseSchema>;

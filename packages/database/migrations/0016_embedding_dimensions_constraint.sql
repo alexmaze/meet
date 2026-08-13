@@ -1,0 +1,1 @@
+ALTER TABLE "provider_profiles" ADD CONSTRAINT "provider_profiles_embedding_dimensions_valid" CHECK (("kind" = 'embedding' AND "embedding_dimensions" BETWEEN 1 AND 4096) OR ("kind" <> 'embedding' AND "embedding_dimensions" IS NULL));

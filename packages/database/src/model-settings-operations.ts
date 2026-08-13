@@ -1,9 +1,10 @@
-import type {
-  CreateModelConnectionRequest,
-  CreateModelProfileRequest,
-  ModelPurpose,
-  UpdateModelConnectionRequest,
-  UpdateModelProfileRequest,
+import {
+  BUILTIN_EMBEDDING_MODELS,
+  type CreateModelConnectionRequest,
+  type CreateModelProfileRequest,
+  type ModelPurpose,
+  type UpdateModelConnectionRequest,
+  type UpdateModelProfileRequest,
 } from "@meet/protocol";
 import { randomUUID } from "node:crypto";
 import {
@@ -21,6 +22,7 @@ import type { Database } from "./client.js";
 import {
   aiWorkItems,
   characters,
+  conversationSummaryCheckpoints,
   modelConfigurationAuditEvents,
   modelConnections,
   modelPurposeBindings,
@@ -54,11 +56,25 @@ export type ResolvedModelRuntime = {
   connection: ModelConnectionRecord;
 };
 
+export type ResolvedMemoryEmbeddingConfiguration =
+  | {
+      mode: "external";
+      apiKey: string;
+      baseUrl: string;
+      model: string;
+      dimensions: number;
+    }
+  | {
+      mode: "builtin";
+      model: string;
+      dimensions: number;
+    };
+
 export async function listModelSettings(
   db: Database,
 ): Promise<ModelSettingsSnapshot> {
-  const [connections, models, voices, bindings, workCounts] = await Promise.all(
-    [
+  const [connections, models, voices, bindings, workCounts, checkpointCounts] =
+    await Promise.all([
       db
         .select()
         .from(modelConnections)
@@ -85,8 +101,20 @@ export async function listModelSettings(
         .from(aiWorkItems)
         .where(inArray(aiWorkItems.status, ["waiting_configuration", "failed"]))
         .groupBy(aiWorkItems.status),
-    ],
-  );
+      db
+        .select({
+          status: conversationSummaryCheckpoints.status,
+          value: count(),
+        })
+        .from(conversationSummaryCheckpoints)
+        .where(
+          inArray(conversationSummaryCheckpoints.status, [
+            "waiting_configuration",
+            "failed",
+          ]),
+        )
+        .groupBy(conversationSummaryCheckpoints.status),
+    ]);
   const bindingCounts = new Map<string, number>();
   for (const binding of bindings) {
     bindingCounts.set(
@@ -99,11 +127,26 @@ export async function listModelSettings(
     .from(aiWorkItems)
     .where(isNotNull(aiWorkItems.modelProfileId))
     .groupBy(aiWorkItems.modelProfileId);
-  const workReferences = new Map(
+  const checkpointReferenceRows = await db
+    .select({
+      modelProfileId: conversationSummaryCheckpoints.modelProfileId,
+      value: count(),
+    })
+    .from(conversationSummaryCheckpoints)
+    .where(isNotNull(conversationSummaryCheckpoints.modelProfileId))
+    .groupBy(conversationSummaryCheckpoints.modelProfileId);
+  const workReferences = new Map<string, number>(
     workReferenceRows.flatMap((row) =>
       row.modelProfileId ? [[row.modelProfileId, Number(row.value)]] : [],
     ),
   );
+  for (const row of checkpointReferenceRows) {
+    if (!row.modelProfileId) continue;
+    workReferences.set(
+      row.modelProfileId,
+      (workReferences.get(row.modelProfileId) ?? 0) + Number(row.value),
+    );
+  }
   return {
     connections,
     models: models.map(({ profile, characterReferences }) => {
@@ -127,13 +170,20 @@ export async function listModelSettings(
       modelProfileId: binding.modelProfileId,
     })),
     work: {
-      waiting: Number(
-        workCounts.find((row) => row.status === "waiting_configuration")
-          ?.value ?? 0,
-      ),
-      failed: Number(
-        workCounts.find((row) => row.status === "failed")?.value ?? 0,
-      ),
+      waiting:
+        Number(
+          workCounts.find((row) => row.status === "waiting_configuration")
+            ?.value ?? 0,
+        ) +
+        Number(
+          checkpointCounts.find((row) => row.status === "waiting_configuration")
+            ?.value ?? 0,
+        ),
+      failed:
+        Number(workCounts.find((row) => row.status === "failed")?.value ?? 0) +
+        Number(
+          checkpointCounts.find((row) => row.status === "failed")?.value ?? 0,
+        ),
     },
   };
 }
@@ -193,6 +243,32 @@ export async function stageModelConnectionUpdate(
       .limit(1);
     if (!current) return "not_found";
     if (current.revision !== input.revision) return "conflict";
+    if (current.adapter === "builtin_fastembed") {
+      const [updated] = await tx
+        .update(modelConnections)
+        .set({
+          displayName: input.displayName ?? current.displayName,
+          revision: current.revision + 1,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(modelConnections.id, connectionId),
+            eq(modelConnections.revision, input.revision),
+          ),
+        )
+        .returning();
+      if (!updated) return "conflict";
+      await audit(
+        tx,
+        actorUserId,
+        "connection_updated",
+        "connection",
+        connectionId,
+        { revision: updated.revision },
+      );
+      return "updated";
+    }
     const endpoint =
       input.endpoint ?? current.pendingEndpoint ?? current.endpoint;
     const apiKey =
@@ -250,6 +326,15 @@ export async function createModelProfile(
   if (!connection || !kindMatchesAdapter(input.kind, connection.adapter)) {
     return null;
   }
+  if (
+    connection.adapter === "builtin_fastembed" &&
+    !BUILTIN_EMBEDDING_MODELS.some(
+      ({ id, dimensions }) =>
+        input.model === id && input.embeddingDimensions === dimensions,
+    )
+  ) {
+    return null;
+  }
   const id = randomUUID();
   const provider = providerForAdapter(connection.adapter);
   return db.transaction(async (tx) => {
@@ -300,6 +385,7 @@ export async function createModelProfile(
           input.kind === "realtime_voice"
             ? { audioInput: true, textInput: true, imageInput: false }
             : { audioInput: false, textInput: true, imageInput: false },
+        embeddingDimensions: input.embeddingDimensions ?? null,
         connectionId: input.connectionId,
         kind: input.kind,
         status: "draft",
@@ -336,7 +422,11 @@ export async function updateModelProfile(
       return "not_verified";
     const modelChanged =
       input.model !== undefined && input.model !== current.model;
-    const nextStatus = modelChanged
+    const dimensionsChanged =
+      input.embeddingDimensions !== undefined &&
+      input.embeddingDimensions !== current.embeddingDimensions;
+    const configurationChanged = modelChanged || dimensionsChanged;
+    const nextStatus = configurationChanged
       ? "draft"
       : (input.status ?? current.status);
     const [updated] = await tx
@@ -344,8 +434,10 @@ export async function updateModelProfile(
       .set({
         model: input.model ?? current.model,
         displayName: input.displayName ?? current.displayName,
+        embeddingDimensions:
+          input.embeddingDimensions ?? current.embeddingDimensions,
         status: nextStatus,
-        verifiedAt: modelChanged ? null : current.verifiedAt,
+        verifiedAt: configurationChanged ? null : current.verifiedAt,
         everEnabled: current.everEnabled || nextStatus === "enabled",
         revision: current.revision + 1,
         updatedAt: new Date(),
@@ -364,7 +456,12 @@ export async function updateModelProfile(
       input.status === undefined ? "model_updated" : "model_status_changed",
       "model",
       profileId,
-      { revision: updated.revision, status: updated.status, modelChanged },
+      {
+        revision: updated.revision,
+        status: updated.status,
+        modelChanged,
+        dimensionsChanged,
+      },
     );
     return "updated";
   });
@@ -407,7 +504,21 @@ export async function deleteModelProfile(
           .where(eq(aiWorkItems.modelProfileId, profileId))
       )[0]?.value ?? 0,
     );
-    if (profile.everEnabled || refs > 0 || bindingRefs > 0 || workRefs > 0) {
+    const checkpointRefs = Number(
+      (
+        await tx
+          .select({ value: count() })
+          .from(conversationSummaryCheckpoints)
+          .where(eq(conversationSummaryCheckpoints.modelProfileId, profileId))
+      )[0]?.value ?? 0,
+    );
+    if (
+      profile.everEnabled ||
+      refs > 0 ||
+      bindingRefs > 0 ||
+      workRefs > 0 ||
+      checkpointRefs > 0
+    ) {
       return "referenced";
     }
     await tx
@@ -505,7 +616,9 @@ export async function markModelTestSucceeded(
     if (!connection) return "not_found";
     const endpoint = connection.pendingEndpoint ?? connection.endpoint;
     const apiKey = connection.pendingApiKey ?? connection.apiKey;
-    if (!endpoint || !apiKey) return "not_found";
+    if (connection.adapter !== "builtin_fastembed" && (!endpoint || !apiKey)) {
+      return "not_found";
+    }
     const now = new Date();
     await tx
       .update(modelConnections)
@@ -601,7 +714,11 @@ export async function setModelPurposeBinding(
       )
       .limit(1);
     const expectedKind =
-      purpose === "realtime_default" ? "realtime_voice" : "text";
+      purpose === "realtime_default"
+        ? "realtime_voice"
+        : purpose === "memory_embedding"
+          ? "embedding"
+          : "text";
     if (!profile || profile.kind !== expectedKind) return "invalid_model";
     await tx
       .insert(modelPurposeBindings)
@@ -648,6 +765,69 @@ export async function findResolvedModelRuntime(
   return row ?? null;
 }
 
+export async function findResolvedModelRuntimeForPurpose(
+  db: Database,
+  purpose: ModelPurpose,
+): Promise<ResolvedModelRuntime | null> {
+  const [row] = await db
+    .select({ profile: providerProfiles, connection: modelConnections })
+    .from(modelPurposeBindings)
+    .innerJoin(
+      providerProfiles,
+      and(
+        eq(modelPurposeBindings.modelProfileId, providerProfiles.id),
+        eq(providerProfiles.status, "enabled"),
+      ),
+    )
+    .innerJoin(
+      modelConnections,
+      and(
+        eq(providerProfiles.connectionId, modelConnections.id),
+        eq(modelConnections.status, "enabled"),
+      ),
+    )
+    .where(eq(modelPurposeBindings.purpose, purpose))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function resolveMemoryEmbeddingConfiguration(
+  db: Database,
+): Promise<ResolvedMemoryEmbeddingConfiguration | undefined> {
+  const runtime = await findResolvedModelRuntimeForPurpose(
+    db,
+    "memory_embedding",
+  );
+  if (
+    !runtime ||
+    runtime.profile.kind !== "embedding" ||
+    !runtime.profile.embeddingDimensions
+  ) {
+    return undefined;
+  }
+  if (runtime.connection.adapter === "builtin_fastembed") {
+    return {
+      mode: "builtin",
+      model: runtime.profile.model,
+      dimensions: runtime.profile.embeddingDimensions,
+    };
+  }
+  if (
+    runtime.connection.adapter !== "openai_embeddings" ||
+    !runtime.connection.endpoint ||
+    !runtime.connection.apiKey
+  ) {
+    return undefined;
+  }
+  return {
+    mode: "external",
+    apiKey: runtime.connection.apiKey,
+    baseUrl: runtime.connection.endpoint,
+    model: runtime.profile.model,
+    dimensions: runtime.profile.embeddingDimensions,
+  };
+}
+
 export async function findDefaultRealtimeProfileId(
   db: Database,
 ): Promise<string | null> {
@@ -678,9 +858,11 @@ function kindMatchesAdapter(
   kind: CreateModelProfileRequest["kind"],
   adapter: ModelConnectionRecord["adapter"],
 ): boolean {
-  return adapter === "openai_chat_completions"
-    ? kind === "text"
-    : kind === "realtime_voice";
+  if (adapter === "openai_chat_completions") return kind === "text";
+  if (adapter === "openai_embeddings" || adapter === "builtin_fastembed") {
+    return kind === "embedding";
+  }
+  return kind === "realtime_voice";
 }
 
 type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0];

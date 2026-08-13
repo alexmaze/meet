@@ -6,12 +6,18 @@ export const modelConnectionAdapterSchema = z.enum([
   "qwen_realtime",
   "doubao_realtime",
   "openai_chat_completions",
+  "openai_embeddings",
+  "builtin_fastembed",
 ]);
 export type ModelConnectionAdapter = z.infer<
   typeof modelConnectionAdapterSchema
 >;
 
-export const modelProfileKindSchema = z.enum(["realtime_voice", "text"]);
+export const modelProfileKindSchema = z.enum([
+  "realtime_voice",
+  "text",
+  "embedding",
+]);
 export type ModelProfileKind = z.infer<typeof modelProfileKindSchema>;
 
 export const modelConfigurationStatusSchema = z.enum([
@@ -27,6 +33,7 @@ export const modelPurposeSchema = z.enum([
   "realtime_default",
   "conversation_summary",
   "memory_extraction",
+  "memory_embedding",
 ]);
 export type ModelPurpose = z.infer<typeof modelPurposeSchema>;
 
@@ -40,7 +47,7 @@ export const modelConnectionSchema = z
     id: z.uuid(),
     adapter: modelConnectionAdapterSchema,
     displayName: trimmed(120),
-    endpoint: z.url(),
+    endpoint: z.url().nullable(),
     compatibilityPreset: textCompatibilityPresetSchema.nullable(),
     status: modelConfigurationStatusSchema,
     hasCredential: z.boolean(),
@@ -57,11 +64,39 @@ export const createModelConnectionRequestSchema = z
   .object({
     adapter: modelConnectionAdapterSchema,
     displayName: trimmed(120),
-    endpoint: z.url(),
-    apiKey: trimmed(8_000),
+    endpoint: z.url().optional(),
+    apiKey: trimmed(8_000).optional(),
     compatibilityPreset: textCompatibilityPresetSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    const builtin = value.adapter === "builtin_fastembed";
+    if (!builtin && !value.endpoint) {
+      context.addIssue({
+        code: "custom",
+        path: ["endpoint"],
+        message: "外部连接必须填写端点。",
+      });
+    }
+    if (!builtin && !value.apiKey) {
+      context.addIssue({
+        code: "custom",
+        path: ["apiKey"],
+        message: "外部连接必须填写 API 密钥。",
+      });
+    }
+    if (
+      builtin &&
+      (value.endpoint !== undefined ||
+        value.apiKey !== undefined ||
+        value.compatibilityPreset !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "内置 Embedding 连接不接受端点或密钥。",
+      });
+    }
+  });
 export type CreateModelConnectionRequest = z.infer<
   typeof createModelConnectionRequestSchema
 >;
@@ -87,6 +122,58 @@ export type UpdateModelConnectionRequest = z.infer<
   typeof updateModelConnectionRequestSchema
 >;
 
+export const BUILTIN_EMBEDDING_MODELS = [
+  {
+    id: "fast-bge-small-zh-v1.5",
+    displayName: "BGE Small 中文 v1.5（内置）",
+    dimensions: 512,
+    language: "中文",
+    recommended: true,
+  },
+  {
+    id: "fast-multilingual-e5-large",
+    displayName: "Multilingual E5 Large（内置）",
+    dimensions: 1_024,
+    language: "多语言",
+    recommended: false,
+  },
+  {
+    id: "fast-bge-small-en-v1.5",
+    displayName: "BGE Small English v1.5（内置）",
+    dimensions: 384,
+    language: "英文",
+    recommended: false,
+  },
+  {
+    id: "fast-bge-base-en-v1.5",
+    displayName: "BGE Base English v1.5（内置）",
+    dimensions: 768,
+    language: "英文",
+    recommended: false,
+  },
+  {
+    id: "fast-bge-small-en",
+    displayName: "BGE Small English（内置）",
+    dimensions: 384,
+    language: "英文",
+    recommended: false,
+  },
+  {
+    id: "fast-bge-base-en",
+    displayName: "BGE Base English（内置）",
+    dimensions: 768,
+    language: "英文",
+    recommended: false,
+  },
+  {
+    id: "fast-all-MiniLM-L6-v2",
+    displayName: "All MiniLM L6 v2（内置）",
+    dimensions: 384,
+    language: "英文",
+    recommended: false,
+  },
+] as const;
+
 export const modelProfileSchema = z
   .object({
     id: z.uuid(),
@@ -98,6 +185,7 @@ export const modelProfileSchema = z
     status: modelConfigurationStatusSchema,
     revision: z.number().int().positive(),
     verifiedAt: z.iso.datetime().nullable(),
+    embeddingDimensions: z.number().int().min(1).max(4_096).nullable(),
     referenceCount: z.number().int().nonnegative(),
     characterReferenceCount: z.number().int().nonnegative(),
     purposeReferenceCount: z.number().int().nonnegative(),
@@ -114,8 +202,25 @@ export const createModelProfileRequestSchema = z
     kind: modelProfileKindSchema,
     model: trimmed(160),
     displayName: trimmed(120),
+    embeddingDimensions: z.number().int().min(1).max(4_096).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.kind === "embedding" && !value.embeddingDimensions) {
+      context.addIssue({
+        code: "custom",
+        path: ["embeddingDimensions"],
+        message: "Embedding 模型必须填写向量维度。",
+      });
+    }
+    if (value.kind !== "embedding" && value.embeddingDimensions !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["embeddingDimensions"],
+        message: "只有 Embedding 模型可以配置向量维度。",
+      });
+    }
+  });
 export type CreateModelProfileRequest = z.infer<
   typeof createModelProfileRequestSchema
 >;
@@ -125,6 +230,7 @@ export const updateModelProfileRequestSchema = z
     revision: z.number().int().positive(),
     model: trimmed(160).optional(),
     displayName: trimmed(120).optional(),
+    embeddingDimensions: z.number().int().min(1).max(4_096).optional(),
     status: modelConfigurationStatusSchema.optional(),
   })
   .strict()
@@ -132,6 +238,7 @@ export const updateModelProfileRequestSchema = z
     (value) =>
       value.model !== undefined ||
       value.displayName !== undefined ||
+      value.embeddingDimensions !== undefined ||
       value.status !== undefined,
     { message: "至少需要修改一个模型字段。" },
   );

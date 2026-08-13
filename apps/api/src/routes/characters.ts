@@ -1,14 +1,19 @@
 import {
   characterIdParamsSchema,
+  conversationRuntimeSnapshotSchema,
   conversationRealtimeQuerySchema,
   createCharacterRequestSchema,
   deleteCharacterRequestSchema,
   doubaoRealtimeModelSchema,
   emptyCharacterActionRequestSchema,
   qwenRealtimeModelSchema,
+  CURRENT_CONTEXT_POLICY_VERSION,
   updateCharacterRequestSchema,
   updateCharacterVisibilityRequestSchema,
   voiceProfileIdParamsSchema,
+  type CharacterRuntimeResponse,
+  type ConversationRuntimeSnapshot,
+  type RealtimeProviderKind,
   type UserAccount,
 } from "@meet/protocol";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -493,37 +498,47 @@ export async function registerCharacterRoutes(
 
         try {
           // 角色可见性检查必须早于传输参数检查，避免枚举私人角色。
-          const runtime = await characterService.runtime(
-            actor,
-            params.data.characterId,
-          );
+          await characterService.assertVisible(actor, params.data.characterId);
           const query = conversationRealtimeQuerySchema.safeParse(
             request.query,
           );
           if (!query.success) {
             return invalidCharacterRequest(reply);
           }
-          const continuity = await conversationService.realtimeContext(
+          let continuity = await conversationService.realtimeContext(
             actor,
             query.data.conversationId,
             params.data.characterId,
           );
-          const provider = runtime.realtime.provider;
-          const modelIsValid =
-            (provider === "qwen" &&
-              qwenRealtimeModelSchema.safeParse(runtime.realtime.model)
-                .success) ||
-            (provider === "doubao" &&
-              doubaoRealtimeModelSchema.safeParse(runtime.realtime.model)
-                .success);
-          if (!modelIsValid || (provider !== "qwen" && provider !== "doubao")) {
+          if (!continuity.runtimeSnapshot) {
+            const currentRuntime = await characterService.runtime(
+              actor,
+              params.data.characterId,
+            );
+            continuity = await conversationService.realtimeContext(
+              actor,
+              query.data.conversationId,
+              params.data.characterId,
+              toConversationRuntimeSnapshot(currentRuntime),
+            );
+          }
+          const runtime = continuity.runtimeSnapshot;
+          if (!runtime) {
+            throw new CharacterServiceError(
+              "CHARACTER_REALTIME_UNAVAILABLE",
+              "无法固定本次通话的角色与模型配置。",
+              503,
+            );
+          }
+          const provider = runtime.provider;
+          if (!isSupportedRealtimeModel(provider, runtime.model)) {
             throw new CharacterServiceError(
               "CHARACTER_REALTIME_UNAVAILABLE",
               "该角色当前没有可用的实时语音模型。",
               409,
             );
           }
-          if (!modelSettings || !runtime.realtime.realtimeModelProfileId) {
+          if (!modelSettings) {
             throw new CharacterServiceError(
               "CHARACTER_REALTIME_UNAVAILABLE",
               "模型设置服务尚未就绪。",
@@ -531,7 +546,8 @@ export async function registerCharacterRoutes(
             );
           }
           const configured = await modelSettings.resolveRuntime(
-            runtime.realtime.realtimeModelProfileId,
+            runtime.realtimeModelProfileId,
+            false,
           );
           const expectedAdapter =
             provider === "qwen" ? "qwen_realtime" : "doubao_realtime";
@@ -559,12 +575,16 @@ export async function registerCharacterRoutes(
             adapter: configured.connection.adapter,
             endpoint: configured.connection.endpoint,
             apiKey: configured.connection.apiKey,
-            model: runtime.realtime.model,
-            voice: runtime.realtime.voice,
-            instructions: runtime.realtime.instructions,
+            model: runtime.model,
+            voice: runtime.voice,
+            instructions: runtime.instructions,
             relationshipContext: continuity.relationshipContext,
             history: continuity.messages,
           });
+          request.log.debug(
+            { context: continuity.diagnostics },
+            "Realtime context assembled",
+          );
         } catch (error) {
           return sendCharacterError(reply, error);
         }
@@ -616,6 +636,52 @@ export async function registerCharacterRoutes(
       });
     },
   );
+}
+
+function toConversationRuntimeSnapshot(
+  runtime: CharacterRuntimeResponse,
+): ConversationRuntimeSnapshot {
+  const realtimeModelProfileId = runtime.realtime.realtimeModelProfileId;
+  if (!realtimeModelProfileId) {
+    throw new CharacterServiceError(
+      "CHARACTER_REALTIME_UNAVAILABLE",
+      "角色尚未绑定可用的实时模型。",
+      409,
+    );
+  }
+  if (
+    !isSupportedRealtimeModel(runtime.realtime.provider, runtime.realtime.model)
+  ) {
+    throw new CharacterServiceError(
+      "CHARACTER_REALTIME_UNAVAILABLE",
+      "该角色当前没有可用的实时语音模型。",
+      409,
+    );
+  }
+  return conversationRuntimeSnapshotSchema.parse({
+    characterRevision: runtime.character.revision,
+    realtimeModelProfileId,
+    provider: runtime.realtime.provider,
+    model: runtime.realtime.model,
+    voice: runtime.realtime.voice,
+    instructions: runtime.realtime.instructions,
+    firstSpeaker: runtime.realtime.firstSpeaker,
+    openingLine: runtime.realtime.openingLine ?? null,
+    contextPolicyVersion: CURRENT_CONTEXT_POLICY_VERSION,
+  });
+}
+
+function isSupportedRealtimeModel(
+  provider: RealtimeProviderKind,
+  model: string,
+): provider is "qwen" | "doubao" {
+  if (provider === "qwen") {
+    return qwenRealtimeModelSchema.safeParse(model).success;
+  }
+  if (provider === "doubao") {
+    return doubaoRealtimeModelSchema.safeParse(model).success;
+  }
+  return false;
 }
 
 async function authenticateActor(

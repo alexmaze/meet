@@ -1,7 +1,24 @@
-import type { CharacterMemory, ReviewMemoryRequest } from "@meet/protocol";
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import type {
+  CharacterMemory,
+  Mem0DiagnosticsResponse,
+  Mem0SearchResponse,
+  ReviewMemoryRequest,
+} from "@meet/protocol";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+} from "react";
 
-import { MemoryApiError, listMemories, reviewMemory } from "./memory-api.js";
+import {
+  getMem0Diagnostics,
+  MemoryApiError,
+  listMemories,
+  reviewMemory,
+  searchMem0,
+} from "./memory-api.js";
 
 type MemoryFilter = "all" | "suggested" | "active";
 
@@ -19,6 +36,7 @@ export default function MemoryPage({
   const [characterId, setCharacterId] = useState("all");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
   const suggestedCount = useMemo(
     () => memories.filter((memory) => memory.status === "suggested").length,
@@ -132,15 +150,31 @@ export default function MemoryPage({
           <h1>长期记忆</h1>
           <p>按角色整理你们共同记住的事情，临时对话不会写入这里。</p>
         </div>
-        <button
-          type="button"
-          className="ui-button ui-button-secondary"
-          disabled={loading}
-          onClick={() => setReload((current) => current + 1)}
-        >
-          {loading ? "刷新中…" : "刷新"}
-        </button>
+        <div className="memory-heading-actions">
+          <button
+            type="button"
+            className="ui-button ui-button-secondary"
+            onClick={() => setDiagnosticsOpen((current) => !current)}
+          >
+            {diagnosticsOpen ? "关闭 Mem0 诊断" : "Mem0 诊断"}
+          </button>
+          <button
+            type="button"
+            className="ui-button ui-button-secondary"
+            disabled={loading}
+            onClick={() => setReload((current) => current + 1)}
+          >
+            {loading ? "刷新中…" : "刷新"}
+          </button>
+        </div>
       </header>
+
+      {diagnosticsOpen && (
+        <Mem0Diagnostics
+          characters={characters}
+          onUnauthorized={onUnauthorized}
+        />
+      )}
 
       {!loading && memories.length > 0 && (
         <>
@@ -247,6 +281,285 @@ export default function MemoryPage({
       )}
     </div>
   );
+}
+
+function Mem0Diagnostics({
+  characters,
+  onUnauthorized,
+}: {
+  characters: CharacterMemory["character"][];
+  onUnauthorized: () => void;
+}) {
+  const [diagnostics, setDiagnostics] =
+    useState<Mem0DiagnosticsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [reload, setReload] = useState(0);
+  const [characterId, setCharacterId] = useState("");
+  const [query, setQuery] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [searchResult, setSearchResult] = useState<Mem0SearchResponse | null>(
+    null,
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    void getMem0Diagnostics(controller.signal)
+      .then((result) => {
+        setDiagnostics(result);
+        setLoading(false);
+      })
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return;
+        if (cause instanceof MemoryApiError && cause.status === 401) {
+          onUnauthorized();
+          return;
+        }
+        setError(
+          cause instanceof MemoryApiError
+            ? cause.message
+            : "无法读取 Mem0 诊断信息。",
+        );
+        setLoading(false);
+      });
+    return () => controller.abort();
+  }, [onUnauthorized, reload]);
+
+  const visibleItems = diagnostics?.items.filter(
+    (item) => !characterId || item.character.id === characterId,
+  );
+  const diagnosticCharacters = Array.from(
+    new Map(
+      [
+        ...characters,
+        ...(diagnostics?.items.map((item) => item.character) ?? []),
+      ].map((character) => [character.id, character]),
+    ).values(),
+  );
+  const mismatches =
+    diagnostics?.enabled === true
+      ? diagnostics.items.filter(
+          (item) =>
+            (item.expectedInMem0 && !item.existsInMem0) ||
+            item.contentMatches === false ||
+            item.indexStatus === "failed",
+        ).length
+      : 0;
+
+  const runSearch = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!characterId || !query.trim() || searching) return;
+    setSearching(true);
+    setError("");
+    try {
+      setSearchResult(await searchMem0({ characterId, query: query.trim() }));
+    } catch (cause) {
+      if (cause instanceof MemoryApiError && cause.status === 401) {
+        onUnauthorized();
+        return;
+      }
+      setError(
+        cause instanceof MemoryApiError ? cause.message : "Mem0 检索测试失败。",
+      );
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  return (
+    <section className="mem0-diagnostics" aria-label="Mem0 诊断">
+      <header>
+        <div>
+          <h2>Mem0 索引诊断</h2>
+          <p>对照业务记忆与 Mem0 中的真实记录，并测试语义召回。</p>
+        </div>
+        <button
+          type="button"
+          className="ui-button ui-button-ghost"
+          disabled={loading}
+          onClick={() => setReload((current) => current + 1)}
+        >
+          {loading ? "读取中…" : "重新检查"}
+        </button>
+      </header>
+
+      {error && (
+        <div className="product-notice error" role="alert">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <p className="mem0-diagnostics-loading">正在读取 Mem0 索引…</p>
+      ) : diagnostics ? (
+        <>
+          <div className="mem0-diagnostics-summary">
+            <div>
+              <span>状态</span>
+              <strong>{diagnostics.enabled ? "已启用" : "未启用"}</strong>
+            </div>
+            <div>
+              <span>业务记忆</span>
+              <strong>{diagnostics.items.length}</strong>
+            </div>
+            <div>
+              <span>异常</span>
+              <strong>{mismatches}</strong>
+            </div>
+            <div>
+              <span>孤儿记录</span>
+              <strong>{diagnostics.orphaned.length}</strong>
+            </div>
+          </div>
+          {diagnostics.indexRevision && (
+            <p className="mem0-index-revision">
+              索引修订：<code>{diagnostics.indexRevision}</code>
+            </p>
+          )}
+
+          <label className="mem0-character-select">
+            角色范围
+            <select
+              value={characterId}
+              onChange={(event) => {
+                setCharacterId(event.target.value);
+                setSearchResult(null);
+              }}
+            >
+              <option value="">全部角色</option>
+              {diagnosticCharacters.map((character) => (
+                <option value={character.id} key={character.id}>
+                  {character.name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="mem0-record-list">
+            {visibleItems?.map((item) => (
+              <article className="mem0-record" key={item.memoryId}>
+                <header>
+                  <strong>{item.character.name}</strong>
+                  <span className={`mem0-index-status ${item.indexStatus}`}>
+                    {mem0IndexStatusLabel(item.indexStatus)}
+                  </span>
+                </header>
+                <p>{item.content}</p>
+                <dl>
+                  <div>
+                    <dt>业务 ID</dt>
+                    <dd>{item.memoryId}</dd>
+                  </div>
+                  <div>
+                    <dt>Mem0 ID</dt>
+                    <dd>{item.externalId ?? "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>实际存在</dt>
+                    <dd>{item.existsInMem0 ? "是" : "否"}</dd>
+                  </div>
+                  <div>
+                    <dt>同步尝试</dt>
+                    <dd>{item.attemptCount}</dd>
+                  </div>
+                </dl>
+                {item.lastErrorCode && (
+                  <p className="mem0-record-error">
+                    最近错误：{item.lastErrorCode}
+                  </p>
+                )}
+                {item.mem0Content && (
+                  <details>
+                    <summary>
+                      查看 Mem0 中的正文
+                      {item.contentMatches === false
+                        ? "（与业务库不一致）"
+                        : ""}
+                    </summary>
+                    <blockquote>{item.mem0Content}</blockquote>
+                  </details>
+                )}
+              </article>
+            ))}
+          </div>
+
+          {diagnostics.orphaned.length > 0 && (
+            <details className="mem0-orphans">
+              <summary>查看 {diagnostics.orphaned.length} 条孤儿记录</summary>
+              {diagnostics.orphaned.map((item) => (
+                <article key={item.externalId}>
+                  <code>{item.externalId}</code>
+                  <p>{item.content}</p>
+                  <small>业务 ID：{item.localMemoryId ?? "缺失"}</small>
+                </article>
+              ))}
+            </details>
+          )}
+
+          <form className="mem0-search-test" onSubmit={runSearch}>
+            <h3>语义召回测试</h3>
+            <p>选择一个角色并输入查询，结果来自当前 Mem0 索引。</p>
+            <label>
+              查询文本
+              <input
+                value={query}
+                maxLength={1000}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="例如：我平时喜欢做什么？"
+              />
+            </label>
+            <button
+              type="submit"
+              className="ui-button ui-button-primary"
+              disabled={
+                !diagnostics.enabled ||
+                !characterId ||
+                !query.trim() ||
+                searching
+              }
+            >
+              {searching ? "检索中…" : "测试检索"}
+            </button>
+            {!characterId && <small>请先在上方选择具体角色。</small>}
+          </form>
+
+          {searchResult && (
+            <div className="mem0-search-results">
+              <h3>命中结果（{searchResult.results.length}）</h3>
+              {searchResult.results.length === 0 ? (
+                <p>没有达到条件的记忆。</p>
+              ) : (
+                searchResult.results.map((item, index) => (
+                  <article key={item.externalId}>
+                    <strong>#{index + 1}</strong>
+                    <span>
+                      分数：
+                      {item.score === null ? "—" : item.score.toFixed(4)}
+                    </span>
+                    <p>{item.content}</p>
+                    <small>Mem0 ID：{item.externalId}</small>
+                  </article>
+                ))
+              )}
+            </div>
+          )}
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+function mem0IndexStatusLabel(
+  status: Mem0DiagnosticsResponse["items"][number]["indexStatus"],
+) {
+  return {
+    not_indexed: "未建索引",
+    pending: "等待同步",
+    synced: "已同步",
+    failed: "同步失败",
+  }[status];
 }
 
 function MemoryGroup({

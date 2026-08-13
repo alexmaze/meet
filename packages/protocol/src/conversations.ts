@@ -1,6 +1,15 @@
 import { z } from "zod";
 
-import { visualProfileSchema } from "./characters.js";
+import {
+  firstSpeakerSchema,
+  realtimeProviderSchema,
+  visualProfileSchema,
+} from "./characters.js";
+
+export const contextPolicyVersionSchema = z.enum(["context-v1"]);
+export type ContextPolicyVersion = z.infer<typeof contextPolicyVersionSchema>;
+export const CURRENT_CONTEXT_POLICY_VERSION: ContextPolicyVersion =
+  "context-v1";
 
 export const conversationModeSchema = z.enum(["normal", "temporary"]);
 export type ConversationMode = z.infer<typeof conversationModeSchema>;
@@ -50,6 +59,24 @@ export const conversationMessageSchema = z.object({
 });
 
 export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
+
+export const conversationRuntimeSnapshotSchema = z
+  .object({
+    characterRevision: z.number().int().positive(),
+    realtimeModelProfileId: z.uuid(),
+    provider: realtimeProviderSchema,
+    model: z.string().trim().min(1).max(120),
+    voice: z.string().trim().min(1).max(120),
+    instructions: z.string().trim().min(1).max(16_000),
+    firstSpeaker: firstSpeakerSchema,
+    openingLine: z.string().trim().min(1).max(500).nullable(),
+    contextPolicyVersion: contextPolicyVersionSchema,
+  })
+  .strict();
+
+export type ConversationRuntimeSnapshot = z.infer<
+  typeof conversationRuntimeSnapshotSchema
+>;
 
 export const createConversationRequestSchema = z
   .object({

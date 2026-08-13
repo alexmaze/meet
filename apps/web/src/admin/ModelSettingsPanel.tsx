@@ -1,11 +1,14 @@
-import type {
-  ModelConnectionAdapter,
-  ModelConnection,
-  ModelProfile,
-  ModelProfileKind,
-  ModelPurpose,
-  ModelSettingsResponse,
+import {
+  BUILTIN_EMBEDDING_MODELS,
+  type ModelConnectionAdapter,
+  type ModelConnection,
+  type ModelProfile,
+  type ModelProfileKind,
+  type ModelPurpose,
+  type ModelSettingsResponse,
 } from "@meet/protocol";
+
+type BuiltinEmbeddingModelId = (typeof BUILTIN_EMBEDDING_MODELS)[number]["id"];
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import {
@@ -179,6 +182,17 @@ export default function ModelSettingsPanel({
                       <strong>{settings.work.waiting}</strong>
                       <small>补齐文本用途后会自动继续</small>
                     </div>
+                    <div>
+                      <span>记忆语义索引</span>
+                      <strong>
+                        {settings.bindings.find(
+                          (binding) => binding.purpose === "memory_embedding",
+                        )?.modelProfileId
+                          ? "已配置"
+                          : "未配置"}
+                      </strong>
+                      <small>由内置 Mem0 与当前 PostgreSQL 承载</small>
+                    </div>
                   </section>
                   <Bindings
                     settings={settings}
@@ -196,7 +210,9 @@ export default function ModelSettingsPanel({
                     <ol>
                       <li>添加供应商连接并保存端点与密钥</li>
                       <li>添加模型，使用一个可用音色完成真实测试</li>
-                      <li>启用模型，再回到这里设置实时、摘要与记忆用途</li>
+                      <li>
+                        启用模型，再回到这里设置实时、摘要、提取与向量化用途
+                      </li>
                     </ol>
                   </section>
                   <p className="profile-privacy-note settings-security-note">
@@ -288,14 +304,14 @@ function ConnectionCard({
   onSave: (input: {
     revision: number;
     displayName: string;
-    endpoint: string;
+    endpoint?: string;
     apiKey?: string;
     compatibilityPreset?: "standard" | "dashscope";
   }) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [displayName, setDisplayName] = useState(connection.displayName);
-  const [endpoint, setEndpoint] = useState(connection.endpoint);
+  const [endpoint, setEndpoint] = useState(connection.endpoint ?? "");
   const [apiKey, setApiKey] = useState("");
   const [preset, setPreset] = useState<"standard" | "dashscope">(
     connection.compatibilityPreset ?? "standard",
@@ -305,10 +321,14 @@ function ConnectionCard({
       <article className="model-setting-card">
         <strong>{connection.displayName}</strong>
         <span>{adapterLabels[connection.adapter]}</span>
-        <small>{connection.endpoint}</small>
+        {connection.endpoint && <small>{connection.endpoint}</small>}
         <small>
-          {connection.hasCredential ? "密钥已配置（不可查看）" : "密钥未配置"} ·{" "}
-          {statusLabels[connection.status]}
+          {connection.adapter === "builtin_fastembed"
+            ? "本地加载 · 无需密钥"
+            : connection.hasCredential
+              ? "密钥已配置（不可查看）"
+              : "密钥未配置"}{" "}
+          · {statusLabels[connection.status]}
           {connection.hasPendingChanges ? " · 有候选修订待测试" : ""}
         </small>
         <div className="model-actions">
@@ -331,8 +351,9 @@ function ConnectionCard({
         onSave({
           revision: connection.revision,
           displayName,
-          endpoint,
-          ...(apiKey ? { apiKey } : {}),
+          ...(connection.adapter === "builtin_fastembed"
+            ? {}
+            : { endpoint, ...(apiKey ? { apiKey } : {}) }),
           ...(connection.adapter === "openai_chat_completions"
             ? { compatibilityPreset: preset }
             : {}),
@@ -350,24 +371,28 @@ function ConnectionCard({
           onChange={(event) => setDisplayName(event.target.value)}
         />
       </label>
-      <label>
-        端点 / Base URL
-        <input
-          required
-          type="url"
-          value={endpoint}
-          onChange={(event) => setEndpoint(event.target.value)}
-        />
-      </label>
-      <label>
-        新 API 密钥（留空保留）
-        <input
-          type="password"
-          autoComplete="new-password"
-          value={apiKey}
-          onChange={(event) => setApiKey(event.target.value)}
-        />
-      </label>
+      {connection.adapter !== "builtin_fastembed" && (
+        <>
+          <label>
+            端点 / Base URL
+            <input
+              required
+              type="url"
+              value={endpoint}
+              onChange={(event) => setEndpoint(event.target.value)}
+            />
+          </label>
+          <label>
+            新 API 密钥（留空保留）
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+            />
+          </label>
+        </>
+      )}
       {connection.adapter === "openai_chat_completions" && (
         <label>
           兼容预设
@@ -404,8 +429,8 @@ function ConnectionForm({
   onSubmit: (input: {
     adapter: ModelConnectionAdapter;
     displayName: string;
-    endpoint: string;
-    apiKey: string;
+    endpoint?: string;
+    apiKey?: string;
     compatibilityPreset?: "standard" | "dashscope";
   }) => void;
 }) {
@@ -420,8 +445,7 @@ function ConnectionForm({
     onSubmit({
       adapter,
       displayName,
-      endpoint,
-      apiKey,
+      ...(adapter === "builtin_fastembed" ? {} : { endpoint, apiKey }),
       ...(adapter === "openai_chat_completions"
         ? { compatibilityPreset: preset }
         : {}),
@@ -430,7 +454,7 @@ function ConnectionForm({
   return (
     <form className="settings-group model-settings-section" onSubmit={submit}>
       <h3>添加新连接</h3>
-      <p>选择适配器，并填写服务商提供的端点与密钥。</p>
+      <p>可选择进程内本地模型，或填写外部服务的端点与密钥。</p>
       <label>
         协议
         <select
@@ -444,6 +468,8 @@ function ConnectionForm({
           <option value="openai_chat_completions">
             OpenAI-compatible 文本
           </option>
+          <option value="openai_embeddings">OpenAI-compatible Embedding</option>
+          <option value="builtin_fastembed">内置本地 Embedding</option>
         </select>
       </label>
       <label>
@@ -454,26 +480,34 @@ function ConnectionForm({
           onChange={(event) => setDisplayName(event.target.value)}
         />
       </label>
-      <label>
-        端点 / Base URL
-        <input
-          required
-          type="url"
-          value={endpoint}
-          onChange={(event) => setEndpoint(event.target.value)}
-          placeholder="https://…"
-        />
-      </label>
-      <label>
-        API 密钥
-        <input
-          required
-          type="password"
-          autoComplete="new-password"
-          value={apiKey}
-          onChange={(event) => setApiKey(event.target.value)}
-        />
-      </label>
+      {adapter !== "builtin_fastembed" ? (
+        <>
+          <label>
+            端点 / Base URL
+            <input
+              required
+              type="url"
+              value={endpoint}
+              onChange={(event) => setEndpoint(event.target.value)}
+              placeholder="https://…"
+            />
+          </label>
+          <label>
+            API 密钥
+            <input
+              required
+              type="password"
+              autoComplete="new-password"
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+            />
+          </label>
+        </>
+      ) : (
+        <p className="profile-privacy-note">
+          模型只在服务端本地加载。首次测试会下载模型文件，无需 URL 或 API 密钥。
+        </p>
+      )}
       {adapter === "openai_chat_completions" && (
         <label>
           兼容预设
@@ -505,22 +539,46 @@ function ModelForm({
     kind: ModelProfileKind;
     model: string;
     displayName: string;
+    embeddingDimensions?: number;
   }) => void;
 }) {
   const [connectionId, setConnectionId] = useState("");
   const [model, setModel] = useState("");
   const [displayName, setDisplayName] = useState("");
+  const [embeddingDimensions, setEmbeddingDimensions] = useState(1536);
   const connection = connections.find((item) => item.id === connectionId);
+  const builtin = connection?.adapter === "builtin_fastembed";
+  const [builtinModelId, setBuiltinModelId] = useState<BuiltinEmbeddingModelId>(
+    BUILTIN_EMBEDDING_MODELS.find(({ recommended }) => recommended)?.id ??
+      BUILTIN_EMBEDDING_MODELS[0].id,
+  );
+  const builtinModel =
+    BUILTIN_EMBEDDING_MODELS.find(({ id }) => id === builtinModelId) ??
+    BUILTIN_EMBEDDING_MODELS[0];
   const kind: ModelProfileKind =
     connection?.adapter === "openai_chat_completions"
       ? "text"
-      : "realtime_voice";
+      : connection?.adapter === "openai_embeddings" || builtin
+        ? "embedding"
+        : "realtime_voice";
   return (
     <form
       className="settings-group model-settings-section"
       onSubmit={(event) => {
         event.preventDefault();
-        onSubmit({ connectionId, kind, model, displayName });
+        const selectedModel = builtin ? builtinModel.id : model;
+        const selectedDimensions = builtin
+          ? builtinModel.dimensions
+          : embeddingDimensions;
+        onSubmit({
+          connectionId,
+          kind,
+          model: selectedModel,
+          displayName,
+          ...(kind === "embedding"
+            ? { embeddingDimensions: selectedDimensions }
+            : {}),
+        });
       }}
     >
       <h3>添加模型</h3>
@@ -542,11 +600,27 @@ function ModelForm({
       </label>
       <label>
         模型 ID
-        <input
-          required
-          value={model}
-          onChange={(event) => setModel(event.target.value)}
-        />
+        {builtin ? (
+          <select
+            value={builtinModel.id}
+            onChange={(event) =>
+              setBuiltinModelId(event.target.value as BuiltinEmbeddingModelId)
+            }
+          >
+            {BUILTIN_EMBEDDING_MODELS.map((item) => (
+              <option value={item.id} key={item.id}>
+                {item.displayName} · {item.language} · {item.dimensions} 维
+                {item.recommended ? " · 推荐" : ""}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            required
+            value={model}
+            onChange={(event) => setModel(event.target.value)}
+          />
+        )}
       </label>
       <label>
         显示名称
@@ -556,6 +630,27 @@ function ModelForm({
           onChange={(event) => setDisplayName(event.target.value)}
         />
       </label>
+      {kind === "embedding" && (
+        <label>
+          向量维度
+          <input
+            required
+            type="number"
+            min={1}
+            max={4096}
+            value={builtin ? builtinModel.dimensions : embeddingDimensions}
+            disabled={builtin}
+            onChange={(event) =>
+              setEmbeddingDimensions(Number(event.target.value))
+            }
+          />
+          <small>
+            {builtin
+              ? "内置模型使用固定维度。"
+              : "必须与服务商该模型实际返回的维度一致。"}
+          </small>
+        </label>
+      )}
       <button disabled={disabled || !connectionId}>添加模型</button>
     </form>
   );
@@ -581,9 +676,15 @@ function Bindings({
           "realtime_default",
           "conversation_summary",
           "memory_extraction",
+          "memory_embedding",
         ] as const
       ).map((purpose) => {
-        const kind = purpose === "realtime_default" ? "realtime_voice" : "text";
+        const kind =
+          purpose === "realtime_default"
+            ? "realtime_voice"
+            : purpose === "memory_embedding"
+              ? "embedding"
+              : "text";
         const binding = settings.bindings.find(
           (item) => item.purpose === purpose,
         );
@@ -631,9 +732,15 @@ function ModelList({
   return (
     <section className="model-settings-section">
       <h3>已有模型与音色</h3>
-      {(["realtime_voice", "text"] as const).map((kind) => (
+      {(["realtime_voice", "text", "embedding"] as const).map((kind) => (
         <div className="model-kind-group" key={kind}>
-          <h4>{kind === "realtime_voice" ? "实时语音模型" : "文本模型"}</h4>
+          <h4>
+            {kind === "realtime_voice"
+              ? "实时语音模型"
+              : kind === "embedding"
+                ? "Embedding 模型"
+                : "文本模型"}
+          </h4>
           {settings.models
             .filter((model) => model.kind === kind)
             .map((model) => (
@@ -676,6 +783,9 @@ function ModelCard({
     <article className="model-setting-card">
       <strong>{model.displayName}</strong>
       <span>{model.model}</span>
+      {model.embeddingDimensions && (
+        <small>向量维度：{model.embeddingDimensions}</small>
+      )}
       <small>
         {statusLabels[model.status]} · 角色 {model.characterReferenceCount} ·
         用途 {model.purposeReferenceCount} · 待执行任务{" "}
@@ -820,6 +930,8 @@ const adapterLabels: Record<ModelConnectionAdapter, string> = {
   qwen_realtime: "千问实时语音",
   doubao_realtime: "豆包实时语音",
   openai_chat_completions: "OpenAI-compatible 文本",
+  openai_embeddings: "OpenAI-compatible Embedding",
+  builtin_fastembed: "内置本地 Embedding",
 };
 const statusLabels = {
   draft: "草稿",
@@ -830,4 +942,5 @@ const purposeLabels: Record<ModelPurpose, string> = {
   realtime_default: "新角色默认实时模型",
   conversation_summary: "会话摘要模型",
   memory_extraction: "长期记忆提取模型",
+  memory_embedding: "长期记忆向量化（内置 Mem0）",
 };

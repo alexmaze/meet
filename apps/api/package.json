@@ -17,6 +17,7 @@
     "@meet/database": "workspace:*",
     "@meet/jobs": "workspace:*",
     "@meet/media": "workspace:*",
+    "@meet/memory": "workspace:*",
     "@meet/protocol": "workspace:*",
     "drizzle-orm": "0.45.1",
     "fastify": "5.11.3",

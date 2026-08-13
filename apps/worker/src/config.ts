@@ -1,5 +1,8 @@
 import { z } from "zod";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const workspaceRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
 const envSchema = z.object({
   DATABASE_URL: z
@@ -10,12 +13,20 @@ const envSchema = z.object({
       return protocol === "postgres:" || protocol === "postgresql:";
     }, "DATABASE_URL 必须是 PostgreSQL 连接地址。"),
   MEDIA_LOCAL_DIR: z.string().trim().min(1).default("./data/media"),
+  EMBEDDING_LOCAL_CACHE_DIR: z
+    .string()
+    .trim()
+    .min(1)
+    .default("./data/embedding-models"),
 });
 
 export type WorkerConfig = {
   databaseUrl: string;
   media: {
     localDirectory: string;
+  };
+  embedding: {
+    localCacheDirectory: string;
   };
 };
 
@@ -29,7 +40,13 @@ export function loadWorkerConfig(
   return {
     databaseUrl: result.data.DATABASE_URL,
     media: {
-      localDirectory: resolve(result.data.MEDIA_LOCAL_DIR),
+      localDirectory: resolve(workspaceRoot, result.data.MEDIA_LOCAL_DIR),
+    },
+    embedding: {
+      localCacheDirectory: resolve(
+        workspaceRoot,
+        result.data.EMBEDDING_LOCAL_CACHE_DIR,
+      ),
     },
   };
 }

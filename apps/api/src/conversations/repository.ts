@@ -1,6 +1,7 @@
 import type {
   AppendConversationMessagesRequest,
   ConversationMode,
+  ConversationRuntimeSnapshot,
 } from "@meet/protocol";
 import type {
   AppendConversationMessagesResult,
@@ -28,7 +29,13 @@ export interface ConversationRepository {
     actorUserId: string,
     conversationId: string,
     characterId: string,
+    runtimeSnapshot?: ConversationRuntimeSnapshot,
   ): Promise<ConversationRealtimeContext | null>;
+  loadActiveMemoriesByIds(
+    actorUserId: string,
+    characterId: string,
+    memoryIds: string[],
+  ): Promise<Array<{ id: string; content: string; updatedAt: Date }>>;
   appendMessages(
     actorUserId: string,
     conversationId: string,

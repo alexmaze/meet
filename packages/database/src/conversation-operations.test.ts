@@ -60,6 +60,40 @@ describe("conversation message persistence", () => {
       'REFERENCES "public"."conversations"("id") ON DELETE cascade',
     );
   });
+
+  it("stores one cascading runtime snapshot per conversation", () => {
+    const path = fileURLToPath(
+      new URL(
+        "../migrations/0011_conversation_runtime_snapshot.sql",
+        import.meta.url,
+      ),
+    );
+    const migration = readFileSync(path, "utf8");
+    expect(migration).toContain(
+      'CREATE TABLE "conversation_runtime_snapshots"',
+    );
+    expect(migration).toContain('"conversation_id" uuid PRIMARY KEY NOT NULL');
+    expect(migration).toContain(
+      'REFERENCES "public"."conversations"("id") ON DELETE cascade',
+    );
+  });
+
+  it("stores versioned summary checkpoints with a stable conversation sequence", () => {
+    const path = fileURLToPath(
+      new URL(
+        "../migrations/0012_conversation_summary_checkpoints.sql",
+        import.meta.url,
+      ),
+    );
+    const migration = readFileSync(path, "utf8");
+    expect(migration).toContain(
+      'CREATE TABLE "conversation_summary_checkpoints"',
+    );
+    expect(migration).toContain(
+      '"conversation_summary_checkpoints_conversation_sequence_unique"',
+    );
+    expect(migration).toContain("ON DELETE cascade");
+  });
 });
 
 function message(

@@ -1,14 +1,19 @@
 import {
   isGuardianReadableMemoryTarget,
   listCharacterMemories,
+  listMemoryIndexDiagnostics,
   reviewCharacterMemory,
   type Database,
+  type MemoryIndexHook,
 } from "@meet/database";
 
 import type { MemoryRepository } from "./repository.js";
 
 export class PostgresMemoryRepository implements MemoryRepository {
-  constructor(private readonly db: Database) {}
+  constructor(
+    private readonly db: Database,
+    private readonly onIndex?: MemoryIndexHook,
+  ) {}
 
   list(
     targetUserId: string,
@@ -22,6 +27,18 @@ export class PostgresMemoryRepository implements MemoryRepository {
     return isGuardianReadableMemoryTarget(this.db, targetUserId);
   }
 
+  listIndexDiagnostics(
+    targetUserId: string,
+    characterId: string | undefined,
+    limit: number,
+  ) {
+    return listMemoryIndexDiagnostics(this.db, {
+      targetUserId,
+      characterId,
+      limit,
+    });
+  }
+
   review(
     actorUserId: string,
     memoryId: string,
@@ -33,6 +50,7 @@ export class PostgresMemoryRepository implements MemoryRepository {
       memoryId,
       review,
       reviewedAt,
+      onIndex: this.onIndex,
     });
   }
 }
