@@ -531,6 +531,22 @@ export async function markModelTestSucceeded(
       .update(providerProfiles)
       .set({ verifiedAt: now, revision: profile.revision + 1, updatedAt: now })
       .where(eq(providerProfiles.id, profile.id));
+    if (profile.kind === "realtime_voice") {
+      await tx
+        .update(voiceProfiles)
+        .set({
+          verifiedAt: now,
+          status: "enabled",
+          revision: sql`${voiceProfiles.revision} + 1`,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(voiceProfiles.providerProfileId, profile.id),
+            eq(voiceProfiles.source, "builtin"),
+          ),
+        );
+    }
     if (voiceProfileId) {
       await tx
         .update(voiceProfiles)
@@ -544,6 +560,7 @@ export async function markModelTestSucceeded(
           and(
             eq(voiceProfiles.id, voiceProfileId),
             eq(voiceProfiles.providerProfileId, profile.id),
+            eq(voiceProfiles.source, "custom"),
           ),
         );
     }

@@ -71,6 +71,13 @@
       "when": 1786608000000,
       "tag": "0009_admin_model_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786611600000,
+      "tag": "0010_enable_verified_builtin_voices",
+      "breakpoints": true
     }
   ]
 }

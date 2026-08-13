@@ -31,6 +31,7 @@ import {
 } from "./QwenRealtimeClient.js";
 import { DoubaoRealtimeClient } from "./DoubaoRealtimeClient.js";
 import { QwenWebSocketRealtimeClient } from "./QwenWebSocketRealtimeClient.js";
+import { selectVisibleAssistantCaption } from "./caption-display.js";
 
 type EventLogEntry = {
   id: string;
@@ -115,9 +116,15 @@ export default function CharacterCall({
   const [providerConfig, setProviderConfig] =
     useState<RealtimeProvidersResponse | null>(null);
   const [configError, setConfigError] = useState("");
+  const [toolsOpen, setToolsOpen] = useState(false);
 
   const character = runtime.character;
   const launch = mapRuntimeToLaunchOptions(runtime);
+  const visibleAssistantCaption = selectVisibleAssistantCaption(
+    snapshot,
+    history,
+  );
+  const captionPlaceholder = getCaptionPlaceholder(snapshot, character.name);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -452,9 +459,23 @@ export default function CharacterCall({
           <strong>{character.name}</strong>
           <small>{character.description}</small>
         </div>
-        <span className={`call-status-pill connection-${snapshot.connection}`}>
-          <i /> {connectionLabels[snapshot.connection]}
-        </span>
+        <div className="call-header-actions">
+          <span
+            className={`call-status-pill connection-${snapshot.connection}`}
+          >
+            <i /> {connectionLabels[snapshot.connection]}
+          </span>
+          <button
+            type="button"
+            className={`call-tools-button${toolsOpen ? " active" : ""}`}
+            aria-expanded={toolsOpen}
+            aria-controls="call-tools-panel"
+            onClick={() => setToolsOpen((current) => !current)}
+          >
+            <span aria-hidden="true">☷</span>
+            <span>字幕与设备</span>
+          </button>
+        </div>
       </header>
 
       <section
@@ -469,17 +490,28 @@ export default function CharacterCall({
             alt={`${character.name} 的头像`}
           />
         </div>
-        <div className="call-activity-label">
-          {activityLabels[snapshot.activity]}
+        <div className="call-activity-label" role="status">
+          <i aria-hidden="true" />
+          <span>{activityLabels[snapshot.activity]}</span>
         </div>
         <div className="call-caption" aria-live="polite">
           {snapshot.userCaption && (
-            <p className="call-user-caption">你：{snapshot.userCaption}</p>
+            <div className="call-live-caption user">
+              <span>你</span>
+              <p>{snapshot.userCaption}</p>
+            </div>
           )}
-          <p>
-            {snapshot.assistantCaption ||
-              getCaptionPlaceholder(snapshot, character.name)}
-          </p>
+          {visibleAssistantCaption && (
+            <div className="call-live-caption assistant">
+              <span>{character.name}</span>
+              <p>{visibleAssistantCaption}</p>
+            </div>
+          )}
+          {!snapshot.userCaption &&
+            !visibleAssistantCaption &&
+            captionPlaceholder && (
+              <p className="call-caption-placeholder">{captionPlaceholder}</p>
+            )}
           <small>{snapshot.detail}</small>
         </div>
       </section>
@@ -618,9 +650,35 @@ export default function CharacterCall({
         </div>
       </footer>
 
-      <aside className="call-tools" aria-label="通话设置与记录">
+      {toolsOpen && (
+        <button
+          type="button"
+          className="call-tools-scrim"
+          aria-label="关闭字幕与设备面板"
+          onClick={() => setToolsOpen(false)}
+        />
+      )}
+      <aside
+        id="call-tools-panel"
+        className={`call-tools${toolsOpen ? " open" : ""}`}
+        aria-label="通话设置与记录"
+        hidden={!toolsOpen}
+      >
+        <header className="call-tools-header">
+          <div>
+            <strong>字幕与设备</strong>
+            <small>完整记录仅在这里滚动</small>
+          </div>
+          <button
+            type="button"
+            aria-label="关闭字幕与设备面板"
+            onClick={() => setToolsOpen(false)}
+          >
+            ×
+          </button>
+        </header>
         <details>
-          <summary>设备与字幕</summary>
+          <summary>麦克风与完整字幕</summary>
           <div className="call-tool-content">
             <label htmlFor="call-microphone">麦克风</label>
             <div className="microphone-row">
@@ -713,8 +771,7 @@ function getCaptionPlaceholder(
   snapshot: RealtimeClientSnapshot,
   name: string,
 ): string {
-  if (snapshot.connection === "active")
-    return snapshot.activity === "listening" ? `${name}在听。` : "…";
+  if (snapshot.connection === "active") return "";
   if (snapshot.connection === "closed") return "通话结束了，随时可以再聊。";
   if (snapshot.connection === "error" || snapshot.connection === "paused")
     return "连接暂停，请查看提示后重试。";

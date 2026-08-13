@@ -21,6 +21,8 @@ import {
   updateModel,
 } from "./model-settings-api.js";
 
+type SettingsTab = "overview" | "connections" | "models";
+
 export default function ModelSettingsPanel({
   open,
   onClose,
@@ -34,6 +36,7 @@ export default function ModelSettingsPanel({
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [activeTab, setActiveTab] = useState<SettingsTab>("overview");
 
   const reload = async () => {
     setLoading(true);
@@ -49,6 +52,7 @@ export default function ModelSettingsPanel({
 
   useEffect(() => {
     if (!open) return;
+    setActiveTab("overview");
     void reload();
   }, [open]);
 
@@ -94,7 +98,12 @@ export default function ModelSettingsPanel({
           <h2 id="model-settings-title">模型设置</h2>
           <p>先创建供应商连接，再添加、测试并启用模型。</p>
         </div>
-        <button type="button" onClick={onClose} aria-label="关闭模型设置">
+        <button
+          className="ui-icon-button"
+          type="button"
+          onClick={onClose}
+          aria-label="关闭模型设置"
+        >
           ×
         </button>
       </header>
@@ -113,64 +122,155 @@ export default function ModelSettingsPanel({
       ) : (
         settings && (
           <div className="model-settings-content">
-            <ConnectionForm
-              disabled={Boolean(busy)}
-              onSubmit={(input) =>
-                perform(
-                  "connection",
-                  () => createConnection(input),
-                  "供应商连接已保存为待测试配置。",
-                )
-              }
-            />
-            <section className="model-settings-section">
-              <h3>供应商连接</h3>
-              {settings.connections.length === 0 ? (
-                <p>还没有连接。</p>
-              ) : (
-                settings.connections.map((connection) => (
-                  <ConnectionCard
-                    key={connection.id}
-                    connection={connection}
+            <nav
+              className="settings-tabs"
+              role="tablist"
+              aria-label="模型设置分区"
+            >
+              {(
+                [
+                  ["overview", "概览与用途"],
+                  ["connections", "供应商连接"],
+                  ["models", "模型与音色"],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  id={`model-settings-tab-${id}`}
+                  className={activeTab === id ? "active" : ""}
+                  aria-selected={activeTab === id}
+                  aria-controls="model-settings-tab-panel"
+                  onClick={() => setActiveTab(id)}
+                >
+                  {label}
+                </button>
+              ))}
+            </nav>
+
+            <div
+              id="model-settings-tab-panel"
+              className="model-settings-tab-panel"
+              role="tabpanel"
+              aria-labelledby={`model-settings-tab-${activeTab}`}
+            >
+              {activeTab === "overview" && (
+                <>
+                  <section className="settings-overview">
+                    <div>
+                      <span>供应商连接</span>
+                      <strong>{settings.connections.length}</strong>
+                      <small>用于安全保存端点与密钥</small>
+                    </div>
+                    <div>
+                      <span>已启用模型</span>
+                      <strong>
+                        {
+                          settings.models.filter(
+                            (model) => model.status === "enabled",
+                          ).length
+                        }
+                      </strong>
+                      <small>角色和后台任务可正常使用</small>
+                    </div>
+                    <div>
+                      <span>等待配置任务</span>
+                      <strong>{settings.work.waiting}</strong>
+                      <small>补齐文本用途后会自动继续</small>
+                    </div>
+                  </section>
+                  <Bindings
+                    settings={settings}
                     disabled={Boolean(busy)}
-                    onSave={(input) =>
+                    onChange={(purpose, id) =>
                       perform(
-                        `connection-${connection.id}`,
-                        () => updateConnection(connection.id, input),
-                        "候选连接已保存；请重新测试关联模型后切换生效。",
+                        `binding-${purpose}`,
+                        () => setBinding(purpose, id),
+                        "默认用途已经更新。",
                       )
                     }
                   />
-                ))
+                  <section className="model-settings-section settings-guide">
+                    <h3>推荐配置顺序</h3>
+                    <ol>
+                      <li>添加供应商连接并保存端点与密钥</li>
+                      <li>添加模型，使用一个可用音色完成真实测试</li>
+                      <li>启用模型，再回到这里设置实时、摘要与记忆用途</li>
+                    </ol>
+                  </section>
+                  <p className="profile-privacy-note settings-security-note">
+                    API 密钥按已确认方案明文存入私有数据库，界面与 API
+                    永不回显；数据库或快照泄露会暴露密钥。
+                  </p>
+                </>
               )}
-            </section>
-            <ModelForm
-              connections={settings.connections}
-              disabled={Boolean(busy)}
-              onSubmit={(input) =>
-                perform(
-                  "model",
-                  () => createModel(input),
-                  "模型已添加，测试成功后可启用。",
-                )
-              }
-            />
-            <Bindings
-              settings={settings}
-              disabled={Boolean(busy)}
-              onChange={(purpose, id) =>
-                perform(
-                  `binding-${purpose}`,
-                  () => setBinding(purpose, id),
-                  "默认用途已经更新。",
-                )
-              }
-            />
-            <ModelList settings={settings} busy={busy} perform={perform} />
-            <p className="profile-privacy-note">
-              API 密钥按已确认方案明文存入私有数据库，界面与 API
-              永不回显；数据库或快照泄露会暴露密钥。
-            </p>
+
+              {activeTab === "connections" && (
+                <div className="settings-tab-grid">
+                  <ConnectionForm
+                    disabled={Boolean(busy)}
+                    onSubmit={(input) =>
+                      perform(
+                        "connection",
+                        () => createConnection(input),
+                        "供应商连接已保存为待测试配置。",
+                      )
+                    }
+                  />
+                  <section className="model-settings-section settings-existing-list">
+                    <header>
+                      <div>
+                        <h3>已有连接</h3>
+                        <p>修改后先保存为候选配置，测试成功才会正式生效。</p>
+                      </div>
+                      <span>{settings.connections.length}</span>
+                    </header>
+                    {settings.connections.length === 0 ? (
+                      <div className="settings-empty-state">
+                        还没有连接，请先完成左侧表单。
+                      </div>
+                    ) : (
+                      settings.connections.map((connection) => (
+                        <ConnectionCard
+                          key={connection.id}
+                          connection={connection}
+                          disabled={Boolean(busy)}
+                          onSave={(input) =>
+                            perform(
+                              `connection-${connection.id}`,
+                              () => updateConnection(connection.id, input),
+                              "候选连接已保存；请重新测试关联模型后切换生效。",
+                            )
+                          }
+                        />
+                      ))
+                    )}
+                  </section>
+                </div>
+              )}
+
+              {activeTab === "models" && (
+                <div className="settings-tab-grid models-tab-grid">
+                  <ModelForm
+                    connections={settings.connections}
+                    disabled={Boolean(busy)}
+                    onSubmit={(input) =>
+                      perform(
+                        "model",
+                        () => createModel(input),
+                        "模型已添加，测试成功后可启用。",
+                      )
+                    }
+                  />
+                  <ModelList
+                    settings={settings}
+                    busy={busy}
+                    perform={perform}
+                  />
+                </div>
+              )}
+            </div>
           </div>
         )
       )}
@@ -329,7 +429,8 @@ function ConnectionForm({
   };
   return (
     <form className="settings-group model-settings-section" onSubmit={submit}>
-      <h3>1. 新建供应商连接</h3>
+      <h3>添加新连接</h3>
+      <p>选择适配器，并填写服务商提供的端点与密钥。</p>
       <label>
         协议
         <select
@@ -422,7 +523,8 @@ function ModelForm({
         onSubmit({ connectionId, kind, model, displayName });
       }}
     >
-      <h3>2. 添加模型</h3>
+      <h3>添加模型</h3>
+      <p>模型会挂在已有连接下，保存后仍需真实测试。</p>
       <label>
         连接
         <select
@@ -470,7 +572,7 @@ function Bindings({
 }) {
   return (
     <section className="model-settings-section">
-      <h3>3. 默认与文本用途</h3>
+      <h3>默认模型与后台用途</h3>
       <p>
         等待配置任务：{settings.work.waiting} · 失败：{settings.work.failed}
       </p>
@@ -528,9 +630,9 @@ function ModelList({
 }) {
   return (
     <section className="model-settings-section">
-      <h3>4. 模型与音色</h3>
+      <h3>已有模型与音色</h3>
       {(["realtime_voice", "text"] as const).map((kind) => (
-        <div key={kind}>
+        <div className="model-kind-group" key={kind}>
           <h4>{kind === "realtime_voice" ? "实时语音模型" : "文本模型"}</h4>
           {settings.models
             .filter((model) => model.kind === kind)
