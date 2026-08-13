@@ -125,6 +125,42 @@ const characterWebSocketUrl = `/api/characters/${testCharacter.character.id}/rea
 const voicePreviewUrl = `/api/characters/voices/${testCharacter.voiceProfile.id}/preview`;
 
 describe("Meet API", () => {
+  it("forbids non-admin accounts from model management APIs", async () => {
+    const adultRepository: AuthRepository = {
+      ...authRepository,
+      async findUserBySessionTokenHash(tokenHash) {
+        return tokenHash === hashSessionToken(sessionToken)
+          ? { ...testUser, accountType: "adult" }
+          : null;
+      },
+    };
+    const app = await buildApp({
+      config,
+      authRepository: adultRepository,
+      logger: false,
+    });
+    for (const request of [
+      { method: "GET" as const, url: "/api/admin/model-settings" },
+      {
+        method: "POST" as const,
+        url: "/api/admin/model-connections",
+        payload: {
+          adapter: "qwen_realtime",
+          displayName: "不应创建",
+          endpoint: "https://realtime.example.com",
+          apiKey: "must-not-be-used",
+        },
+      },
+    ]) {
+      const response = await app.inject({ ...request, headers: authHeaders });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toMatchObject({
+        code: "MODEL_SETTINGS_FORBIDDEN",
+      });
+    }
+    await app.close();
+  });
+
   it("reports provider readiness without exposing realtime secrets", async () => {
     const app = await buildApp({
       config: {
@@ -157,7 +193,7 @@ describe("Meet API", () => {
     await app.close();
   });
 
-  it("returns authenticated realtime config without secrets", async () => {
+  it("removes the legacy global Qwen config endpoint", async () => {
     const app = await buildApp({ config, authRepository, logger: false });
     const response = await app.inject({
       method: "GET",
@@ -165,23 +201,13 @@ describe("Meet API", () => {
       headers: authHeaders,
     });
 
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      enabled: true,
-      configured: true,
-      model: "qwen-audio-3.0-realtime-plus",
-      availableModels: [
-        "qwen-audio-3.0-realtime-plus",
-        "qwen-audio-3.0-realtime-flash",
-      ],
-      voice: "longanqian",
-    });
+    expect(response.statusCode).toBe(404);
     expect(response.body).not.toContain("never-return-this-key");
     expect(response.body).not.toContain("realtime.example.com");
     await app.close();
   });
 
-  it("reports realtime as unconfigured when the endpoint is missing", async () => {
+  it("does not restore the removed global config endpoint when legacy config is incomplete", async () => {
     const app = await buildApp({
       config: {
         ...config,
@@ -196,8 +222,7 @@ describe("Meet API", () => {
       headers: authHeaders,
     });
 
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ configured: false });
+    expect(response.statusCode).toBe(404);
     await app.close();
   });
 
@@ -612,13 +637,13 @@ describe("Meet API", () => {
     await app.close();
   });
 
-  it("rejects a character model outside the Qwen Audio allowlist", async () => {
+  it("rejects an empty configured realtime model id", async () => {
     const qwenWebSocketFactory = vi.fn();
     const invalidModelCharacter = {
       ...testCharacter,
       providerProfile: {
         ...testCharacter.providerProfile,
-        model: "qwen3.5-omni-plus-realtime",
+        model: "",
       },
     };
     const invalidModelRepository = {
@@ -754,51 +779,49 @@ describe("Meet API", () => {
     await app.close();
   });
 
-  it("requires authentication for realtime configuration", async () => {
+  it("does not expose the removed realtime configuration endpoint", async () => {
     const app = await buildApp({ config, authRepository, logger: false });
     const response = await app.inject({
       method: "GET",
       url: "/api/realtime/qwen/config",
     });
 
-    expect(response.statusCode).toBe(401);
-    expect(response.json()).toMatchObject({
-      code: "AUTHENTICATION_REQUIRED",
-    });
+    expect(response.statusCode).toBe(404);
     await app.close();
   });
 
-  it("normalizes an HTTPS WebRTC endpoint from the environment", () => {
+  it("ignores legacy Qwen endpoint environment variables", () => {
     const loaded = loadConfig({
       QWEN_REALTIME_ENDPOINT: "https://realtime.example.com/",
     });
 
-    expect(loaded.qwen.endpoint).toBe("realtime.example.com");
+    expect(loaded.qwen.enabled).toBe(false);
+    expect(loaded.qwen.endpoint).toBeUndefined();
   });
 
-  it("loads the fixed Doubao full-duplex model without exposing the key", () => {
+  it("ignores legacy Doubao model environment variables", () => {
     const loaded = loadConfig({
       DOUBAO_REALTIME_ENABLED: "true",
       DOUBAO_SPEECH_API_KEY: "server-only-doubao-key",
     });
 
     expect(loaded.doubao).toMatchObject({
-      enabled: true,
-      apiKey: "server-only-doubao-key",
+      enabled: false,
       model: "1.2.6.1",
       requestTimeoutMs: 15_000,
     });
-    expect(() => loadConfig({ DOUBAO_REALTIME_MODEL: "latest" })).toThrow(
-      /DOUBAO_REALTIME_MODEL/,
-    );
+    expect(loaded.doubao?.apiKey).toBeUndefined();
+    expect(
+      loadConfig({ DOUBAO_REALTIME_MODEL: "latest" }).doubao?.enabled,
+    ).toBe(false);
   });
 
-  it("rejects an endpoint containing an upstream path", () => {
-    expect(() =>
+  it("does not validate unused legacy model environment variables", () => {
+    expect(
       loadConfig({
         QWEN_REALTIME_ENDPOINT: "https://realtime.example.com/custom/path",
-      }),
-    ).toThrow(/QWEN_REALTIME_ENDPOINT/);
+      }).qwen.endpoint,
+    ).toBeUndefined();
   });
 
   it("defaults session cookies to Secure and requires an explicit local override", () => {

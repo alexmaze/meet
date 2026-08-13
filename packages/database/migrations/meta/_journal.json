@@ -64,6 +64,13 @@
       "when": 1786539000000,
       "tag": "0008_doubao_duplex_provider",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786608000000,
+      "tag": "0009_admin_model_settings",
+      "breakpoints": true
     }
   ]
 }

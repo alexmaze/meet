@@ -1030,7 +1030,7 @@ function createInput(): CreateCharacterRequest {
     description: "一个用于测试的自定义聊天伙伴。",
     persona: preset.persona,
     openingLine: "你好。",
-    providerProfileId: preset.providerProfileId,
+    realtimeModelProfileId: preset.providerProfileId,
     voiceProfileId: preset.voiceProfileId,
     conversationPolicy: preset.conversationPolicy,
     visualProfile: preset.visualProfile,

@@ -207,6 +207,7 @@ export async function upsertConversationSummary(
     sourceMessageCount: number;
     sourceLastSequence: number;
     analyzerModel: string;
+    analyzerProfileId?: string;
     updatedAt?: Date;
   },
 ): Promise<void> {
@@ -221,6 +222,7 @@ export async function upsertConversationSummary(
         sourceMessageCount: input.sourceMessageCount,
         sourceLastSequence: input.sourceLastSequence,
         analyzerModel: input.analyzerModel,
+        analyzerProfileId: input.analyzerProfileId,
         updatedAt,
       },
     });
@@ -232,6 +234,8 @@ export async function upsertExtractedMemories(
     conversationId: string;
     userId: string;
     characterId: string;
+    analyzerModel?: string;
+    analyzerProfileId?: string;
     memories: ExtractedMemoryInput[];
     updatedAt?: Date;
   },
@@ -263,6 +267,8 @@ export async function upsertExtractedMemories(
             sourceConversationId: input.conversationId,
             sourceExcerpt: candidate.sourceExcerpt.trim(),
             confidence: Math.max(stored.confidence, candidate.confidence),
+            analyzerModel: input.analyzerModel,
+            analyzerProfileId: input.analyzerProfileId,
             status:
               stored.status === "active" || candidate.status === "active"
                 ? "active"
@@ -282,6 +288,8 @@ export async function upsertExtractedMemories(
           content,
           sourceExcerpt: candidate.sourceExcerpt.trim(),
           confidence: candidate.confidence,
+          analyzerModel: input.analyzerModel,
+          analyzerProfileId: input.analyzerProfileId,
           status: candidate.status,
           updatedAt,
         })

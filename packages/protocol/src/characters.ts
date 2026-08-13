@@ -141,7 +141,7 @@ export const providerCapabilitiesSchema = z
 
 export type ProviderCapabilities = z.infer<typeof providerCapabilitiesSchema>;
 
-export const providerProfileSchema = z
+export const realtimeModelProfileSchema = z
   .object({
     id: z.uuid(),
     provider: realtimeProviderSchema,
@@ -151,7 +151,12 @@ export const providerProfileSchema = z
   })
   .strict();
 
-export type ProviderProfile = z.infer<typeof providerProfileSchema>;
+export type RealtimeModelProfile = z.infer<typeof realtimeModelProfileSchema>;
+
+/** @deprecated 使用 RealtimeModelProfile。 */
+export const providerProfileSchema = realtimeModelProfileSchema;
+/** @deprecated 使用 RealtimeModelProfile。 */
+export type ProviderProfile = RealtimeModelProfile;
 
 export const voiceProfileTypeSchema = z.enum(["preset", "cloned"]);
 export const voicePaceSchema = z.enum(["slow", "normal", "fast"]);
@@ -171,7 +176,7 @@ export type VoiceStyle = z.infer<typeof voiceStyleSchema>;
 export const voiceProfileSchema = z
   .object({
     id: z.uuid(),
-    providerProfileId: z.uuid(),
+    realtimeModelProfileId: z.uuid(),
     type: voiceProfileTypeSchema,
     providerVoiceId: trimmedText(120),
     displayName: trimmedText(120),
@@ -204,6 +209,13 @@ export const characterSummarySchema = z
     revision: z.number().int().positive(),
     visualProfile: visualProfileSchema,
     voiceProfile: voiceProfileSchema,
+    realtimeAvailability: z
+      .object({
+        available: z.boolean(),
+        reason: z.string().trim().min(1).max(300).nullable(),
+      })
+      .strict()
+      .optional(),
     permissions: characterPermissionsSchema,
     updatedAt: z.iso.datetime(),
   })
@@ -217,7 +229,7 @@ export const characterSchema = characterSummarySchema
     persona: personaDefinitionSchema,
     openingLine: trimmedText(500).nullable(),
     conversationPolicy: conversationPolicySchema,
-    providerProfile: providerProfileSchema,
+    realtimeModelProfile: realtimeModelProfileSchema,
     voiceProfile: voiceProfileSchema,
     permissions: characterPermissionsSchema,
     createdAt: z.iso.datetime(),
@@ -232,7 +244,7 @@ const editableCharacterFields = {
   description: optionalTrimmedText(600),
   persona: personaDefinitionSchema,
   openingLine: trimmedText(500).nullable(),
-  providerProfileId: z.uuid(),
+  realtimeModelProfileId: z.uuid(),
   voiceProfileId: z.uuid(),
   conversationPolicy: conversationPolicySchema,
   visualProfile: visualProfileSchema,
@@ -254,7 +266,8 @@ export const updateCharacterRequestSchema = z
     description: editableCharacterFields.description.optional(),
     persona: editableCharacterFields.persona.optional(),
     openingLine: editableCharacterFields.openingLine.optional(),
-    providerProfileId: editableCharacterFields.providerProfileId.optional(),
+    realtimeModelProfileId:
+      editableCharacterFields.realtimeModelProfileId.optional(),
     voiceProfileId: editableCharacterFields.voiceProfileId.optional(),
     conversationPolicy: editableCharacterFields.conversationPolicy.optional(),
     visualProfile: editableCharacterFields.visualProfile.optional(),
@@ -311,8 +324,9 @@ export const characterResponseSchema = z
 
 export const characterCatalogResponseSchema = z
   .object({
-    providers: z.array(providerProfileSchema),
+    realtimeModels: z.array(realtimeModelProfileSchema),
     voices: z.array(voiceProfileSchema),
+    realtimeDefaultModelProfileId: z.uuid().nullable(),
   })
   .strict();
 
@@ -326,6 +340,7 @@ export const characterRuntimeResponseSchema = z
     realtime: z
       .object({
         provider: realtimeProviderSchema,
+        realtimeModelProfileId: z.uuid().optional(),
         model: trimmedText(120),
         voice: trimmedText(120),
         instructions: trimmedText(16_000),

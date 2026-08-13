@@ -31,6 +31,10 @@ import {
 } from "../conversations/service.js";
 import type { AppConfig } from "../config.js";
 import {
+  ModelSettingsServiceError,
+  type ModelSettingsService,
+} from "../model-settings/service.js";
+import {
   generateDoubaoVoicePreview,
   DoubaoVoicePreviewError,
 } from "../doubao-voice-preview.js";
@@ -60,6 +64,7 @@ export async function registerCharacterRoutes(
   fetchFunction?: FetchFunction,
   qwenWebSocketFactory?: QwenWebSocketFactory,
   doubaoWebSocketFactory?: DoubaoWebSocketFactory,
+  modelSettings?: ModelSettingsService,
 ): Promise<void> {
   const realtimeHandshakeRateLimiter = new LoginRateLimiter(20, 60_000);
   const voicePreviewRateLimiter = new LoginRateLimiter(10, 60_000);
@@ -67,6 +72,9 @@ export async function registerCharacterRoutes(
     FastifyRequest,
     {
       provider: "qwen" | "doubao";
+      adapter: "qwen_realtime" | "doubao_realtime";
+      endpoint: string;
+      apiKey: string;
       model: string;
       voice: string;
       instructions: string;
@@ -113,6 +121,16 @@ export async function registerCharacterRoutes(
           actor,
           params.data.voiceProfileId,
         );
+        if (!modelSettings) {
+          throw new CharacterServiceError(
+            "CHARACTER_REALTIME_UNAVAILABLE",
+            "模型设置服务尚未就绪。",
+            503,
+          );
+        }
+        const configured = await modelSettings.resolveRuntime(
+          runtime.realtimeModelProfileId,
+        );
         const qwenModel = qwenRealtimeModelSchema.safeParse(runtime.model);
         const doubaoModel = doubaoRealtimeModelSchema.safeParse(runtime.model);
         if (
@@ -125,22 +143,6 @@ export async function registerCharacterRoutes(
             409,
           );
         }
-        if (runtime.provider === "qwen" && !config.qwen.enabled) {
-          return reply.code(503).send({
-            code: "REALTIME_SPIKE_DISABLED",
-            message: "千问实时服务未启用。",
-          });
-        }
-        if (
-          runtime.provider === "doubao" &&
-          (!config.doubao?.enabled || !config.doubao.apiKey)
-        ) {
-          return reply.code(503).send({
-            code: "DOUBAO_NOT_CONFIGURED",
-            message: "服务端尚未配置豆包实时语音服务。",
-          });
-        }
-
         const rateLimit = voicePreviewRateLimiter.consume(
           `${actor.id}:${request.ip}`,
         );
@@ -153,15 +155,29 @@ export async function registerCharacterRoutes(
         }
 
         const wav =
-          runtime.provider === "doubao" && doubaoModel.success && config.doubao
+          runtime.provider === "doubao" && doubaoModel.success
             ? await generateDoubaoVoicePreview({
-                config: config.doubao,
+                config: {
+                  enabled: true,
+                  apiKey: configured.connection.apiKey,
+                  model: runtime.model,
+                  requestTimeoutMs: 15_000,
+                },
                 model: doubaoModel.data,
                 voice: runtime.voice,
                 webSocketFactory: doubaoWebSocketFactory,
               })
             : await generateQwenVoicePreview({
-                config: config.qwen,
+                config: {
+                  enabled: true,
+                  apiKey: configured.connection.apiKey,
+                  endpoint: configured.connection.endpoint,
+                  region: "cn-beijing",
+                  model: runtime.model,
+                  voice: runtime.voice,
+                  instructions: "请用自然中文朗读固定试听短句。",
+                  requestTimeoutMs: 15_000,
+                },
                 model: qwenRealtimeModelSchema.parse(runtime.model),
                 voice: runtime.voice,
                 webSocketFactory: qwenWebSocketFactory,
@@ -394,12 +410,16 @@ export async function registerCharacterRoutes(
             409,
           );
         }
-        if (!config.qwen.enabled) {
-          return reply.code(503).send({
-            code: "REALTIME_SPIKE_DISABLED",
-            message: "千问实时服务未启用。",
-          });
+        if (!modelSettings || !runtime.realtime.realtimeModelProfileId) {
+          throw new CharacterServiceError(
+            "CHARACTER_REALTIME_UNAVAILABLE",
+            "模型设置服务尚未就绪。",
+            503,
+          );
         }
+        const configured = await modelSettings.resolveRuntime(
+          runtime.realtime.realtimeModelProfileId,
+        );
 
         const rateLimit = realtimeHandshakeRateLimiter.consume(
           `${actor.id}:${request.ip}`,
@@ -414,7 +434,16 @@ export async function registerCharacterRoutes(
 
         const model = qwenRealtimeModelSchema.parse(runtime.realtime.model);
         const answerSdp = await exchangeQwenOffer(
-          config.qwen,
+          {
+            enabled: true,
+            apiKey: configured.connection.apiKey,
+            endpoint: configured.connection.endpoint,
+            region: "cn-beijing",
+            model: runtime.realtime.model,
+            voice: runtime.realtime.voice,
+            instructions: runtime.realtime.instructions,
+            requestTimeoutMs: 15_000,
+          },
           model,
           request.body as string,
           fetchFunction,
@@ -494,29 +523,24 @@ export async function registerCharacterRoutes(
               409,
             );
           }
-          if (provider === "qwen" && !config.qwen.enabled) {
-            return reply.code(503).send({
-              code: "REALTIME_SPIKE_DISABLED",
-              message: "千问实时服务未启用。",
-            });
+          if (!modelSettings || !runtime.realtime.realtimeModelProfileId) {
+            throw new CharacterServiceError(
+              "CHARACTER_REALTIME_UNAVAILABLE",
+              "模型设置服务尚未就绪。",
+              503,
+            );
           }
-          if (
-            provider === "qwen" &&
-            (!config.qwen.apiKey || !config.qwen.endpoint)
-          ) {
-            return reply.code(503).send({
-              code: "QWEN_NOT_CONFIGURED",
-              message: "服务端尚未配置千问实时服务。",
-            });
-          }
-          if (
-            provider === "doubao" &&
-            (!config.doubao?.enabled || !config.doubao.apiKey)
-          ) {
-            return reply.code(503).send({
-              code: "DOUBAO_NOT_CONFIGURED",
-              message: "服务端尚未配置豆包实时语音服务。",
-            });
+          const configured = await modelSettings.resolveRuntime(
+            runtime.realtime.realtimeModelProfileId,
+          );
+          const expectedAdapter =
+            provider === "qwen" ? "qwen_realtime" : "doubao_realtime";
+          if (configured.connection.adapter !== expectedAdapter) {
+            throw new CharacterServiceError(
+              "CHARACTER_REALTIME_UNAVAILABLE",
+              "角色模型与供应商连接不匹配。",
+              409,
+            );
           }
 
           const rateLimit = realtimeHandshakeRateLimiter.consume(
@@ -532,6 +556,9 @@ export async function registerCharacterRoutes(
 
           websocketContexts.set(request, {
             provider,
+            adapter: configured.connection.adapter,
+            endpoint: configured.connection.endpoint,
+            apiKey: configured.connection.apiKey,
             model: runtime.realtime.model,
             voice: runtime.realtime.voice,
             instructions: runtime.realtime.instructions,
@@ -556,10 +583,15 @@ export async function registerCharacterRoutes(
         relationshipContext: context.relationshipContext,
         history: context.history,
       };
-      if (context.provider === "doubao" && config.doubao) {
+      if (context.provider === "doubao") {
         relayDoubaoWebSocket({
           client: socket,
-          config: config.doubao,
+          config: {
+            enabled: true,
+            apiKey: context.apiKey,
+            model: context.model,
+            requestTimeoutMs: 15_000,
+          },
           model: doubaoRealtimeModelSchema.parse(context.model),
           runtime,
           webSocketFactory: doubaoWebSocketFactory,
@@ -568,7 +600,16 @@ export async function registerCharacterRoutes(
       }
       relayQwenWebSocket({
         client: socket,
-        config: config.qwen,
+        config: {
+          enabled: true,
+          apiKey: context.apiKey,
+          endpoint: context.endpoint,
+          region: "cn-beijing",
+          model: context.model,
+          voice: context.voice,
+          instructions: context.instructions,
+          requestTimeoutMs: 15_000,
+        },
         model: qwenRealtimeModelSchema.parse(context.model),
         runtime,
         webSocketFactory: qwenWebSocketFactory,
@@ -596,6 +637,12 @@ async function authenticateActor(
 
 function sendCharacterError(reply: FastifyReply, error: unknown) {
   if (error instanceof AuthError) return sendAuthError(reply, error);
+  if (error instanceof ModelSettingsServiceError) {
+    return reply.code(error.statusCode).send({
+      code: error.code,
+      message: error.message,
+    });
+  }
   if (error instanceof ConversationServiceError) {
     if (error.statusCode >= 500 && error.cause) {
       reply.request.log.error(

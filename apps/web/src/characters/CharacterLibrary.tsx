@@ -172,11 +172,17 @@ function CharacterCard({
         <button
           className="character-call-button"
           type="button"
-          disabled={callPending}
+          disabled={
+            callPending || character.realtimeAvailability?.available === false
+          }
           onClick={onCall}
         >
           <span aria-hidden="true">{callPending ? "…" : "●"}</span>
-          {callPending ? "准备中" : "通话"}
+          {callPending
+            ? "准备中"
+            : character.realtimeAvailability?.available === false
+              ? "模型不可用"
+              : "通话"}
         </button>
       </div>
     </article>

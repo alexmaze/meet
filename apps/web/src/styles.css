@@ -864,6 +864,122 @@ summary:focus-visible {
   box-shadow: 0 0 0 4px rgba(221, 103, 63, 0.08);
 }
 
+.model-settings-panel {
+  width: min(960px, calc(100vw - 24px));
+  max-width: none;
+  max-height: calc(100vh - 24px);
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  border: 0;
+  border-radius: 24px;
+  color: var(--ink);
+  background: var(--paper);
+  box-shadow: 0 32px 100px rgba(30, 24, 19, 0.34);
+}
+
+.model-settings-panel::backdrop {
+  background: rgba(27, 23, 19, 0.58);
+  backdrop-filter: blur(8px);
+}
+
+.admin-panel-header {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 24px 26px 20px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--paper) 94%, transparent);
+  backdrop-filter: blur(18px);
+}
+
+.admin-panel-header h2 {
+  margin: 2px 0 6px;
+  font-size: clamp(26px, 5vw, 36px);
+}
+
+.admin-panel-header p:last-child {
+  margin: 0;
+  color: var(--muted);
+}
+
+.admin-panel-header > button {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.68);
+  font-size: 24px;
+  line-height: 1;
+}
+
+.model-settings-content,
+.model-settings-section {
+  display: grid;
+  gap: 14px;
+}
+
+.model-settings-content {
+  padding: 22px 26px 28px;
+}
+
+.model-settings-panel > .product-notice,
+.model-settings-panel > p {
+  margin: 18px 26px 0;
+}
+
+.model-settings-section {
+  padding: 18px;
+  border: 1px solid var(--border-color, #dde3e8);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.model-settings-section label {
+  display: grid;
+  gap: 6px;
+}
+
+.model-settings-section input,
+.model-settings-section select {
+  width: 100%;
+  min-height: 42px;
+  padding: 8px 10px;
+  border: 1px solid #cdd6dd;
+  border-radius: 10px;
+  background: white;
+}
+
+.model-setting-card {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid #d9e1e6;
+  border-radius: 14px;
+}
+
+.model-setting-card small {
+  overflow-wrap: anywhere;
+  color: #68757f;
+}
+
+.model-inline-fields,
+.model-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.model-inline-fields input {
+  flex: 1 1 180px;
+}
+
 .check-field {
   display: flex;
   align-items: flex-start;

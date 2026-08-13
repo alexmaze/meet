@@ -11,10 +11,13 @@ import {
   characterAuditEvents,
   characters,
   providerProfiles,
+  modelConnections,
+  modelPurposeBindings,
   userAccounts,
   voiceProfiles,
   type CharacterRecord,
   type ProviderProfileRecord,
+  type ModelConnectionRecord,
   type UserAccount,
   type VoiceProfileRecord,
 } from "./schema.js";
@@ -23,11 +26,13 @@ export type CharacterAggregate = {
   character: CharacterRecord;
   providerProfile: ProviderProfileRecord;
   voiceProfile: VoiceProfileRecord;
+  modelConnection?: ModelConnectionRecord | null;
 };
 
 export type CharacterCatalog = {
   providers: ProviderProfileRecord[];
   voices: VoiceProfileRecord[];
+  realtimeDefaultProfileId?: string | null;
 };
 
 export type EditableCharacterValues = {
@@ -85,6 +90,10 @@ export async function listVisibleCharacters(
         eq(voiceProfiles.providerProfileId, providerProfiles.id),
       ),
     )
+    .leftJoin(
+      modelConnections,
+      eq(providerProfiles.connectionId, modelConnections.id),
+    )
     .where(visibleCharacterWhere(actorUserId))
     .orderBy(
       sql`case when ${characters.visibility} = 'builtin' then 0 when ${characters.visibility} = 'family' then 1 else 2 end`,
@@ -112,6 +121,10 @@ export async function findVisibleCharacter(
         eq(voiceProfiles.providerProfileId, providerProfiles.id),
       ),
     )
+    .leftJoin(
+      modelConnections,
+      eq(providerProfiles.connectionId, modelConnections.id),
+    )
     .where(
       and(eq(characters.id, characterId), visibleCharacterWhere(actorUserId)),
     )
@@ -122,14 +135,38 @@ export async function findVisibleCharacter(
 export async function listCharacterCatalog(
   db: Database,
 ): Promise<CharacterCatalog> {
-  const [providers, voices] = await Promise.all([
+  const [providers, voices, defaultBinding] = await Promise.all([
     db
       .select()
       .from(providerProfiles)
+      .where(
+        and(
+          eq(providerProfiles.kind, "realtime_voice"),
+          eq(providerProfiles.status, "enabled"),
+        ),
+      )
       .orderBy(asc(providerProfiles.displayName)),
-    db.select().from(voiceProfiles).orderBy(asc(voiceProfiles.displayName)),
+    db
+      .select()
+      .from(voiceProfiles)
+      .where(eq(voiceProfiles.status, "enabled"))
+      .orderBy(asc(voiceProfiles.displayName)),
+    db
+      .select({ modelProfileId: modelPurposeBindings.modelProfileId })
+      .from(modelPurposeBindings)
+      .where(eq(modelPurposeBindings.purpose, "realtime_default"))
+      .limit(1),
   ]);
-  return { providers, voices };
+  const defaultId = defaultBinding[0]?.modelProfileId;
+  return {
+    providers: defaultId
+      ? [...providers].sort((left, right) =>
+          left.id === defaultId ? -1 : right.id === defaultId ? 1 : 0,
+        )
+      : providers,
+    voices,
+    realtimeDefaultProfileId: defaultId ?? null,
+  };
 }
 
 export async function createCharacter(
@@ -149,6 +186,7 @@ export async function createCharacter(
       tx,
       input.providerProfileId,
       input.voiceProfileId,
+      true,
     );
     if (!profilePair) return { kind: "invalid_profile" };
 
@@ -216,10 +254,14 @@ export async function updateCharacter(
       input.changes.providerProfileId ?? access.character.providerProfileId;
     const voiceProfileId =
       input.changes.voiceProfileId ?? access.character.voiceProfileId;
+    const profileSelectionChanged =
+      providerProfileId !== access.character.providerProfileId ||
+      voiceProfileId !== access.character.voiceProfileId;
     const profilePair = await findProfilePair(
       tx,
       providerProfileId,
       voiceProfileId,
+      profileSelectionChanged,
     );
     if (!profilePair) return { kind: "invalid_profile" };
 
@@ -561,6 +603,7 @@ const characterAggregateSelection = {
   character: characters,
   providerProfile: providerProfiles,
   voiceProfile: voiceProfiles,
+  modelConnection: modelConnections,
 };
 
 type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
@@ -624,6 +667,7 @@ async function findProfilePair(
   tx: Transaction,
   providerProfileId: string,
   voiceProfileId: string,
+  requireEnabled = false,
 ): Promise<{
   providerProfile: ProviderProfileRecord;
   voiceProfile: VoiceProfileRecord;
@@ -638,7 +682,13 @@ async function findProfilePair(
         eq(voiceProfiles.providerProfileId, providerProfiles.id),
       ),
     )
-    .where(eq(providerProfiles.id, providerProfileId))
+    .where(
+      and(
+        eq(providerProfiles.id, providerProfileId),
+        requireEnabled ? eq(providerProfiles.status, "enabled") : undefined,
+        requireEnabled ? eq(voiceProfiles.status, "enabled") : undefined,
+      ),
+    )
     .limit(1);
   return pair ?? null;
 }

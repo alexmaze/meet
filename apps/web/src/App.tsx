@@ -3,7 +3,7 @@ import type {
   CharacterRuntimeResponse,
   CharacterSummary,
   CreateCharacterRequest,
-  ProviderProfile,
+  RealtimeModelProfile,
   UserAccount,
   VoiceProfile,
 } from "@meet/protocol";
@@ -49,8 +49,9 @@ type EditorState =
   | {
       status: "ready";
       character: Character | null;
-      providers: ProviderProfile[];
+      realtimeModels: RealtimeModelProfile[];
       voices: VoiceProfile[];
+      realtimeDefaultModelProfileId: string | null;
     };
 
 type Notice = { kind: "success" | "error"; message: string };
@@ -118,7 +119,27 @@ export default function App(session: AuthenticatedAppSession) {
     setEditorError("");
     void getCharacterCatalog(controller.signal)
       .then((catalog) => {
-        setEditor({ status: "ready", character, ...catalog });
+        const realtimeModels =
+          character &&
+          !catalog.realtimeModels.some(
+            (model) => model.id === character.realtimeModelProfile.id,
+          )
+            ? [character.realtimeModelProfile, ...catalog.realtimeModels]
+            : catalog.realtimeModels;
+        const voices =
+          character &&
+          !catalog.voices.some(
+            (voice) => voice.id === character.voiceProfile.id,
+          )
+            ? [character.voiceProfile, ...catalog.voices]
+            : catalog.voices;
+        setEditor({
+          status: "ready",
+          character,
+          realtimeModels,
+          voices,
+          realtimeDefaultModelProfileId: catalog.realtimeDefaultModelProfileId,
+        });
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
@@ -330,8 +351,11 @@ export default function App(session: AuthenticatedAppSession) {
                   key={editor.character?.id ?? "new-character"}
                   user={user}
                   character={editor.character}
-                  providers={editor.providers}
+                  providers={editor.realtimeModels}
                   voices={editor.voices}
+                  realtimeDefaultModelProfileId={
+                    editor.realtimeDefaultModelProfileId
+                  }
                   saving={saving}
                   serverError={editorError}
                   onCancel={() => {
@@ -564,6 +588,15 @@ function ProfilePage({ session }: { session: AuthenticatedAppSession }) {
             <span>
               <strong>家庭成员</strong>
               <small>创建账号、重置密码与儿童资料权限</small>
+            </span>
+            <span aria-hidden="true">→</span>
+          </button>
+        )}
+        {user.accountType === "admin" && (
+          <button type="button" onClick={session.openModelSettings}>
+            <span>
+              <strong>模型设置</strong>
+              <small>供应商连接、实时语音、文本模型与默认用途</small>
             </span>
             <span aria-hidden="true">→</span>
           </button>

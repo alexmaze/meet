@@ -21,7 +21,7 @@ const validRequest = {
     sampleLines: ["我们可以慢慢说。"],
   },
   openingLine: "你好，今天想聊什么？",
-  providerProfileId: "31c9ad8e-0e8b-4e2d-8c14-318d36d617b1",
+  realtimeModelProfileId: "31c9ad8e-0e8b-4e2d-8c14-318d36d617b1",
   voiceProfileId: "be8f77ec-a61e-4be0-8b70-8c7cb9e51103",
   conversationPolicy: {
     firstSpeaker: "assistant" as const,

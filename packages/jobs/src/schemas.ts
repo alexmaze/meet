@@ -14,6 +14,8 @@ const completedConversationJobSchema = z
     conversationId: z.uuid(),
     userId: z.uuid(),
     completedSequence: z.number().int().nonnegative(),
+    workItemId: z.uuid().optional(),
+    modelProfileId: z.uuid().optional(),
   })
   .strict();
 

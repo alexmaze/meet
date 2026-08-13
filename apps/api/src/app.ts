@@ -9,6 +9,7 @@ import {
 import {
   ConversationCompletionJobPublisher,
   MediaCleanupJobPublisher,
+  ModelBindingJobReconciler,
   createMeetJobBoss,
 } from "@meet/jobs";
 import { LocalMediaStore, type MediaStore } from "@meet/media";
@@ -35,11 +36,13 @@ import { MemoryService } from "./memories/service.js";
 import { PostgresMediaRepository } from "./media/postgres-repository.js";
 import type { MediaRepository } from "./media/repository.js";
 import { MediaService } from "./media/service.js";
+import { ModelSettingsService } from "./model-settings/service.js";
 import {
   QWEN_RELAY_CLIENT_MAX_MESSAGE_BYTES,
   type QwenWebSocketFactory,
 } from "./qwen-websocket.js";
 import { registerAdminMemberRoutes } from "./routes/admin-members.js";
+import { registerAdminModelSettingsRoutes } from "./routes/admin-model-settings.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerCharacterRoutes } from "./routes/characters.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
@@ -193,6 +196,18 @@ export async function buildApp(
   const memories = new MemoryService(memoryRepository);
   const media = new MediaService(mediaRepository, mediaStore);
   const characters = new CharacterService(characterRepository, media);
+  const modelBindingReconciler =
+    ownedJobBoss && databaseClient
+      ? new ModelBindingJobReconciler(ownedJobBoss, databaseClient.db)
+      : null;
+  const modelSettings = new ModelSettingsService(
+    databaseClient?.db ?? null,
+    options.fetchFunction,
+    options.qwenWebSocketFactory,
+    options.doubaoWebSocketFactory,
+    modelBindingReconciler?.enqueueWaiting.bind(modelBindingReconciler),
+    options.config,
+  );
 
   if (ownedJobBoss || ownedDatabaseClient) {
     app.addHook("onClose", async () => {
@@ -220,6 +235,7 @@ export async function buildApp(
 
   await registerAuthRoutes(app, config, auth);
   await registerAdminMemberRoutes(app, config, auth, members);
+  await registerAdminModelSettingsRoutes(app, config, auth, modelSettings);
   await registerCharacterRoutes(
     app,
     config,
@@ -229,10 +245,11 @@ export async function buildApp(
     options.fetchFunction,
     options.qwenWebSocketFactory,
     options.doubaoWebSocketFactory,
+    modelSettings,
   );
   await registerConversationRoutes(app, config, auth, conversations);
   await registerMemoryRoutes(app, config, auth, memories);
   await registerMediaRoutes(app, config, auth, media);
-  await registerRealtimeRoutes(app, config, auth);
+  await registerRealtimeRoutes(app, config, auth, modelSettings);
   return app;
 }

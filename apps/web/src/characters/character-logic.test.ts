@@ -24,7 +24,7 @@ const provider: ProviderProfile = {
 
 const voice: VoiceProfile = {
   id: "00000000-0000-4000-8000-000000000003",
-  providerProfileId: provider.id,
+  realtimeModelProfileId: provider.id,
   type: "preset",
   providerVoiceId: "longanqian",
   displayName: "龙安浅",

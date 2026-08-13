@@ -18,7 +18,10 @@ import {
 describe("conversation completion job publisher", () => {
   it("enqueues summary and memory extraction for a normal conversation", async () => {
     const boss = fakeBoss();
-    const publisher = new ConversationCompletionJobPublisher(boss.value);
+    const publisher = new ConversationCompletionJobPublisher(
+      boss.value,
+      preparedWork,
+    );
     await publisher.enqueue(transaction(), aggregate("normal"));
 
     expect(boss.send).toHaveBeenCalledTimes(2);
@@ -41,7 +44,10 @@ describe("conversation completion job publisher", () => {
 
   it("does not enqueue long-term memory extraction for a temporary call", async () => {
     const boss = fakeBoss();
-    const publisher = new ConversationCompletionJobPublisher(boss.value);
+    const publisher = new ConversationCompletionJobPublisher(
+      boss.value,
+      preparedWork,
+    );
     await publisher.enqueue(transaction(), aggregate("temporary"));
 
     expect(boss.send).toHaveBeenCalledTimes(1);
@@ -87,6 +93,20 @@ function fakeBoss() {
 
 function transaction(): DatabaseTransaction {
   return {} as DatabaseTransaction;
+}
+
+async function preparedWork(
+  _transaction: DatabaseTransaction,
+  _aggregate: ConversationAggregate,
+  purpose: "conversation_summary" | "memory_extraction",
+) {
+  return {
+    id:
+      purpose === "conversation_summary"
+        ? "2fd4cbb6-fce4-40e2-9141-22f3a1bc2051"
+        : "2fd4cbb6-fce4-40e2-9141-22f3a1bc2052",
+    modelProfileId: "f9784de7-4c21-4c73-9507-54c3aa4d0281",
+  };
 }
 
 function aggregate(mode: "normal" | "temporary"): ConversationAggregate {

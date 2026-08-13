@@ -5,7 +5,16 @@ import type {
   MediaCleanupHook,
   MediaCleanupRequest,
 } from "@meet/database";
-import { sql } from "drizzle-orm";
+import {
+  aiWorkItems,
+  conversations,
+  modelConnections,
+  modelPurposeBindings,
+  providerProfiles,
+  type Database,
+} from "@meet/database";
+import type { ModelPurpose } from "@meet/protocol";
+import { and, eq, sql } from "drizzle-orm";
 import { fromDrizzle, PgBoss } from "pg-boss";
 
 import {
@@ -107,7 +116,10 @@ export class MediaCleanupJobPublisher {
 }
 
 export class ConversationCompletionJobPublisher {
-  constructor(private readonly boss: PgBoss) {}
+  constructor(
+    private readonly boss: PgBoss,
+    private readonly prepareWork: typeof prepareAiWorkItem = prepareAiWorkItem,
+  ) {}
 
   readonly enqueue: ConversationCompletionHook = async (
     transaction,
@@ -124,11 +136,19 @@ export class ConversationCompletionJobPublisher {
     aggregate: ConversationAggregate,
   ): Promise<void> {
     const conversation = aggregate.conversation;
+    const work = await this.prepareWork(
+      transaction,
+      aggregate,
+      "conversation_summary",
+    );
+    if (!work) return;
     const payload = conversationFinalizeJobSchema.parse({
       idempotencyKey: `${CONVERSATION_FINALIZE_QUEUE}:${conversation.id}:${conversation.lastSequence}`,
       conversationId: conversation.id,
       userId: conversation.userId,
       completedSequence: conversation.lastSequence,
+      workItemId: work.id,
+      modelProfileId: work.modelProfileId,
     });
     const jobId = await this.boss.send(CONVERSATION_FINALIZE_QUEUE, payload, {
       db: fromDrizzle(transaction, sql),
@@ -141,15 +161,142 @@ export class ConversationCompletionJobPublisher {
     aggregate: ConversationAggregate,
   ): Promise<void> {
     const conversation = aggregate.conversation;
+    const work = await this.prepareWork(
+      transaction,
+      aggregate,
+      "memory_extraction",
+    );
+    if (!work) return;
     const payload = memoryExtractJobSchema.parse({
       idempotencyKey: `${MEMORY_EXTRACT_QUEUE}:${conversation.id}:${conversation.lastSequence}`,
       conversationId: conversation.id,
       userId: conversation.userId,
       completedSequence: conversation.lastSequence,
+      workItemId: work.id,
+      modelProfileId: work.modelProfileId,
     });
     const jobId = await this.boss.send(MEMORY_EXTRACT_QUEUE, payload, {
       db: fromDrizzle(transaction, sql),
     });
     if (!jobId) throw new Error("Memory extraction job was not created.");
   }
+}
+
+async function prepareAiWorkItem(
+  transaction: DatabaseTransaction,
+  aggregate: ConversationAggregate,
+  purpose: "conversation_summary" | "memory_extraction",
+): Promise<{ id: string; modelProfileId: string } | null> {
+  const [binding] = await transaction
+    .select({ modelProfileId: modelPurposeBindings.modelProfileId })
+    .from(modelPurposeBindings)
+    .innerJoin(
+      providerProfiles,
+      and(
+        eq(modelPurposeBindings.modelProfileId, providerProfiles.id),
+        eq(providerProfiles.kind, "text"),
+        eq(providerProfiles.status, "enabled"),
+      ),
+    )
+    .innerJoin(
+      modelConnections,
+      and(
+        eq(providerProfiles.connectionId, modelConnections.id),
+        eq(modelConnections.status, "enabled"),
+      ),
+    )
+    .where(eq(modelPurposeBindings.purpose, purpose))
+    .limit(1);
+  const [inserted] = await transaction
+    .insert(aiWorkItems)
+    .values({
+      conversationId: aggregate.conversation.id,
+      purpose,
+      modelProfileId: binding?.modelProfileId ?? null,
+      status: binding ? "queued" : "waiting_configuration",
+      completedSequence: aggregate.conversation.lastSequence,
+      queuedAt: binding ? new Date() : null,
+    })
+    .onConflictDoNothing()
+    .returning();
+  const work =
+    inserted ??
+    (
+      await transaction
+        .select()
+        .from(aiWorkItems)
+        .where(
+          and(
+            eq(aiWorkItems.conversationId, aggregate.conversation.id),
+            eq(aiWorkItems.purpose, purpose),
+          ),
+        )
+        .limit(1)
+    )[0];
+  return work?.status === "queued" && work.modelProfileId
+    ? { id: work.id, modelProfileId: work.modelProfileId }
+    : null;
+}
+
+export class ModelBindingJobReconciler {
+  constructor(
+    private readonly boss: PgBoss,
+    private readonly db: Database,
+  ) {}
+
+  async enqueueWaiting(purpose: ModelPurpose, modelProfileId: string) {
+    if (purpose === "realtime_default") return;
+    await this.db.transaction(async (tx) => {
+      const waiting = await tx
+        .update(aiWorkItems)
+        .set({
+          modelProfileId,
+          status: "queued",
+          queuedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(aiWorkItems.purpose, purpose),
+            eq(aiWorkItems.status, "waiting_configuration"),
+          ),
+        )
+        .returning();
+      for (const work of waiting) {
+        const queue =
+          purpose === "conversation_summary"
+            ? CONVERSATION_FINALIZE_QUEUE
+            : MEMORY_EXTRACT_QUEUE;
+        const schema =
+          purpose === "conversation_summary"
+            ? conversationFinalizeJobSchema
+            : memoryExtractJobSchema;
+        const payload = schema.parse({
+          idempotencyKey: `${queue}:${work.conversationId}:${work.completedSequence}`,
+          conversationId: work.conversationId,
+          userId: await conversationUserId(tx, work.conversationId),
+          completedSequence: work.completedSequence,
+          workItemId: work.id,
+          modelProfileId,
+        });
+        const jobId = await this.boss.send(queue, payload, {
+          db: fromDrizzle(tx, sql),
+        });
+        if (!jobId) throw new Error("Waiting AI work job was not created.");
+      }
+    });
+  }
+}
+
+async function conversationUserId(
+  transaction: DatabaseTransaction,
+  conversationId: string,
+): Promise<string> {
+  const [row] = await transaction
+    .select({ userId: conversations.userId })
+    .from(conversations)
+    .where(eq(conversations.id, conversationId))
+    .limit(1);
+  if (!row) throw new Error("AI work conversation is missing.");
+  return row.userId;
 }

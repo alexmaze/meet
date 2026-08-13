@@ -35,8 +35,8 @@ describe("Doubao realtime protocol", () => {
     ).toBe(true);
   });
 
-  it("rejects arbitrary models and close events without an id", () => {
-    expect(doubaoRealtimeModelSchema.safeParse("latest").success).toBe(false);
+  it("accepts administrator-configured model ids and rejects close events without an id", () => {
+    expect(doubaoRealtimeModelSchema.safeParse("latest").success).toBe(true);
     expect(
       doubaoSessionCloseEventSchema.safeParse({ type: "session.close" })
         .success,

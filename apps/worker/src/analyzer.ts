@@ -61,9 +61,10 @@ type QwenAnalyzerOptions = {
   model: string;
   requestTimeoutMs: number;
   fetchFunction?: typeof globalThis.fetch;
+  compatibilityPreset?: "standard" | "dashscope";
 };
 
-export class QwenConversationAnalyzer implements ConversationAnalyzer {
+export class OpenAICompatibleConversationAnalyzer implements ConversationAnalyzer {
   readonly model: string;
   private readonly endpoint: string;
   private readonly fetchFunction: typeof globalThis.fetch;
@@ -115,7 +116,9 @@ export class QwenConversationAnalyzer implements ConversationAnalyzer {
           { role: "user", content: userPrompt },
         ],
         response_format: { type: "json_object" },
-        enable_thinking: false,
+        ...(this.options.compatibilityPreset === "dashscope"
+          ? { enable_thinking: false }
+          : {}),
         temperature: 0.1,
       }),
       signal: AbortSignal.timeout(this.options.requestTimeoutMs),
@@ -129,6 +132,13 @@ export class QwenConversationAnalyzer implements ConversationAnalyzer {
     const content = completion.choices[0]?.message.content;
     if (!content) throw new Error("Qwen analysis response had no content.");
     return JSON.parse(content) as unknown;
+  }
+}
+
+// 兼容既有测试与调用方；新运行时使用更准确的 OpenAI-compatible 名称。
+export class QwenConversationAnalyzer extends OpenAICompatibleConversationAnalyzer {
+  constructor(options: QwenAnalyzerOptions) {
+    super({ compatibilityPreset: "dashscope", ...options });
   }
 }
 

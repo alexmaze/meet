@@ -1,44 +1,6 @@
-import {
-  doubaoRealtimeModelSchema,
-  qwenRealtimeModelSchema,
-  qwenRealtimeRegionSchema,
-  type QwenRealtimeModel,
-  type QwenRealtimeRegion,
-} from "@meet/protocol";
+import type { QwenRealtimeModel, QwenRealtimeRegion } from "@meet/protocol";
 import { z } from "zod";
 import { resolve } from "node:path";
-
-import { normalizeQwenRealtimeEndpoint } from "./qwen.js";
-
-const optionalSecretSchema = z.preprocess(
-  (value) =>
-    typeof value === "string" && value.trim() === "" ? undefined : value,
-  z.string().trim().min(1).optional(),
-);
-
-const optionalEndpointSchema = z.preprocess(
-  (value) =>
-    typeof value === "string" && value.trim() === "" ? undefined : value,
-  z
-    .string()
-    .trim()
-    .min(1)
-    .transform((value, context) => {
-      try {
-        return normalizeQwenRealtimeEndpoint(value);
-      } catch (error) {
-        context.addIssue({
-          code: "custom",
-          message:
-            error instanceof Error
-              ? error.message
-              : "QWEN_REALTIME_ENDPOINT 格式无效。",
-        });
-        return z.NEVER;
-      }
-    })
-    .optional(),
-);
 
 const optionalDatabaseUrlSchema = z.preprocess(
   (value) =>
@@ -79,42 +41,6 @@ const envSchema = z.object({
     .min(10)
     .max(3_600)
     .default(300),
-  REALTIME_SPIKE_ENABLED: z
-    .enum(["true", "false"])
-    .default("false")
-    .transform((value) => value === "true"),
-  DASHSCOPE_API_KEY: optionalSecretSchema,
-  QWEN_REALTIME_ENDPOINT: optionalEndpointSchema,
-  QWEN_REALTIME_REGION: qwenRealtimeRegionSchema.default("cn-beijing"),
-  QWEN_REALTIME_MODEL: qwenRealtimeModelSchema.default(
-    "qwen-audio-3.0-realtime-plus",
-  ),
-  QWEN_REALTIME_VOICE: z.string().trim().min(1).default("longanqian"),
-  QWEN_REALTIME_REQUEST_TIMEOUT_MS: z.coerce
-    .number()
-    .int()
-    .min(1_000)
-    .max(60_000)
-    .default(15_000),
-  QWEN_REALTIME_INSTRUCTIONS: z
-    .string()
-    .trim()
-    .min(1)
-    .default(
-      "你是一位自然、耐心、有角色感的中文聊天伙伴。先听清用户再回答，默认简短口语化，不要像客服或说明书。",
-    ),
-  DOUBAO_REALTIME_ENABLED: z
-    .enum(["true", "false"])
-    .default("false")
-    .transform((value) => value === "true"),
-  DOUBAO_SPEECH_API_KEY: optionalSecretSchema,
-  DOUBAO_REALTIME_MODEL: doubaoRealtimeModelSchema.default("1.2.6.1"),
-  DOUBAO_REALTIME_REQUEST_TIMEOUT_MS: z.coerce
-    .number()
-    .int()
-    .min(1_000)
-    .max(60_000)
-    .default(15_000),
   MEDIA_LOCAL_DIR: z.string().trim().min(1).default("./data/media"),
 });
 
@@ -147,7 +73,7 @@ export type AppConfig = {
   doubao?: {
     enabled: boolean;
     apiKey?: string;
-    model: "1.2.6.1";
+    model: string;
     requestTimeoutMs: number;
   };
   media?: {
@@ -182,20 +108,17 @@ export function loadConfig(
       loginWindowMs: env.AUTH_LOGIN_WINDOW_SECONDS * 1_000,
     },
     qwen: {
-      enabled: env.REALTIME_SPIKE_ENABLED,
-      apiKey: env.DASHSCOPE_API_KEY,
-      endpoint: env.QWEN_REALTIME_ENDPOINT,
-      region: env.QWEN_REALTIME_REGION,
-      model: env.QWEN_REALTIME_MODEL,
-      voice: env.QWEN_REALTIME_VOICE,
-      instructions: env.QWEN_REALTIME_INSTRUCTIONS,
-      requestTimeoutMs: env.QWEN_REALTIME_REQUEST_TIMEOUT_MS,
+      enabled: false,
+      region: "cn-beijing",
+      model: "qwen-audio-3.0-realtime-plus",
+      voice: "longanqian",
+      instructions: "模型运行配置由管理员界面管理。",
+      requestTimeoutMs: 15_000,
     },
     doubao: {
-      enabled: env.DOUBAO_REALTIME_ENABLED,
-      apiKey: env.DOUBAO_SPEECH_API_KEY,
-      model: env.DOUBAO_REALTIME_MODEL,
-      requestTimeoutMs: env.DOUBAO_REALTIME_REQUEST_TIMEOUT_MS,
+      enabled: false,
+      model: "1.2.6.1",
+      requestTimeoutMs: 15_000,
     },
     media: {
       localDirectory: resolve(env.MEDIA_LOCAL_DIR),

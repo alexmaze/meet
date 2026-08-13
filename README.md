@@ -73,7 +73,7 @@ Meet 是一个私有部署、供家庭内部使用的 AI 实时语音角色扮�
 - 角色卡保存语速、活力、温柔程度和情绪表现等声音风格，通话中可临时调整；
 - 视觉采用简洁中性的基础界面，并按角色切换主题色、背景和氛围；
 - 通话页使用大幅角色立绘、模糊延展背景、悬浮当前字幕和底部固定控制栏；
-- 第一版默认使用千问 `qwen-audio-3.0-realtime-plus` 实现纯语音角色体验；
+- 预置推荐千问 `qwen-audio-3.0-realtime-plus`，部署后由管理员测试、启用并明确设置实时默认；
 - Qwen-Audio 不支持图片输入，拍题和教学图片保留 Qwen3.5 Omni Plus Realtime 或独立视觉分析回退；
 - 支持豆包实时语音 3.0 全双工版本（Seeduplex，模型 `1.2.6.1`），用于中文角色表现对比测试；
 - 从第一天保留模型供应商和音色的可替换边界；
@@ -86,6 +86,7 @@ Meet 是一个私有部署、供家庭内部使用的 AI 实时语音角色扮�
 - [实时语音模型调研](docs/research/realtime-models-2026-08-08.md)
 - [已确认的产品与模型决策](docs/decisions/0001-product-and-model-strategy.md)
 - [业务开发与第一版默认实时模型决策](docs/decisions/0025-business-development-and-default-realtime-model.md)
+- [管理员模型配置与用途绑定决策](docs/decisions/0029-admin-managed-model-configuration.md)
 - [Qwen WebSocket PCM 与确定性打断决策](docs/decisions/0026-qwen-websocket-pcm-playback.md)
 - [豆包全双工实时语音 Provider 决策](docs/decisions/0028-doubao-full-duplex-realtime-provider.md)
 
@@ -115,32 +116,21 @@ pnpm admin:reset-password --username admin
 
 登录后的角色首页会直接显示星盾队长、林老师和知夏三个家庭预置角色。点击角色卡的“通话”按钮会使用该角色已经保存的人设、声音和开场策略进入实时通话，点击卡片其他区域可以查看角色卡。角色人设默认按结构化字段编辑，也可以切换到“完整 Prompt”高级模式直接维护一段完整文本。管理员和成人可以创建、编辑、复制与删除自己的角色；管理员创建的角色默认全家共享，成人创建的角色默认私有并可主动共享，儿童只能查看和使用家庭公共角色。预置角色只能由管理员修改和恢复，恢复不会删除任何成员与该角色的会话或记忆。
 
-角色创建与编辑页会展示 `qwen-audio-3.0-realtime-plus` 当前 5 个系统音色：`longanqian`、`longanlingxin`、`longanlingxi`、`longanxiaoxin`、`longanlufeng`。管理员和成人可以用固定短句生成并播放试听；试听由带账号认证的 API 在服务端连接千问、汇总 24 kHz PCM 并返回短 WAV，不创建业务会话、不申请麦克风，也不向浏览器暴露 API Key 或 Endpoint。角色形象可以选择内置图片或上传不超过 5 MB 的 JPG、PNG、WebP；上传文件通过私有 MediaStore 保存，并按角色可见性授权读取。
+角色创建与编辑页只展示管理员已经测试并启用的实时模型和音色。管理员和成人可以为自己有编辑权的角色选择模型与声音并用固定短句试听；儿童没有选模入口。试听由带账号认证的 API 在服务端按角色配置连接供应商，不创建业务会话、不申请麦克风，也不向浏览器暴露 API Key 或 Endpoint。角色形象可以选择内置图片或上传不超过 5 MB 的 JPG、PNG、WebP；上传文件通过私有 MediaStore 保存，并按角色可见性授权读取。
 
 通话开始后会创建当前账号自己的会话记录，已确认的用户和角色字幕按稳定 ID 与连续序号幂等保存。正常结束时会话自动收口；网络或页面异常导致未收口时，历史页会明确标记“未正常结束”。用户选择“延续关系”时，服务端会在角色首次开口前加载同一账号、同一角色的已确认长期记忆、最近会话摘要和最多 24 条已保存消息，并分别按 8,000 与 12,000 字符预算注入新的供应商会话；开场指令会要求自然承接已有话题，不能逐条朗读记忆或重复首次见面的固定欢迎语。“临时对话”仍会保留自己的历史文字并生成本次摘要，但不会加载以前的私人关系上下文，也不会提取长期记忆。历史页支持查看完整字幕、再次呼叫同一角色和删除自己的记录。管理员不能读取成人账号的历史；对儿童历史的服务端读取仍受该儿童账号的监护权限配置约束。
 
-正常结束会话时，API 会在完成会话的同一数据库事务中投递 `conversation.finalize` 和 `memory.extract` 任务；临时会话只投递摘要任务。独立 Worker 使用千问兼容 Chat Completions JSON Mode 生成摘要和记忆候选。只有“明确表达 + 稳定事实 + 高置信度”会自动保存，其他稳定但存疑的内容进入“记忆”页等待接受、编辑或拒绝；用户也可以编辑或删除已确认记忆。被用户拒绝或删除的相同内容不会被后台任务自动恢复。任务 payload、处理写入和消息来源都带业务幂等边界，最终失败保留在对应死信队列中供后续诊断。
+正常结束会话时，API 会在完成会话的同一数据库事务中为摘要和记忆分别创建持久工作项；临时会话只创建摘要工作项。有可用用途绑定时，工作项固定记录当时的文本模型配置 ID 后入队；没有绑定时进入“等待模型配置”，不影响会话保存，管理员补齐绑定后自动补发。独立 Worker 按工作项动态解析 OpenAI-compatible Chat Completions JSON Mode 连接，无需重启。只有“明确表达 + 稳定事实 + 高置信度”会自动保存，其他稳定但存疑的内容进入“记忆”页等待处理。最终失败仍保留在死信队列，摘要和记忆结果记录模型配置 ID 与实际模型 ID。
 
 实时 WebSocket 意外断开后，页面会立即关闭麦克风发送并清空旧 PCM，然后在总计约 30 秒的窗口内按 1、2、4、8 秒退避重建同一模型、同一声音的连接。每次重建前先幂等补写尚未确认到服务端的完整字幕；替代会话会加载当前通话和此前关系中已确认的消息，不重放未完成音频，也不会让角色再次说开场白。PWA 返回前台时会检查恢复状态并立即再试，同时重新确认麦克风轨道可用。30 秒仍未恢复时通话进入暂停，用户可以选择“继续重试”或“结束”；结束仍会保存已经确认的记录。临时对话恢复时只加载本次临时通话自己的已确认消息，不会借恢复路径读取其他会话。
 
-配置千问实时服务时，在 `.env` 中填写服务端 API Key 与可用 Endpoint：
+### 管理员模型设置
 
-```dotenv
-DASHSCOPE_API_KEY=在服务端填写真实值
-QWEN_REALTIME_ENDPOINT=商务提供的Endpoint主机名
-```
+运行 `pnpm db:migrate` 后，管理员从“我的 → 模型设置”按“供应商连接 → 模型 → 音色 → 测试 → 启用 → 默认/用途”的顺序配置。千问和豆包使用各自的实时适配器；文本模型首版支持 Bearer API Key、HTTPS Base URL 和标准 `/chat/completions` JSON Mode，可选择标准或阿里百炼兼容预设。连接更新先保存为候选修订，只有真实测试成功才原子替换活动配置。
 
-Endpoint 推荐填写纯 hostname；也接受不带路径、查询参数或端口的 HTTPS origin。服务端默认自行连接 `/api-ws/v1/realtime?model=...`，不能通过 Workspace ID 推导接入地址。执行 `pnpm dev` 后，Web 默认监听 `0.0.0.0:5173`，API 默认监听 `0.0.0.0:8787`；本机可访问 `http://localhost:5173`，同一局域网设备可通过开发机 IP 和 5173 端口访问。API Key 和 Endpoint 只由 API 读取，不会返回浏览器。
+API 密钥按已确认方案明文保存在私有 PostgreSQL 中。管理 API 和浏览器永不获得密钥内容，只能看到“已配置”；日志、审计和错误响应也不得包含密钥。数据库或磁盘快照一旦泄露将直接暴露密钥，生产部署必须限制数据库与快照访问。遗留的 `DASHSCOPE_API_KEY`、`QWEN_*`、`DOUBAO_*`、`QWEN_ANALYSIS_*` 变量不会被导入或继续读取，进程只输出不含值的废弃提示。
 
-摘要与长期记忆 Worker 默认复用 `DASHSCOPE_API_KEY`，并使用北京地域兼容接口与 `qwen-plus`：
-
-```dotenv
-QWEN_ANALYSIS_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-QWEN_ANALYSIS_MODEL=qwen-plus
-QWEN_ANALYSIS_REQUEST_TIMEOUT_MS=60000
-```
-
-`pnpm dev` 会同时启动 Web、API 和 Worker；也可以分别使用 `pnpm dev:api`、`pnpm dev:web` 与 `pnpm dev:worker`。Worker 不把原始转写、分析提示词或 API Key 写入常规日志。
+升级保留现有角色、模型和音色 ID，但模型初始为未配置草稿。管理员以相同供应商和模型 ID 新建模型时会重新挂接原记录；完成测试、启用并设置实时默认及两个文本用途后，原角色即可恢复通话，等待分析的会话会自动补发任务。`pnpm dev` 会同时启动 Web、API 和 Worker；也可以分别使用 `pnpm dev:api`、`pnpm dev:web` 与 `pnpm dev:worker`。
 
 媒体对象默认写入 `MEDIA_LOCAL_DIR` 指定的私有目录，数据库只保存不透明对象 key、所有者、类型、大小、校验值和保留状态。生产环境应把该目录放在持久化磁盘，并与 PostgreSQL 一起纳入项目所有者配置的磁盘快照。媒体内容只能通过带账号认证的 API 读取，不使用永久公开 URL。
 
@@ -154,18 +144,7 @@ QWEN_ANALYSIS_REQUEST_TIMEOUT_MS=60000
 
 WebRTC 实验路径的设置、协议说明和已知限制见 [千问 WebRTC 技术验证](docs/spikes/qwen-realtime-webrtc.md)；默认传输与打断边界见 [ADR-0026](docs/decisions/0026-qwen-websocket-pcm-playback.md)。
 
-### 豆包全双工实时语音
-
-先在火山引擎新版豆包语音控制台取得 API Key，再在服务端 `.env` 配置：
-
-```dotenv
-DOUBAO_REALTIME_ENABLED=true
-DOUBAO_SPEECH_API_KEY=在服务端填写真实值
-DOUBAO_REALTIME_MODEL=1.2.6.1
-DOUBAO_REALTIME_REQUEST_TIMEOUT_MS=15000
-```
-
-运行 `pnpm db:migrate` 后，角色编辑器会出现“豆包实时语音 3.0 全双工” Provider 及 Vivi、小何、云舟、小天四个音色。API Key 只用于 API 到 `wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue` 的上游连接，不返回浏览器，也不得提交到版本库。豆包链路使用 16 kHz PCM 输入、24 kHz PCM 输出、显式 `response.cancel` 打断和 `session.close` 优雅关闭。详细边界见 [ADR-0028](docs/decisions/0028-doubao-full-duplex-realtime-provider.md)。
+豆包链路仍使用 16 kHz PCM 输入、24 kHz PCM 输出、显式 `response.cancel` 打断和 `session.close` 优雅关闭；模型 ID 由管理员配置并由豆包适配器校验，不再由环境变量固定。详细协议边界见 [ADR-0028](docs/decisions/0028-doubao-full-duplex-realtime-provider.md)，配置生命周期见 [ADR-0029](docs/decisions/0029-admin-managed-model-configuration.md)。
 
 ## 下一步
 

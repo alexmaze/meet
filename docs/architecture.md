@@ -107,9 +107,9 @@ interface MediaStore {
 
 ## 2. 供应商适配边界
 
-第一版默认实时语音实现连接 `qwen-audio-3.0-realtime-plus`：浏览器通过同源、带账号认证的 Fastify WebSocket 连接中继，中继使用服务端凭据连接供应商 WebSocket。浏览器发送 16 kHz PCM16 单声道分片，并用应用持有、可按 `response_id` 和 generation 清空的 24 kHz PCM 队列播放模型音频。免提会话配置为 `turn_detection.type: "smart_turn"`，默认系统音色为 `longanqian`。这个默认值用于推进当前业务闭环，不构成永久供应商绑定。该模型最多保留 50 轮、累计 300 秒音频上下文，其中 `max_history_turns` 默认是 20；这些是供应商的短期上下文边界，不能替代应用自己的会话记录、摘要和长期记忆。
+千问适配器推荐 `qwen-audio-3.0-realtime-plus`：浏览器通过同源、带账号认证的 Fastify WebSocket 连接中继，中继使用数据库解析出的服务端凭据连接供应商 WebSocket。浏览器发送 16 kHz PCM16 单声道分片，并用应用持有、可按 `response_id` 和 generation 清空的 24 kHz PCM 队列播放模型音频。免提会话配置为 `turn_detection.type: "smart_turn"`，推荐系统音色为 `longanqian`。模型与音色必须由管理员测试、启用并绑定角色，没有隐式运行默认。该模型最多保留 50 轮、累计 300 秒音频上下文，其中 `max_history_turns` 默认是 20；这些是供应商的短期上下文边界，不能替代应用自己的会话记录、摘要和长期记忆。
 
-部署者以 `QWEN_REALTIME_ENDPOINT` 配置供应商允许的 Endpoint；不能从 Workspace ID 拼接或推导信令域名。服务端只接受 hostname 或不带额外 path、query、hash、用户信息和非默认端口的 HTTPS origin，再为默认链路自行追加 `/api-ws/v1/realtime?model=...`。API Key、Endpoint、上游鉴权头和完整角色提示词均不下发浏览器，也不进入常规日志。
+管理员在模型设置中录入商务提供的千问 Endpoint；不能从 Workspace ID 拼接或推导信令域名。适配器校验 HTTPS/WSS 地址并为千问链路构造固定协议路径。API Key、上游鉴权头和完整角色提示词均不下发浏览器，也不进入常规日志。Endpoint 可作为非敏感连接元数据返回管理员界面。
 
 默认 WebSocket 建连时，浏览器先启动带回声消除、降噪和自动增益约束的麦克风采集与可清空播放器，再连接同源中继。中继先校验 Origin、登录状态、角色可见性、Provider Profile 与速率/帧大小边界，然后连接固定的供应商地址。浏览器只能发送允许列表内的会话配置、PCM append、文本、响应创建和取消事件；模型、声音和角色指令由服务端解析角色运行时配置后约束。
 
@@ -208,7 +208,7 @@ connecting → active → reconnecting → active
 
 当前 Qwen-Audio WebSocket 协议的一条连接对应一个供应商会话，没有跨连接继续原会话的接口，因此默认实现直接使用替代会话恢复。浏览器在意外关闭时关闭麦克风 gate、清空带 generation 的 PCM 队列和未确认草稿，在 30 秒窗口内按 1、2、4、8 秒退避连接同一角色运行时；返回前台会取消等待并立即尝试。每次尝试前先调用现有幂等消息接口补写待确认的完整字幕，API 随后从当前活动会话和普通关系历史加载有界上下文。临时会话只允许加载当前会话自身的消息。替代会话收到 `session.updated` 后恢复麦克风，但保留“已经请求过开场”的客户端标志，不重复发送开场请求。30 秒超时进入 `paused`，保留媒体与业务会话供用户手动继续重试或结束保存；未完成的旧 PCM 和转写草稿有意不恢复。
 
-豆包 Provider 使用实时语音 3.0 全双工接口（Seeduplex）和固定模型版本 `1.2.6.1`。浏览器仍只连接同源 Fastify WebSocket；中继用服务端 `X-Api-Key` 连接固定的火山引擎地址，并自行发送 `session.create`。浏览器只能发送 PCM append、强制判停、回复取消、保存的开场白合成和优雅关闭事件，不能覆盖模型、声音或角色 Prompt。
+豆包 Provider 使用实时语音 3.0 全双工接口（Seeduplex）。浏览器仍只连接同源 Fastify WebSocket；中继用数据库解析出的服务端 `X-Api-Key` 连接管理员配置的适配器端点，并自行发送 `session.create`。管理员可以配置适配器兼容的模型 ID；浏览器只能发送 PCM append、强制判停、回复取消、保存的开场白合成和优雅关闭事件，不能覆盖模型、声音或角色 Prompt。
 
 豆包链路复用 16 kHz、20 ms PCM 麦克风分片与 24 kHz 可清空 PCM 播放队列。收到用户转写 started 时立即失效旧播放 generation，并在存在活动回复时发送 `response.cancel`；PTT 松开额外发送 `input_audio_buffer.commit`。正常结束发送 `session.close` 并有限等待 `session.closed`。重连继续创建同模型、同音色的替代会话，由应用注入已确认的有界上下文，不静默切换到千问。
 
@@ -292,11 +292,17 @@ type VoiceProfile = {
 
 角色不直接保存某个供应商的全部会话参数。更换模型或从预设音色升级到克隆音色时，只替换关联的 Provider Profile 或 Voice Profile。
 
+模型控制面由四层组成：`model_connections` 保存适配器、活动连接和候选修订；`provider_profiles` 保存实时或文本模型及验证状态；`voice_profiles` 保存内置或自定义音色；`model_purpose_bindings` 保存实时默认、摘要和记忆用途。管理员写接口使用 Zod 校验和 revision 乐观锁，并写入不含凭据的 `model_configuration_audit_events`。API 序列化连接时只返回 Endpoint、元数据与 `hasCredential`，永不返回活动或候选 API Key。凭据当前按产品决定以数据库明文保存，因此 PostgreSQL 与快照属于敏感密钥存储边界。
+
+实时通话、试听和握手都在请求开始时解析角色绑定的已启用 Profile、Voice 与活动 Connection，并把解析结果固定在该连接生命周期内。Provider Adapter 接收解析后的运行时连接；共享协议只校验非空模型 ID，适配器负责协议兼容性，管理状态负责验证与启用门槛。模型停用后既有连接不受影响，新请求返回可解释的配置错误；系统不自动替换模型或音色。
+
+会话完成事务向 `ai_work_items` 分别写入摘要和记忆工作。存在有效用途绑定时，工作项保存固定 `model_profile_id` 并通过 pg-boss 入队；不存在时保存为 `waiting_configuration`。管理员建立用途绑定后，协调器在数据库事务中把对应等待项改为 queued 并补发。Worker 每个任务按 payload 的模型配置 ID 解析 OpenAI-compatible 连接，允许已入队任务继续使用后来停用但未删除的配置。摘要和记忆结果保存分析器 Profile ID 与实际模型 ID，形成可追溯链路。
+
 Voice Profile 属于角色定义而不是用户偏好。共享角色的所有用户解析到同一个 Voice Profile，不建立账号级覆盖层。未来克隆音色仍使用相同结构，只把 `type` 改为 `cloned` 并替换供应商声音 ID。
 
 音色推荐服务读取结构化角色卡和当前供应商可用音色元数据，返回至多 3 个带推荐理由的候选。最终 Voice Profile 只能在用户试听并确认后保存；推荐服务不能静默决定角色声音。
 
-当前 Qwen Audio Profile 内置供应商公开的 5 个系统音色。角色创建与编辑页的试听请求只携带目录内 Voice Profile ID；API 解析对应模型和供应商音色后，使用固定短句建立一次短时上游连接，把返回的 24 kHz PCM 封装成 WAV。试听接口按账号与来源限速，不创建 Conversation 或 Message，不接收任意试听文案，也不把供应商凭据或 Endpoint 下发浏览器。
+千问和豆包适配器内置已知音色目录，管理员也可以添加音色 ID 与显示名。角色创建与编辑页的试听请求只携带目录内 Voice Profile ID；API 解析对应模型和供应商音色后，使用固定短句建立一次短时上游连接，把返回的 24 kHz PCM 封装成 WAV。自定义音色只有测试成功后才进入可选目录。试听接口按账号与来源限速，不创建 Conversation 或 Message，不接收任意试听文案，也不把供应商凭据下发浏览器。
 
 `PersonaDefinition` 支持两种模式。默认结构化模式包含背景、核心性格、与用户关系、说话习惯、情绪风格、对话目标和示例台词，系统根据这些字段生成运行时提示词。完整 Prompt 高级模式保存一段最多 12,000 字符的自定义文本，并直接将其作为角色人设指令主体；运行时不得再混入结构化人设栏目。缺少模式字段的既有数据按结构化模式读取。
 
@@ -461,7 +467,7 @@ type CharacterMemory = {
 
 ## 9. 实施顺序
 
-1. 已完成单页面实时语音技术样例，第一版默认接 `qwen-audio-3.0-realtime-plus`；
+1. 已完成单页面实时语音技术样例，预置推荐 `qwen-audio-3.0-realtime-plus`，实际运行默认由管理员测试、启用并绑定；
 2. 建立 PostgreSQL、Drizzle、共享配置与 Provider Adapter 基础，把现有千问实现收敛到供应商边界内；
 3. 实现管理员初始化、家庭成员管理、登录会话和服务端授权隔离；
 4. 已以预置角色、结构化角色卡、角色权限、角色首页和实时通话完成第一个业务纵向切片；

@@ -4,6 +4,20 @@ import { loadProjectEnvironment } from "./load-environment.js";
 
 loadProjectEnvironment();
 
+const legacyModelVariables = Object.keys(process.env)
+  .filter(
+    (name) =>
+      name === "DASHSCOPE_API_KEY" ||
+      name.startsWith("QWEN_") ||
+      name.startsWith("DOUBAO_"),
+  )
+  .sort();
+if (legacyModelVariables.length > 0) {
+  console.warn(
+    `以下模型环境变量已停用，请在管理员模型设置中重新配置：${legacyModelVariables.join(", ")}`,
+  );
+}
+
 const config = loadConfig();
 const app = await buildApp({ config });
 

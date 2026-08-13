@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const doubaoRealtimeModelSchema = z.literal("1.2.6.1");
+export const doubaoRealtimeModelSchema = z.string().trim().min(1).max(160);
 
 export type DoubaoRealtimeModel = z.infer<typeof doubaoRealtimeModelSchema>;
 

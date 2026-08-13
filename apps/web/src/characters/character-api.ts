@@ -15,7 +15,7 @@ import {
   type CharacterRuntimeResponse,
   type CharacterSummary,
   type CreateCharacterRequest,
-  type ProviderProfile,
+  type RealtimeModelProfile,
   type UpdateCharacterRequest,
   type UpdateCharacterVisibilityRequest,
   type VoiceProfile,
@@ -32,8 +32,9 @@ export class CharacterApiError extends Error {
 }
 
 export type CharacterCatalog = {
-  providers: ProviderProfile[];
+  realtimeModels: RealtimeModelProfile[];
   voices: VoiceProfile[];
+  realtimeDefaultModelProfileId: string | null;
 };
 
 const jsonHeaders = {

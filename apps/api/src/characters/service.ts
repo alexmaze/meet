@@ -4,7 +4,7 @@ import type {
   CharacterRuntimeResponse,
   CharacterSummary,
   CreateCharacterRequest,
-  ProviderProfile,
+  RealtimeModelProfile,
   UpdateCharacterRequest,
   UserAccount,
   VoiceProfile,
@@ -104,15 +104,17 @@ export class CharacterService {
   }
 
   async catalog(): Promise<{
-    providers: ProviderProfile[];
+    realtimeModels: RealtimeModelProfile[];
     voices: VoiceProfile[];
+    realtimeDefaultModelProfileId: string | null;
   }> {
     const catalog = await this.callRepository((repository) =>
       repository.listCatalog(),
     );
     return {
-      providers: catalog.providers.map(toProviderProfile),
+      realtimeModels: catalog.providers.map(toRealtimeModelProfile),
       voices: catalog.voices.map(toVoiceProfile),
+      realtimeDefaultModelProfileId: catalog.realtimeDefaultProfileId ?? null,
     };
   }
 
@@ -120,7 +122,8 @@ export class CharacterService {
     actor: UserAccount,
     voiceProfileId: string,
   ): Promise<{
-    provider: ProviderProfile["provider"];
+    realtimeModelProfileId: string;
+    provider: RealtimeModelProfile["provider"];
     model: string;
     voice: string;
   }> {
@@ -138,6 +141,7 @@ export class CharacterService {
       : null;
     if (!voice || !provider) throw invalidProfile();
     return {
+      realtimeModelProfileId: provider.id,
       provider: provider.provider,
       model: provider.model,
       voice: voice.providerVoiceId,
@@ -151,7 +155,14 @@ export class CharacterService {
     this.assertWriter(actor);
     await this.retainCharacterAvatar(actor, input.visualProfile.avatarUrl);
     const result = await this.callRepository((repository) =>
-      repository.create(actor.id, input, this.now()),
+      repository.create(
+        actor.id,
+        {
+          ...input,
+          providerProfileId: input.realtimeModelProfileId,
+        },
+        this.now(),
+      ),
     );
     if (result.kind === "forbidden") throw writeForbidden();
     if (result.kind === "invalid_profile") throw invalidProfile();
@@ -165,12 +176,23 @@ export class CharacterService {
     input: UpdateCharacterRequest,
   ): Promise<Character> {
     this.assertWriter(actor);
-    const { revision, ...changes } = input;
+    const { revision, realtimeModelProfileId, ...changes } = input;
     if (changes.visualProfile) {
       await this.retainCharacterAvatar(actor, changes.visualProfile.avatarUrl);
     }
     const result = await this.callRepository((repository) =>
-      repository.update(actor.id, characterId, revision, changes, this.now()),
+      repository.update(
+        actor.id,
+        characterId,
+        revision,
+        {
+          ...changes,
+          ...(realtimeModelProfileId === undefined
+            ? {}
+            : { providerProfileId: realtimeModelProfileId }),
+        },
+        this.now(),
+      ),
     );
     return resolveUpdateResult(result, actor);
   }
@@ -249,6 +271,14 @@ export class CharacterService {
   ): Promise<CharacterRuntimeResponse> {
     const aggregate = await this.findAggregate(actor, characterId);
     const character = toSummary(aggregate, actor);
+    const availability = realtimeAvailability(aggregate);
+    if (!availability.available) {
+      throw new CharacterServiceError(
+        "CHARACTER_REALTIME_UNAVAILABLE",
+        availability.reason ?? "该角色当前没有可用的实时语音模型。",
+        409,
+      );
+    }
     let instructions: string;
     try {
       instructions = compileCharacterInstructions(aggregate);
@@ -259,6 +289,7 @@ export class CharacterService {
       character,
       realtime: {
         provider: aggregate.providerProfile.provider,
+        realtimeModelProfileId: aggregate.providerProfile.id,
         model: aggregate.providerProfile.model,
         voice: aggregate.voiceProfile.providerVoiceId,
         instructions,
@@ -345,9 +376,38 @@ function toSummary(
     revision: record.revision,
     visualProfile: record.visualProfile,
     voiceProfile: toVoiceProfile(aggregate.voiceProfile),
+    realtimeAvailability: realtimeAvailability(aggregate),
     permissions: permissionsFor(aggregate, actor),
     updatedAt: record.updatedAt.toISOString(),
   });
+}
+
+function realtimeAvailability(aggregate: CharacterAggregate): {
+  available: boolean;
+  reason: string | null;
+} {
+  if (
+    (aggregate.providerProfile.status !== undefined &&
+      aggregate.providerProfile.status !== "enabled") ||
+    (aggregate.voiceProfile.status !== undefined &&
+      aggregate.voiceProfile.status !== "enabled")
+  ) {
+    return {
+      available: false,
+      reason: "角色绑定的实时模型或音色尚未启用，请联系管理员重新配置。",
+    };
+  }
+  if (
+    aggregate.modelConnection === null ||
+    aggregate.modelConnection?.status === "disabled" ||
+    aggregate.modelConnection?.status === "draft"
+  ) {
+    return {
+      available: false,
+      reason: "实时模型连接尚未配置完成，请联系管理员。",
+    };
+  }
+  return { available: true, reason: null };
 }
 
 function toCharacter(
@@ -360,14 +420,16 @@ function toCharacter(
     persona: record.persona,
     openingLine: record.openingLine,
     conversationPolicy: record.conversationPolicy,
-    providerProfile: toProviderProfile(aggregate.providerProfile),
+    realtimeModelProfile: toRealtimeModelProfile(aggregate.providerProfile),
     voiceProfile: toVoiceProfile(aggregate.voiceProfile),
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
   });
 }
 
-function toProviderProfile(record: ProviderProfileRecord): ProviderProfile {
+function toRealtimeModelProfile(
+  record: ProviderProfileRecord,
+): RealtimeModelProfile {
   return parsePublic(providerProfileSchema, {
     id: record.id,
     provider: record.provider,
@@ -380,7 +442,7 @@ function toProviderProfile(record: ProviderProfileRecord): ProviderProfile {
 function toVoiceProfile(record: VoiceProfileRecord): VoiceProfile {
   return parsePublic(voiceProfileSchema, {
     id: record.id,
-    providerProfileId: record.providerProfileId,
+    realtimeModelProfileId: record.providerProfileId,
     type: record.type,
     providerVoiceId: record.providerVoiceId,
     displayName: record.displayName,

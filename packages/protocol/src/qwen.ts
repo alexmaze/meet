@@ -1,9 +1,10 @@
 import { z } from "zod";
 
-export const qwenRealtimeModelSchema = z.enum([
+export const qwenRealtimeModelSchema = z.string().trim().min(1).max(160);
+export const knownQwenRealtimeModels = [
   "qwen-audio-3.0-realtime-plus",
   "qwen-audio-3.0-realtime-flash",
-]);
+] as const;
 
 export type QwenRealtimeModel = z.infer<typeof qwenRealtimeModelSchema>;
 

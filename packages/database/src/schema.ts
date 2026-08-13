@@ -8,6 +8,7 @@ import type {
 } from "@meet/protocol";
 import {
   check,
+  boolean,
   index,
   integer,
   jsonb,
@@ -69,6 +70,53 @@ export const realtimeProviderEnum = pgEnum("realtime_provider", [
   "gemini",
   "elevenlabs",
 ]);
+
+export const modelConnectionAdapterEnum = pgEnum("model_connection_adapter", [
+  "qwen_realtime",
+  "doubao_realtime",
+  "openai_chat_completions",
+]);
+
+export const modelProfileKindEnum = pgEnum("model_profile_kind", [
+  "realtime_voice",
+  "text",
+]);
+
+export const modelConfigurationStatusEnum = pgEnum(
+  "model_configuration_status",
+  ["draft", "enabled", "disabled"],
+);
+
+export const modelPurposeEnum = pgEnum("model_purpose", [
+  "realtime_default",
+  "conversation_summary",
+  "memory_extraction",
+]);
+
+export const aiWorkStatusEnum = pgEnum("ai_work_status", [
+  "waiting_configuration",
+  "queued",
+  "completed",
+  "failed",
+]);
+
+export const modelConfigurationAuditActionEnum = pgEnum(
+  "model_configuration_audit_action",
+  [
+    "connection_created",
+    "connection_updated",
+    "connection_promoted",
+    "model_created",
+    "model_updated",
+    "model_tested",
+    "model_status_changed",
+    "model_deleted",
+    "voice_created",
+    "voice_tested",
+    "voice_deleted",
+    "binding_changed",
+  ],
+);
 
 export const voiceProfileTypeEnum = pgEnum("voice_profile_type", [
   "preset",
@@ -295,6 +343,46 @@ export const accountSecurityAuditEvents = pgTable(
   ],
 );
 
+export const modelConnections = pgTable(
+  "model_connections",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    adapter: modelConnectionAdapterEnum("adapter").notNull(),
+    displayName: varchar("display_name", { length: 120 }).notNull(),
+    endpoint: text("endpoint"),
+    apiKey: text("api_key"),
+    pendingEndpoint: text("pending_endpoint"),
+    pendingApiKey: text("pending_api_key"),
+    compatibilityPreset: varchar("compatibility_preset", { length: 40 }),
+    pendingCompatibilityPreset: varchar("pending_compatibility_preset", {
+      length: 40,
+    }),
+    status: modelConfigurationStatusEnum("status").notNull().default("draft"),
+    revision: integer("revision").notNull().default(1),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
+    createdByUserId: uuid("created_by_user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    check(
+      "model_connections_display_name_not_blank",
+      sql`length(btrim(${table.displayName})) > 0`,
+    ),
+    check("model_connections_revision_positive", sql`${table.revision} > 0`),
+    check(
+      "model_connections_has_configuration",
+      sql`(${table.endpoint} IS NOT NULL AND ${table.apiKey} IS NOT NULL) OR (${table.pendingEndpoint} IS NOT NULL AND ${table.pendingApiKey} IS NOT NULL)`,
+    ),
+  ],
+);
+
 export const providerProfiles = pgTable(
   "provider_profiles",
   {
@@ -304,6 +392,18 @@ export const providerProfiles = pgTable(
     model: varchar("model", { length: 120 }).notNull(),
     displayName: varchar("display_name", { length: 120 }).notNull(),
     capabilities: jsonb("capabilities").$type<ProviderCapabilities>().notNull(),
+    connectionId: uuid("connection_id").references(() => modelConnections.id, {
+      onDelete: "restrict",
+    }),
+    kind: modelProfileKindEnum("kind").notNull().default("realtime_voice"),
+    status: modelConfigurationStatusEnum("status").notNull().default("draft"),
+    revision: integer("revision").notNull().default(1),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
+    everEnabled: boolean("ever_enabled").notNull().default(false),
+    createdByUserId: uuid("created_by_user_id").references(
+      () => userAccounts.id,
+      { onDelete: "set null" },
+    ),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -313,8 +413,9 @@ export const providerProfiles = pgTable(
   },
   (table) => [
     uniqueIndex("provider_profiles_system_key_unique").on(table.systemKey),
-    uniqueIndex("provider_profiles_provider_model_unique").on(
-      table.provider,
+    uniqueIndex("provider_profiles_connection_kind_model_unique").on(
+      table.connectionId,
+      table.kind,
       table.model,
     ),
     check(
@@ -325,6 +426,7 @@ export const providerProfiles = pgTable(
       "provider_profiles_model_not_blank",
       sql`length(btrim(${table.model})) > 0`,
     ),
+    check("provider_profiles_revision_positive", sql`${table.revision} > 0`),
   ],
 );
 
@@ -340,6 +442,14 @@ export const voiceProfiles = pgTable(
     providerVoiceId: varchar("provider_voice_id", { length: 120 }).notNull(),
     displayName: varchar("display_name", { length: 120 }).notNull(),
     style: jsonb("style").$type<VoiceStyle>().notNull().default({}),
+    source: varchar("source", { length: 20 }).notNull().default("builtin"),
+    status: modelConfigurationStatusEnum("status").notNull().default("draft"),
+    revision: integer("revision").notNull().default(1),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
+    createdByUserId: uuid("created_by_user_id").references(
+      () => userAccounts.id,
+      { onDelete: "set null" },
+    ),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -360,6 +470,51 @@ export const voiceProfiles = pgTable(
     check(
       "voice_profiles_provider_voice_not_blank",
       sql`length(btrim(${table.providerVoiceId})) > 0`,
+    ),
+    check("voice_profiles_revision_positive", sql`${table.revision} > 0`),
+    check(
+      "voice_profiles_source_valid",
+      sql`${table.source} IN ('builtin', 'custom')`,
+    ),
+  ],
+);
+
+export const modelPurposeBindings = pgTable("model_purpose_bindings", {
+  purpose: modelPurposeEnum("purpose").primaryKey(),
+  modelProfileId: uuid("model_profile_id")
+    .notNull()
+    .references(() => providerProfiles.id, { onDelete: "restrict" }),
+  updatedByUserId: uuid("updated_by_user_id")
+    .notNull()
+    .references(() => userAccounts.id, { onDelete: "restrict" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+export const modelConfigurationAuditEvents = pgTable(
+  "model_configuration_audit_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    action: modelConfigurationAuditActionEnum("action").notNull(),
+    actorUserId: uuid("actor_user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "restrict" }),
+    entityType: varchar("entity_type", { length: 40 }).notNull(),
+    entityId: uuid("entity_id").notNull(),
+    details: jsonb("details")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("model_configuration_audit_entity_created_idx").on(
+      table.entityType,
+      table.entityId,
+      table.createdAt,
     ),
   ],
 );
@@ -638,6 +793,49 @@ export const mediaObjects = pgTable(
   ],
 );
 
+export const aiWorkItems = pgTable(
+  "ai_work_items",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    purpose: modelPurposeEnum("purpose").notNull(),
+    modelProfileId: uuid("model_profile_id").references(
+      () => providerProfiles.id,
+      { onDelete: "restrict" },
+    ),
+    status: aiWorkStatusEnum("status")
+      .notNull()
+      .default("waiting_configuration"),
+    completedSequence: integer("completed_sequence").notNull(),
+    lastErrorCode: varchar("last_error_code", { length: 120 }),
+    queuedAt: timestamp("queued_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("ai_work_items_conversation_purpose_unique").on(
+      table.conversationId,
+      table.purpose,
+    ),
+    index("ai_work_items_status_purpose_idx").on(table.status, table.purpose),
+    check(
+      "ai_work_items_analysis_purpose",
+      sql`${table.purpose} IN ('conversation_summary', 'memory_extraction')`,
+    ),
+    check(
+      "ai_work_items_binding_matches_status",
+      sql`(${table.status} = 'waiting_configuration' AND ${table.modelProfileId} IS NULL) OR (${table.status} <> 'waiting_configuration' AND ${table.modelProfileId} IS NOT NULL)`,
+    ),
+  ],
+);
+
 export const conversationSummaries = pgTable(
   "conversation_summaries",
   {
@@ -654,6 +852,10 @@ export const conversationSummaries = pgTable(
     sourceMessageCount: integer("source_message_count").notNull(),
     sourceLastSequence: integer("source_last_sequence").notNull(),
     analyzerModel: varchar("analyzer_model", { length: 120 }).notNull(),
+    analyzerProfileId: uuid("analyzer_profile_id").references(
+      () => providerProfiles.id,
+      { onDelete: "restrict" },
+    ),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -702,6 +904,11 @@ export const characterMemories = pgTable(
     content: text("content").notNull(),
     sourceExcerpt: text("source_excerpt").notNull(),
     confidence: real("confidence").notNull(),
+    analyzerModel: varchar("analyzer_model", { length: 120 }),
+    analyzerProfileId: uuid("analyzer_profile_id").references(
+      () => providerProfiles.id,
+      { onDelete: "restrict" },
+    ),
     status: characterMemoryStatusEnum("status").notNull(),
     reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -754,6 +961,8 @@ export type NewAccountSecurityAuditEvent =
   typeof accountSecurityAuditEvents.$inferInsert;
 export type ProviderProfileRecord = typeof providerProfiles.$inferSelect;
 export type NewProviderProfileRecord = typeof providerProfiles.$inferInsert;
+export type ModelConnectionRecord = typeof modelConnections.$inferSelect;
+export type NewModelConnectionRecord = typeof modelConnections.$inferInsert;
 export type VoiceProfileRecord = typeof voiceProfiles.$inferSelect;
 export type NewVoiceProfileRecord = typeof voiceProfiles.$inferInsert;
 export type CharacterRecord = typeof characters.$inferSelect;
@@ -772,5 +981,7 @@ export type ConversationSummaryRecord =
   typeof conversationSummaries.$inferSelect;
 export type NewConversationSummaryRecord =
   typeof conversationSummaries.$inferInsert;
+export type AiWorkItemRecord = typeof aiWorkItems.$inferSelect;
+export type NewAiWorkItemRecord = typeof aiWorkItems.$inferInsert;
 export type CharacterMemoryRecord = typeof characterMemories.$inferSelect;
 export type NewCharacterMemoryRecord = typeof characterMemories.$inferInsert;

@@ -10,9 +10,9 @@ import {
 } from "@meet/jobs";
 import { LocalMediaStore } from "@meet/media";
 
-import { QwenConversationAnalyzer } from "./analyzer.js";
 import { loadWorkerConfig } from "./config.js";
 import { createWorkerHandlers } from "./handlers.js";
+import { DatabaseConversationAnalyzerResolver } from "./model-resolver.js";
 import {
   createMediaExpirationHandler,
   PostgresMediaCleanupRepository,
@@ -23,13 +23,29 @@ const environmentFile = fileURLToPath(
 );
 if (existsSync(environmentFile)) process.loadEnvFile(environmentFile);
 
+const legacyModelVariables = Object.keys(process.env)
+  .filter(
+    (name) =>
+      name === "DASHSCOPE_API_KEY" ||
+      name.startsWith("QWEN_") ||
+      name.startsWith("DOUBAO_"),
+  )
+  .sort();
+if (legacyModelVariables.length > 0) {
+  console.warn(
+    `以下 Worker 模型环境变量已停用，请在管理员模型设置中重新配置：${legacyModelVariables.join(", ")}`,
+  );
+}
+
 const config = loadWorkerConfig();
 const database = createDatabaseClient({ connectionString: config.databaseUrl });
 const boss = await createMeetJobBoss(config.databaseUrl, (error) => {
   console.error("Meet Worker 队列错误", error);
 });
-const analyzer = new QwenConversationAnalyzer(config.qwen);
-const handlers = createWorkerHandlers(database.db, analyzer);
+const handlers = createWorkerHandlers(
+  database.db,
+  new DatabaseConversationAnalyzerResolver(database.db),
+);
 const expireMedia = createMediaExpirationHandler(
   new PostgresMediaCleanupRepository(database.db),
   new LocalMediaStore(config.media.localDirectory),

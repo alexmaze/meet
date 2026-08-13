@@ -1,4 +1,3 @@
-import type { CreateCharacterRequest } from "@meet/protocol";
 import type {
   CharacterAggregate,
   CharacterCatalog,
@@ -7,6 +6,7 @@ import type {
   DeleteCharacterResult,
   RestoreCharacterResult,
   UpdateCharacterResult,
+  EditableCharacterValues,
 } from "@meet/database";
 
 export interface CharacterRepository {
@@ -18,14 +18,14 @@ export interface CharacterRepository {
   listCatalog(): Promise<CharacterCatalog>;
   create(
     actorUserId: string,
-    input: CreateCharacterRequest,
+    input: EditableCharacterValues,
     createdAt: Date,
   ): Promise<CreateCharacterResult>;
   update(
     actorUserId: string,
     characterId: string,
     expectedRevision: number,
-    changes: Omit<Partial<CreateCharacterRequest>, never>,
+    changes: Partial<EditableCharacterValues>,
     updatedAt: Date,
   ): Promise<UpdateCharacterResult>;
   updateVisibility(

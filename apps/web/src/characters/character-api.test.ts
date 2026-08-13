@@ -31,7 +31,7 @@ const summary = {
   },
   voiceProfile: {
     id: ids.voice,
-    providerProfileId: ids.provider,
+    realtimeModelProfileId: ids.provider,
     type: "preset",
     providerVoiceId: "longanqian",
     displayName: "龙安浅",
@@ -68,7 +68,7 @@ const detail = {
       maxConsecutivePrompts: 1,
     },
   },
-  providerProfile: {
+  realtimeModelProfile: {
     id: ids.provider,
     provider: "qwen",
     model: "qwen-audio-3.0-realtime-plus",

@@ -2,7 +2,7 @@ import {
   CHARACTER_AVATAR_MAX_BYTES,
   type Character,
   type CreateCharacterRequest,
-  type ProviderProfile,
+  type RealtimeModelProfile,
   type UserAccount,
   type VoiceProfile,
 } from "@meet/protocol";
@@ -28,8 +28,9 @@ import {
 type CharacterEditorProps = {
   user: UserAccount;
   character: Character | null;
-  providers: ProviderProfile[];
+  providers: RealtimeModelProfile[];
   voices: VoiceProfile[];
+  realtimeDefaultModelProfileId: string | null;
   saving: boolean;
   serverError: string;
   onCancel: () => void;
@@ -58,6 +59,7 @@ export default function CharacterEditor({
   character,
   providers,
   voices,
+  realtimeDefaultModelProfileId,
   saving,
   serverError,
   onCancel,
@@ -66,7 +68,11 @@ export default function CharacterEditor({
   const [form, setForm] = useState<CharacterFormValue>(() =>
     character
       ? characterToForm(character)
-      : createEmptyCharacterForm(providers, voices),
+      : createEmptyCharacterForm(
+          providers,
+          voices,
+          realtimeDefaultModelProfileId,
+        ),
   );
   const [validationError, setValidationError] = useState("");
   const [voicePreview, setVoicePreview] = useState<VoicePreviewState>({
@@ -82,7 +88,7 @@ export default function CharacterEditor({
   const matchingVoices = useMemo(
     () =>
       voices.filter(
-        (voice) => voice.providerProfileId === form.providerProfileId,
+        (voice) => voice.realtimeModelProfileId === form.providerProfileId,
       ),
     [form.providerProfileId, voices],
   );
@@ -553,7 +559,7 @@ export default function CharacterEditor({
                     const providerProfileId = event.target.value;
                     const voice = voices.find(
                       (candidate) =>
-                        candidate.providerProfileId === providerProfileId,
+                        candidate.realtimeModelProfileId === providerProfileId,
                     );
                     setForm((current) => ({
                       ...current,

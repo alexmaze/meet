@@ -115,6 +115,9 @@ importers:
       '@meet/media':
         specifier: workspace:*
         version: link:../../packages/media
+      drizzle-orm:
+        specifier: 0.45.1
+        version: 0.45.1(@types/pg@8.21.0)(pg@8.23.0)
       pg-boss:
         specifier: 12.27.0
         version: 12.27.0
@@ -146,6 +149,9 @@ importers:
       '@meet/database':
         specifier: workspace:*
         version: link:../database
+      '@meet/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       drizzle-orm:
         specifier: 0.45.1
         version: 0.45.1(@types/pg@8.21.0)(pg@8.23.0)

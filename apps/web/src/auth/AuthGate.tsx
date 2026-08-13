@@ -13,6 +13,7 @@ import {
 } from "react";
 
 import FamilyMembersPanel from "../admin/FamilyMembersPanel.js";
+import ModelSettingsPanel from "../admin/ModelSettingsPanel.js";
 import PasswordChangePanel from "./PasswordChangePanel.js";
 import {
   getAuthErrorPresentation,
@@ -25,6 +26,7 @@ export type AuthenticatedAppSession = {
   logoutPending: boolean;
   logoutError: string;
   openFamilyMembers: () => void;
+  openModelSettings: () => void;
   openPasswordChange: () => void;
   logout: () => void;
   invalidateSession: () => void;
@@ -59,10 +61,12 @@ export default function AuthGate({ children }: AuthGateProps) {
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState("");
   const [membersOpen, setMembersOpen] = useState(false);
+  const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
   const [passwordChangeOpen, setPasswordChangeOpen] = useState(false);
 
   const invalidateSession = useCallback(() => {
     setMembersOpen(false);
+    setModelSettingsOpen(false);
     setPasswordChangeOpen(false);
     setLogoutError("");
     setSession({
@@ -172,7 +176,13 @@ export default function AuthGate({ children }: AuthGateProps) {
         logoutError,
         openFamilyMembers: () => {
           setPasswordChangeOpen(false);
+          setModelSettingsOpen(false);
           setMembersOpen(true);
+        },
+        openModelSettings: () => {
+          setPasswordChangeOpen(false);
+          setMembersOpen(false);
+          setModelSettingsOpen(true);
         },
         openPasswordChange: () => {
           setMembersOpen(false);
@@ -182,11 +192,17 @@ export default function AuthGate({ children }: AuthGateProps) {
         invalidateSession,
       })}
       {session.user.accountType === "admin" && (
-        <FamilyMembersPanel
-          currentUser={session.user}
-          open={membersOpen}
-          onClose={() => setMembersOpen(false)}
-        />
+        <>
+          <FamilyMembersPanel
+            currentUser={session.user}
+            open={membersOpen}
+            onClose={() => setMembersOpen(false)}
+          />
+          <ModelSettingsPanel
+            open={modelSettingsOpen}
+            onClose={() => setModelSettingsOpen(false)}
+          />
+        </>
       )}
       <PasswordChangePanel
         open={passwordChangeOpen}

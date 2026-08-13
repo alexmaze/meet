@@ -231,7 +231,7 @@ export default function CharacterDetail({
             <h2>声音</h2>
             <p className="voice-name">{character.voiceProfile.displayName}</p>
             <p>{formatVoiceStyle(character.voiceProfile.style)}</p>
-            <small>{character.providerProfile.displayName}</small>
+            <small>{character.realtimeModelProfile.displayName}</small>
           </section>
 
           {!usesCustomPrompt && (

@@ -7,7 +7,7 @@ import {
   type CharacterRuntimeResponse,
   type CreateCharacterRequest,
   type PersonaDefinitionMode,
-  type ProviderProfile,
+  type RealtimeModelProfile,
   type RealtimeProviderKind,
   type UserAccount,
   type VisualProfile,
@@ -105,14 +105,15 @@ export function canCreateCharacter(user: UserAccount): boolean {
 }
 
 export function createEmptyCharacterForm(
-  providers: ProviderProfile[],
+  providers: RealtimeModelProfile[],
   voices: VoiceProfile[],
+  realtimeDefaultModelProfileId: string | null = providers[0]?.id ?? null,
 ): CharacterFormValue {
-  const provider =
-    providers.find((candidate) => candidate.provider === "qwen") ??
-    providers[0];
+  const provider = providers.find(
+    (candidate) => candidate.id === realtimeDefaultModelProfileId,
+  );
   const voice = voices.find(
-    (candidate) => candidate.providerProfileId === provider?.id,
+    (candidate) => candidate.realtimeModelProfileId === provider?.id,
   );
   const avatar = builtInAvatarChoices[0];
 
@@ -160,7 +161,7 @@ export function characterToForm(character: Character): CharacterFormValue {
     responseStyle: character.conversationPolicy.responseStyle,
     silenceFollowUpEnabled:
       character.conversationPolicy.silenceFollowUp.enabled,
-    providerProfileId: character.providerProfile.id,
+    providerProfileId: character.realtimeModelProfile.id,
     voiceProfileId: character.voiceProfile.id,
     avatarUrl: character.visualProfile.avatarUrl,
     accentColor: character.visualProfile.accentColor,
@@ -190,7 +191,7 @@ export function buildCreateCharacterRequest(
       ...(advancedInstructions ? { advancedInstructions } : {}),
     },
     openingLine: form.openingLine.trim() || null,
-    providerProfileId: form.providerProfileId,
+    realtimeModelProfileId: form.providerProfileId,
     voiceProfileId: form.voiceProfileId,
     conversationPolicy: {
       firstSpeaker: form.firstSpeaker,
