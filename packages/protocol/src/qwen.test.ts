@@ -1,17 +1,32 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  QWEN_REALTIME_MAX_EVENT_TYPE_CHARACTERS,
+  QWEN_REALTIME_MAX_IDENTIFIER_CHARACTERS,
   parseQwenServerEvent,
   qwenAssistantTranscriptDeltaSchema,
   qwenAssistantTranscriptDoneSchema,
   qwenInputAudioBufferCommittedEventSchema,
   qwenInputAudioBufferAppendEventSchema,
+  qwenLiveConversationItemCreatedEventSchema,
+  qwenLiveResponseContentPartAddedEventSchema,
+  qwenLiveResponseContentPartDoneEventSchema,
+  qwenLiveResponseDoneEventSchema,
+  qwenLiveResponseOutputItemAddedEventSchema,
+  qwenLiveResponseOutputItemDoneEventSchema,
+  qwenLiveResponseCreateEventSchema,
+  qwenLiveSessionCreatedEventSchema,
+  qwenLiveSessionUpdatePatchSchema,
+  qwenLiveSessionUpdatedEventSchema,
+  qwenLiveUserTextItemCreateEventSchema,
   qwenResponseAudioDeltaEventSchema,
   qwenResponseCancelEventSchema,
   qwenResponseContentPartAddedEventSchema,
   qwenResponseCreateEventSchema,
   qwenResponseCreatedEventSchema,
   qwenResponseDoneEventSchema,
+  qwenResponseTextDeltaEventSchema,
+  qwenResponseTextDoneEventSchema,
   qwenSessionUpdateEventSchema,
   qwenSpeechStartedEventSchema,
   qwenSpeechStoppedEventSchema,
@@ -52,6 +67,246 @@ describe("Qwen realtime protocol", () => {
 
   it("rejects malformed events", () => {
     expect(() => parseQwenServerEvent('{"delta":"你好"}')).toThrow();
+  });
+
+  it("bounds event, response, and item identifiers used by live probes", () => {
+    expect(() =>
+      parseQwenServerEvent(
+        JSON.stringify({
+          event_id: "e".repeat(QWEN_REALTIME_MAX_IDENTIFIER_CHARACTERS + 1),
+          type: "session.created",
+        }),
+      ),
+    ).toThrow();
+    expect(() =>
+      parseQwenServerEvent(
+        JSON.stringify({
+          event_id: "event_1",
+          type: "t".repeat(QWEN_REALTIME_MAX_EVENT_TYPE_CHARACTERS + 1),
+        }),
+      ),
+    ).toThrow();
+    expect(
+      qwenResponseCreatedEventSchema.safeParse({
+        event_id: "event_response_created",
+        type: "response.created",
+        response: {
+          id: "r".repeat(QWEN_REALTIME_MAX_IDENTIFIER_CHARACTERS + 1),
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      qwenLiveConversationItemCreatedEventSchema.safeParse({
+        event_id: "event_item_created",
+        type: "conversation.item.created",
+        item: {
+          id: "i".repeat(QWEN_REALTIME_MAX_IDENTIFIER_CHARACTERS + 1),
+          object: "realtime.item",
+          type: "message",
+          status: "completed",
+          role: "user",
+          content: [],
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts complete and staged live session acknowledgements", () => {
+    const session = {
+      id: "sess_live_1",
+      object: "realtime.session",
+      model: "qwen-audio-3.0-realtime-plus",
+      modalities: ["text", "audio"],
+      voice: "longanqian",
+      turn_detection: { type: "smart_turn" },
+    };
+
+    expect(
+      qwenLiveSessionCreatedEventSchema.safeParse({
+        event_id: "event_session_created",
+        type: "session.created",
+        session,
+      }).success,
+    ).toBe(true);
+    expect(
+      qwenLiveSessionUpdatedEventSchema.safeParse({
+        event_id: "event_session_updated",
+        type: "session.updated",
+        session: { ...session, instructions: "固定基础指令" },
+      }).success,
+    ).toBe(true);
+    expect(
+      qwenLiveSessionUpdatedEventSchema.safeParse({
+        event_id: "event_missing_instructions",
+        type: "session.updated",
+        session,
+      }).success,
+    ).toBe(true);
+    expect(
+      qwenLiveSessionUpdatedEventSchema.safeParse({
+        event_id: "event_empty_instructions",
+        type: "session.updated",
+        session: { ...session, instructions: "" },
+      }).success,
+    ).toBe(true);
+    for (const instructions of [42, null, []]) {
+      expect(
+        qwenLiveSessionUpdatedEventSchema.safeParse({
+          event_id: "event_invalid_instructions",
+          type: "session.updated",
+          session: { ...session, instructions },
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      qwenLiveSessionUpdatedEventSchema.safeParse({
+        event_id: "event_complete_staged_snapshot",
+        type: "session.updated",
+        session: {
+          ...session,
+          input_audio_format: "pcm",
+          output_audio_format: "pcm",
+          max_history_turns: 1,
+          instructions: "固定基础指令",
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      qwenLiveConversationItemCreatedEventSchema.safeParse({
+        event_id: "event_item_created",
+        type: "conversation.item.created",
+        item: {
+          id: "item_user_1",
+          object: "realtime.item",
+          type: "message",
+          status: "completed",
+          role: "user",
+          content: [{ type: "input_text", text: "固定测试输入" }],
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      qwenLiveConversationItemCreatedEventSchema.safeParse({
+        type: "conversation.item.created",
+        item: {
+          id: "item_user_1",
+          object: "realtime.item",
+          type: "message",
+          status: "completed",
+          role: "user",
+          content: [],
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts a null or missing previous item id on the first live item ACK", () => {
+    const item = {
+      id: "item_user_1",
+      object: "realtime.item",
+      type: "message",
+      status: "completed",
+      role: "user",
+      content: [{ type: "input_text", text: "固定测试输入" }],
+    };
+
+    for (const previousItem of [
+      {},
+      { previous_item_id: null },
+      { previous_item_id: "item_previous" },
+    ]) {
+      expect(
+        qwenLiveConversationItemCreatedEventSchema.safeParse({
+          event_id: "event_item_created",
+          type: "conversation.item.created",
+          ...previousItem,
+          item,
+        }).success,
+      ).toBe(true);
+    }
+
+    for (const previous_item_id of [0, false, {}, []]) {
+      expect(
+        qwenLiveConversationItemCreatedEventSchema.safeParse({
+          event_id: "event_item_created",
+          type: "conversation.item.created",
+          previous_item_id,
+          item,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it.each([{ modalities: ["text"] }, { instructions: "固定基础指令" }])(
+    "accepts one official live session field without client event_id",
+    (session) => {
+      expect(
+        qwenLiveSessionUpdatePatchSchema.safeParse({
+          type: "session.update",
+          session,
+        }).success,
+      ).toBe(true);
+    },
+  );
+
+  it("rejects client event_id and multi-field live session patches", () => {
+    expect(
+      qwenLiveSessionUpdatePatchSchema.safeParse({
+        event_id: "undocumented_client_event",
+        type: "session.update",
+        session: { voice: "longanqian" },
+      }).success,
+    ).toBe(false);
+    expect(
+      qwenLiveSessionUpdatePatchSchema.safeParse({
+        type: "session.update",
+        session: { voice: "longanqian", modalities: ["text"] },
+      }).success,
+    ).toBe(false);
+  });
+
+  it.each([
+    { voice: "longanqian" },
+    { input_audio_format: "pcm" },
+    { output_audio_format: "pcm" },
+    { turn_detection: { type: "smart_turn" } },
+    { max_history_turns: 1 },
+    { modalities: ["audio", "text"] },
+    { instructions: "" },
+  ])("rejects non-probe singleton live session patches", (session) => {
+    expect(
+      qwenLiveSessionUpdatePatchSchema.safeParse({
+        type: "session.update",
+        session,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("validates official live text item and response shapes without client event_id", () => {
+    expect(
+      qwenLiveUserTextItemCreateEventSchema.safeParse({
+        type: "conversation.item.create",
+        item: {
+          id: "item_live_text",
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "固定文本" }],
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      qwenLiveResponseCreateEventSchema.safeParse({
+        type: "response.create",
+        response: { modalities: ["text"] },
+      }).success,
+    ).toBe(true);
+    expect(
+      qwenLiveResponseCreateEventSchema.safeParse({
+        event_id: "undocumented_client_event",
+        type: "response.create",
+        response: { modalities: ["text"] },
+      }).success,
+    ).toBe(false);
   });
 
   it("validates the Audio 3.0 smart-turn session update", () => {
@@ -114,6 +369,24 @@ describe("Qwen realtime protocol", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts the documented Qwen-Audio text-only output modality", () => {
+    const result = qwenSessionUpdateEventSchema.safeParse({
+      event_id: "event_text_only",
+      type: "session.update",
+      session: {
+        modalities: ["text"],
+        voice: "longanqian",
+        input_audio_format: "pcm",
+        output_audio_format: "pcm",
+        instructions: "只返回文本。",
+        max_history_turns: 1,
+        turn_detection: { type: "smart_turn" },
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
+
   it("rejects manual turn detection for WebRTC", () => {
     const result = qwenSessionUpdateEventSchema.safeParse({
       event_id: "event_5",
@@ -138,6 +411,7 @@ describe("Qwen realtime protocol", () => {
         event_id: "event_opening_item",
         type: "conversation.item.create",
         item: {
+          id: "item_opening_request",
           type: "message",
           role: "user",
           content: [
@@ -151,9 +425,23 @@ describe("Qwen realtime protocol", () => {
     ).toBe(true);
 
     expect(
+      qwenUserTextItemCreateEventSchema.safeParse({
+        event_id: "event_opening_item",
+        type: "conversation.item.create",
+        item: {
+          id: "i".repeat(QWEN_REALTIME_MAX_IDENTIFIER_CHARACTERS + 1),
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "测试" }],
+        },
+      }).success,
+    ).toBe(false);
+
+    expect(
       qwenResponseCreateEventSchema.safeParse({
         event_id: "event_opening_response",
         type: "response.create",
+        response: { modalities: ["text"] },
       }).success,
     ).toBe(true);
   });
@@ -335,6 +623,60 @@ describe("Qwen realtime protocol", () => {
     ).toBe(false);
   });
 
+  it("requires consistent token details for billable live response evidence", () => {
+    const event = {
+      event_id: "event_usage",
+      type: "response.done",
+      response: {
+        id: "resp_usage",
+        status: "completed",
+        modalities: ["text"],
+        usage: {
+          total_tokens: 16,
+          input_tokens: 10,
+          output_tokens: 6,
+          input_tokens_details: { text_tokens: 10 },
+          output_tokens_details: { text_tokens: 6, audio_tokens: 0 },
+        },
+      },
+    };
+
+    expect(qwenLiveResponseDoneEventSchema.safeParse(event).success).toBe(true);
+    expect(
+      qwenLiveResponseDoneEventSchema.safeParse({
+        ...event,
+        response: {
+          ...event.response,
+          usage: { ...event.response.usage, total_tokens: 15 },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      qwenLiveResponseDoneEventSchema.safeParse({
+        ...event,
+        response: {
+          ...event.response,
+          usage: {
+            ...event.response.usage,
+            output_tokens_details: { text_tokens: 2, audio_tokens: 4 },
+          },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      qwenLiveResponseDoneEventSchema.safeParse({
+        ...event,
+        response: { ...event.response, modalities: ["text", "audio"] },
+      }).success,
+    ).toBe(false);
+    expect(
+      qwenLiveResponseDoneEventSchema.safeParse({
+        ...event,
+        response: { id: "resp_usage", status: "completed" },
+      }).success,
+    ).toBe(false);
+  });
+
   it("correlates a created response with its audio transcript deltas", () => {
     expect(
       qwenResponseCreatedEventSchema.safeParse({
@@ -370,6 +712,119 @@ describe("Qwen realtime protocol", () => {
       qwenAssistantTranscriptDoneSchema.safeParse({
         type: "response.audio_transcript.done",
         transcript: "缺少响应标识",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("validates Qwen-Audio text-only response events with full correlation fields", () => {
+    const common = {
+      event_id: "event_text",
+      response_id: "resp_text",
+      item_id: "item_text",
+      output_index: 0,
+      content_index: 0,
+    };
+    expect(
+      qwenResponseTextDeltaEventSchema.safeParse({
+        ...common,
+        type: "response.text.delta",
+        delta: "你好",
+      }).success,
+    ).toBe(true);
+    expect(
+      qwenResponseTextDoneEventSchema.safeParse({
+        ...common,
+        type: "response.text.done",
+        text: "你好",
+      }).success,
+    ).toBe(true);
+    expect(
+      qwenResponseTextDeltaEventSchema.safeParse({
+        ...common,
+        type: "response.text.delta",
+        item_id: undefined,
+        delta: "缺少消息标识",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("strictly validates the four harmless live text response lifecycle events", () => {
+    const common = {
+      event_id: "event_meta",
+      response_id: "resp_text",
+      item_id: "item_text",
+      output_index: 0,
+      content_index: 0,
+    };
+    const addedItem = {
+      id: "item_text",
+      object: "realtime.item",
+      type: "message",
+      status: "in_progress",
+      role: "assistant",
+      content: [],
+    };
+    const completedItem = {
+      ...addedItem,
+      status: "completed",
+      content: [{ type: "text", text: "A7K2" }],
+    };
+
+    expect(
+      qwenLiveResponseOutputItemAddedEventSchema.safeParse({
+        event_id: common.event_id,
+        type: "response.output_item.added",
+        response_id: common.response_id,
+        output_index: common.output_index,
+        item: addedItem,
+      }).success,
+    ).toBe(true);
+    expect(
+      qwenLiveResponseContentPartAddedEventSchema.safeParse({
+        ...common,
+        type: "response.content_part.added",
+        part: { type: "text", text: "" },
+      }).success,
+    ).toBe(true);
+    expect(
+      qwenLiveResponseContentPartDoneEventSchema.safeParse({
+        ...common,
+        type: "response.content_part.done",
+        part: { type: "text", text: "A7K2" },
+      }).success,
+    ).toBe(true);
+    expect(
+      qwenLiveResponseOutputItemDoneEventSchema.safeParse({
+        event_id: common.event_id,
+        type: "response.output_item.done",
+        response_id: common.response_id,
+        output_index: common.output_index,
+        item: completedItem,
+      }).success,
+    ).toBe(true);
+
+    expect(
+      qwenLiveResponseContentPartAddedEventSchema.safeParse({
+        ...common,
+        type: "response.content_part.added",
+        response_id: "r".repeat(QWEN_REALTIME_MAX_IDENTIFIER_CHARACTERS + 1),
+        part: { type: "text", text: "" },
+      }).success,
+    ).toBe(false);
+    expect(
+      qwenLiveResponseContentPartDoneEventSchema.safeParse({
+        ...common,
+        type: "response.content_part.done",
+        part: { type: "audio", text: "" },
+      }).success,
+    ).toBe(false);
+    expect(
+      qwenLiveResponseOutputItemAddedEventSchema.safeParse({
+        event_id: common.event_id,
+        type: "response.output_item.added",
+        response_id: common.response_id,
+        output_index: common.output_index,
+        item: { ...addedItem, type: "function_call" },
       }).success,
     ).toBe(false);
   });

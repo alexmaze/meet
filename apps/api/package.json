@@ -9,6 +9,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "admin:init": "tsx src/cli/admin.ts init",
     "admin:reset-password": "tsx src/cli/admin.ts reset-password",
+    "spike:teaching": "tsx src/cli/realtime-teaching-spike.ts",
+    "spike:teaching:live:qwen": "tsx src/cli/qwen-realtime-teaching-live-main.ts",
     "start": "node dist/server.js"
   },
   "dependencies": {

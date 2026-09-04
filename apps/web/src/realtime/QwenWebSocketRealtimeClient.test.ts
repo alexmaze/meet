@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { SafeRelayTeachingState } from "@meet/protocol";
 
 import type {
   MicrophonePcmCaptureOptions,
@@ -147,6 +148,7 @@ function createHarness(maxSocketBufferedBytes = 1024): {
   providerEvents: unknown[];
   errors: string[];
   snapshots: RealtimeClientSnapshot[];
+  teachingStates: SafeRelayTeachingState[];
   scheduler: FakeScheduler;
   foreground: () => void;
   beforeReconnect: ReturnType<typeof vi.fn>;
@@ -158,6 +160,7 @@ function createHarness(maxSocketBufferedBytes = 1024): {
   const providerEvents: unknown[] = [];
   const errors: string[] = [];
   const snapshots: RealtimeClientSnapshot[] = [];
+  const teachingStates: SafeRelayTeachingState[] = [];
   const scheduler = new FakeScheduler();
   const beforeReconnect = vi.fn(async () => undefined);
   let foregroundCallback: (() => void) | null = null;
@@ -201,6 +204,7 @@ function createHarness(maxSocketBufferedBytes = 1024): {
       onError: (error) => errors.push(error.code),
       onSnapshot: (snapshot) => snapshots.push(snapshot),
       onBeforeReconnect: beforeReconnect,
+      onTeachingState: (state) => teachingStates.push(state),
     },
     dependencies,
   );
@@ -213,6 +217,7 @@ function createHarness(maxSocketBufferedBytes = 1024): {
     providerEvents,
     errors,
     snapshots,
+    teachingStates,
     scheduler,
     foreground: () => foregroundCallback?.(),
     beforeReconnect,
@@ -269,7 +274,89 @@ describe("QwenWebSocketRealtimeClient", () => {
       connection: "active",
       detail: "连接已恢复，已接回确认过的对话",
     });
+    expect(microphone?.enabled).toBe(false);
+    harness.sockets[1]?.receive({
+      type: "relay.teaching.audio_gate",
+      revision: 1,
+      open: true,
+    });
     expect(microphone?.enabled).toBe(true);
+  });
+
+  it("accepts a restarted teaching revision stream and keeps reconnect audio gated until reopened", async () => {
+    const harness = createHarness();
+    await startClient(harness.client);
+    const firstSocket = harness.sockets[0];
+    const playback = harness.playbacks[0];
+    activateSocket(firstSocket);
+    firstSocket?.receive({
+      type: "relay.teaching.state",
+      revision: 7,
+      state: "active",
+      canRequest: false,
+      canMute: true,
+    });
+    expect(harness.teachingStates.at(-1)?.revision).toBe(7);
+
+    firstSocket?.disconnect();
+    harness.scheduler.advance(1_000);
+    await settleAsyncWork();
+    const replacement = harness.sockets[1];
+    activateSocket(replacement);
+
+    const audio = encodePcm16Base64(new Int16Array([700, -700]));
+    replacement?.receive({
+      type: "response.created",
+      response: { id: "before-reopen", status: "in_progress" },
+    });
+    replacement?.receive({
+      type: "response.audio.delta",
+      response_id: "before-reopen",
+      item_id: "before-reopen-item",
+      output_index: 0,
+      content_index: 0,
+      delta: audio,
+    });
+    expect(playback?.chunks).toEqual([]);
+
+    replacement?.receive({
+      type: "relay.teaching.state",
+      revision: 0,
+      state: "available",
+      canRequest: true,
+      canMute: true,
+    });
+    expect(harness.teachingStates.at(-1)).toEqual({
+      revision: 0,
+      state: "available",
+      canRequest: true,
+      canMute: true,
+    });
+    replacement?.receive({
+      type: "relay.teaching.audio_gate",
+      revision: 1,
+      open: true,
+    });
+    expect(JSON.parse(replacement?.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "relay.teaching.audio_gate_ack",
+      revision: 1,
+    });
+
+    replacement?.receive({
+      type: "response.created",
+      response: { id: "after-reopen", status: "in_progress" },
+    });
+    replacement?.receive({
+      type: "response.audio.delta",
+      response_id: "after-reopen",
+      item_id: "after-reopen-item",
+      output_index: 0,
+      content_index: 0,
+      delta: audio,
+    });
+    expect(playback?.chunks.map((chunk) => chunk.responseId)).toEqual([
+      "after-reopen",
+    ]);
   });
 
   it("does not repeat the assistant opening after a replacement session", async () => {
@@ -364,6 +451,276 @@ describe("QwenWebSocketRealtimeClient", () => {
 
     socket?.receive({ type: "session.updated" });
     expect(microphone?.enabled).toBe(true);
+  });
+
+  it("uses strict teaching relay frames without exposing them as provider diagnostics", async () => {
+    const harness = createHarness();
+    await startClient(harness.client);
+    const socket = harness.sockets[0];
+
+    harness.client.requestTeaching();
+    expect(socket?.sent).toEqual([]);
+    socket?.open();
+    socket?.receive({ type: "relay.ready" });
+
+    const request = (socket?.sent ?? [])
+      .map((payload) => JSON.parse(payload) as Record<string, unknown>)
+      .find((event) => event.type === "relay.teaching.request");
+    expect(request).toEqual({
+      type: "relay.teaching.request",
+      event_id: expect.stringMatching(/^event_/),
+    });
+    expect(request).not.toHaveProperty("contentItemId");
+    expect(harness.providerEvents).not.toContainEqual(request);
+
+    socket?.receive({
+      type: "relay.teaching.state",
+      revision: 1,
+      state: "available",
+      canRequest: true,
+      canMute: true,
+    });
+    expect(harness.teachingStates).toEqual([
+      {
+        revision: 1,
+        state: "available",
+        canRequest: true,
+        canMute: true,
+      },
+    ]);
+    expect(harness.providerEvents).not.toContainEqual(
+      expect.objectContaining({ type: "relay.teaching.state" }),
+    );
+
+    socket?.receive({
+      type: "relay.teaching.state",
+      revision: 2,
+      state: "available",
+      canRequest: false,
+      canMute: true,
+    });
+    expect(harness.errors).toContain("INVALID_TEACHING_RELAY_FRAME");
+    expect(harness.teachingStates).toHaveLength(1);
+
+    harness.client.muteTeaching();
+    const mute = JSON.parse(socket?.sent.at(-1) ?? "{}") as Record<
+      string,
+      unknown
+    >;
+    expect(mute).toEqual({
+      type: "relay.teaching.mute",
+      event_id: expect.stringMatching(/^event_/),
+    });
+    expect(harness.providerEvents).not.toContainEqual(mute);
+  });
+
+  it("closes the local teaching gate while HTTP mute persistence is still pending", async () => {
+    const harness = createHarness();
+    await startClient(harness.client);
+    const socket = harness.sockets[0];
+    const playback = harness.playbacks[0];
+    const microphone = harness.microphones[0];
+    activateSocket(socket);
+    const audio = encodePcm16Base64(new Int16Array([900, -900]));
+
+    socket?.receive({
+      type: "response.created",
+      response: { id: "before-local-mute", status: "in_progress" },
+    });
+    socket?.receive({
+      type: "response.audio.delta",
+      response_id: "before-local-mute",
+      item_id: "before-local-mute-item",
+      output_index: 0,
+      content_index: 0,
+      delta: audio,
+    });
+    expect(playback?.chunks).toHaveLength(1);
+    expect(microphone?.enabled).toBe(true);
+
+    let finishPersistence: (() => void) | undefined;
+    const persistence = new Promise<void>((resolve) => {
+      finishPersistence = resolve;
+    });
+    harness.client.beginTeachingMute();
+    const relayAfterPersistence = persistence.then(() =>
+      harness.client.muteTeaching(),
+    );
+
+    expect(playback?.chunks).toEqual([]);
+    expect(microphone?.enabled).toBe(false);
+    expect(
+      (socket?.sent ?? [])
+        .map((payload) => JSON.parse(payload) as Record<string, unknown>)
+        .filter((event) => event.type === "relay.teaching.mute"),
+    ).toEqual([]);
+
+    socket?.receive({
+      type: "response.created",
+      response: { id: "late-during-http", status: "in_progress" },
+    });
+    socket?.receive({
+      type: "response.audio.delta",
+      response_id: "late-during-http",
+      item_id: "late-during-http-item",
+      output_index: 0,
+      content_index: 0,
+      delta: audio,
+    });
+    socket?.receive({
+      type: "response.audio_transcript.delta",
+      response_id: "late-during-http",
+      delta: "这段迟到内容不能播放或显示",
+    });
+    expect(playback?.chunks).toEqual([]);
+    expect(harness.snapshots.at(-1)?.assistantCaption).toBe("");
+
+    finishPersistence?.();
+    await relayAfterPersistence;
+    const muteFrames = (socket?.sent ?? [])
+      .map((payload) => JSON.parse(payload) as Record<string, unknown>)
+      .filter((event) => event.type === "relay.teaching.mute");
+    expect(muteFrames).toEqual([
+      {
+        type: "relay.teaching.mute",
+        event_id: expect.stringMatching(/^event_/),
+      },
+    ]);
+    expect(harness.providerEvents).not.toContainEqual(muteFrames[0]);
+  });
+
+  it("applies and acknowledges monotonic teaching audio gates at a clean PCM boundary", async () => {
+    const harness = createHarness();
+    await startClient(harness.client);
+    const socket = harness.sockets[0];
+    const playback = harness.playbacks[0];
+    const microphone = harness.microphones[0];
+    activateSocket(socket);
+    expect(microphone?.enabled).toBe(true);
+    const audio = encodePcm16Base64(new Int16Array([900, -900]));
+
+    socket?.receive({
+      type: "response.created",
+      response: { id: "before-gate", status: "in_progress" },
+    });
+    socket?.receive({
+      type: "response.audio.delta",
+      response_id: "before-gate",
+      item_id: "before-item",
+      output_index: 0,
+      content_index: 0,
+      delta: audio,
+    });
+    expect(playback?.chunks).toHaveLength(1);
+
+    socket?.receive({
+      type: "relay.teaching.audio_gate",
+      revision: 1,
+      open: false,
+    });
+    expect(playback?.chunks).toEqual([]);
+    expect(microphone?.enabled).toBe(false);
+    expect(JSON.parse(socket?.sent.at(-1) ?? "{}")).toEqual({
+      type: "relay.teaching.audio_gate_ack",
+      event_id: expect.stringMatching(/^event_/),
+      revision: 1,
+    });
+    const sentWhileClosed = socket?.sent.length;
+    microphone?.emit(new Int16Array([400, -400]));
+    expect(socket?.sent).toHaveLength(sentWhileClosed ?? 0);
+
+    socket?.receive({
+      type: "response.created",
+      response: { id: "while-closed", status: "in_progress" },
+    });
+    socket?.receive({
+      type: "response.audio.delta",
+      response_id: "while-closed",
+      item_id: "closed-item",
+      output_index: 0,
+      content_index: 0,
+      delta: audio,
+    });
+    socket?.receive({
+      type: "response.audio_transcript.delta",
+      response_id: "while-closed",
+      delta: "这段内容不能进入字幕",
+    });
+    expect(playback?.chunks).toEqual([]);
+    expect(harness.snapshots.at(-1)?.assistantCaption).toBe("");
+
+    socket?.receive({
+      type: "relay.teaching.audio_gate",
+      revision: 1,
+      open: false,
+    });
+    const revisionOneAcks = (socket?.sent ?? [])
+      .map((payload) => JSON.parse(payload) as Record<string, unknown>)
+      .filter(
+        (event) =>
+          event.type === "relay.teaching.audio_gate_ack" &&
+          event.revision === 1,
+      );
+    expect(revisionOneAcks).toHaveLength(2);
+
+    socket?.receive({
+      type: "relay.teaching.audio_gate",
+      revision: 1,
+      open: true,
+    });
+    expect(harness.errors).toContain(
+      "CONFLICTING_TEACHING_AUDIO_GATE_REVISION",
+    );
+    expect(
+      (socket?.sent ?? [])
+        .map((payload) => JSON.parse(payload) as Record<string, unknown>)
+        .filter(
+          (event) =>
+            event.type === "relay.teaching.audio_gate_ack" &&
+            event.revision === 1,
+        ),
+    ).toHaveLength(2);
+
+    socket?.receive({
+      type: "relay.teaching.audio_gate",
+      revision: 2,
+      open: true,
+    });
+    expect(microphone?.enabled).toBe(true);
+    microphone?.emit(new Int16Array([400, -400]));
+    expect(JSON.parse(socket?.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "input_audio_buffer.append",
+    });
+    socket?.receive({
+      type: "response.audio.delta",
+      response_id: "while-closed",
+      item_id: "closed-item",
+      output_index: 0,
+      content_index: 0,
+      delta: audio,
+    });
+    expect(playback?.chunks).toEqual([]);
+    socket?.receive({
+      type: "response.created",
+      response: { id: "after-gate", status: "in_progress" },
+    });
+    socket?.receive({
+      type: "response.audio.delta",
+      response_id: "after-gate",
+      item_id: "after-item",
+      output_index: 0,
+      content_index: 0,
+      delta: audio,
+    });
+    expect(playback?.chunks.map((chunk) => chunk.responseId)).toEqual([
+      "after-gate",
+    ]);
+    expect(harness.providerEvents).not.toContainEqual(
+      expect.objectContaining({ type: "relay.teaching.audio_gate" }),
+    );
+    expect(harness.providerEvents).not.toContainEqual(
+      expect.objectContaining({ type: "relay.teaching.audio_gate_ack" }),
+    );
   });
 
   it("ignores messages from a socket replaced by a newer start", async () => {

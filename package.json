@@ -21,8 +21,11 @@
     "test": "vitest run",
     "db:generate": "pnpm --filter @meet/database db:generate",
     "db:migrate": "pnpm --filter @meet/database db:migrate",
+    "db:migrate:teaching-spike": "pnpm --filter @meet/database db:migrate:teaching-spike",
     "admin:init": "pnpm run build:packages && pnpm --filter @meet/api admin:init",
     "admin:reset-password": "pnpm run build:packages && pnpm --filter @meet/api admin:reset-password",
+    "spike:teaching": "pnpm --filter @meet/api spike:teaching",
+    "spike:teaching:live:qwen": "pnpm run build:packages && pnpm --filter @meet/api spike:teaching:live:qwen",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {

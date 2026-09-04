@@ -14,6 +14,7 @@ import {
 
 import FamilyMembersPanel from "../admin/FamilyMembersPanel.js";
 import ModelSettingsPanel from "../admin/ModelSettingsPanel.js";
+import TeachingPlansPanel from "../teaching/TeachingPlansPanel.js";
 import PasswordChangePanel from "./PasswordChangePanel.js";
 import {
   getAuthErrorPresentation,
@@ -27,6 +28,7 @@ export type AuthenticatedAppSession = {
   logoutError: string;
   openFamilyMembers: () => void;
   openModelSettings: () => void;
+  openTeachingPlans: () => void;
   openPasswordChange: () => void;
   logout: () => void;
   invalidateSession: () => void;
@@ -62,11 +64,13 @@ export default function AuthGate({ children }: AuthGateProps) {
   const [logoutError, setLogoutError] = useState("");
   const [membersOpen, setMembersOpen] = useState(false);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
+  const [teachingPlansOpen, setTeachingPlansOpen] = useState(false);
   const [passwordChangeOpen, setPasswordChangeOpen] = useState(false);
 
   const invalidateSession = useCallback(() => {
     setMembersOpen(false);
     setModelSettingsOpen(false);
+    setTeachingPlansOpen(false);
     setPasswordChangeOpen(false);
     setLogoutError("");
     setSession({
@@ -122,6 +126,8 @@ export default function AuthGate({ children }: AuthGateProps) {
 
   const handleLogout = async (): Promise<void> => {
     setMembersOpen(false);
+    setModelSettingsOpen(false);
+    setTeachingPlansOpen(false);
     setPasswordChangeOpen(false);
     setLogoutPending(true);
     setLogoutError("");
@@ -177,15 +183,26 @@ export default function AuthGate({ children }: AuthGateProps) {
         openFamilyMembers: () => {
           setPasswordChangeOpen(false);
           setModelSettingsOpen(false);
+          setTeachingPlansOpen(false);
           setMembersOpen(true);
         },
         openModelSettings: () => {
           setPasswordChangeOpen(false);
           setMembersOpen(false);
+          setTeachingPlansOpen(false);
           setModelSettingsOpen(true);
+        },
+        openTeachingPlans: () => {
+          if (session.user.accountType === "child") return;
+          setPasswordChangeOpen(false);
+          setMembersOpen(false);
+          setModelSettingsOpen(false);
+          setTeachingPlansOpen(true);
         },
         openPasswordChange: () => {
           setMembersOpen(false);
+          setModelSettingsOpen(false);
+          setTeachingPlansOpen(false);
           setPasswordChangeOpen(true);
         },
         logout: () => void handleLogout(),
@@ -203,6 +220,14 @@ export default function AuthGate({ children }: AuthGateProps) {
             onClose={() => setModelSettingsOpen(false)}
           />
         </>
+      )}
+      {session.user.accountType !== "child" && (
+        <TeachingPlansPanel
+          currentUser={session.user}
+          open={teachingPlansOpen}
+          onClose={() => setTeachingPlansOpen(false)}
+          onUnauthorized={invalidateSession}
+        />
       )}
       <PasswordChangePanel
         open={passwordChangeOpen}

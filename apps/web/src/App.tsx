@@ -320,6 +320,7 @@ export default function App(session: AuthenticatedAppSession) {
       <>
         <CharacterCall
           runtime={runtime}
+          user={user}
           onExit={() => setRuntime(null)}
           onUnauthorized={session.invalidateSession}
         />
@@ -588,6 +589,15 @@ function ProfilePage({ session }: { session: AuthenticatedAppSession }) {
             <span>
               <strong>家庭成员</strong>
               <small>创建账号、重置密码与儿童资料权限</small>
+            </span>
+            <span aria-hidden="true">→</span>
+          </button>
+        )}
+        {user.accountType !== "child" && (
+          <button type="button" onClick={session.openTeachingPlans}>
+            <span>
+              <strong>学习小支线</strong>
+              <small>设置角色里自然、可跳过的小挑战</small>
             </span>
             <span aria-hidden="true">→</span>
           </button>

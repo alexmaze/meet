@@ -21,6 +21,7 @@ import {
   type PendingTranscript,
   type QwenConversationProjection,
 } from "./qwen-event-state.js";
+import type { TeachingCallState } from "../teaching/teaching-state.js";
 
 export type InputMode = "hands_free" | "push_to_talk";
 
@@ -68,6 +69,7 @@ export type RealtimeClientCallbacks = {
   onError?: (error: RealtimeError) => void;
   onUnauthorized?: () => void;
   onBeforeReconnect?: () => Promise<void>;
+  onTeachingState?: (state: TeachingCallState) => void;
 };
 
 export type QwenRealtimeCallbacks = RealtimeClientCallbacks;
@@ -79,6 +81,9 @@ export interface RealtimeClient {
   interrupt(): void;
   setMicrophoneMuted(muted: boolean): void;
   setPushToTalkActive(active: boolean): void;
+  requestTeaching(): void;
+  beginTeachingMute(): void;
+  muteTeaching(): void;
 }
 
 export class QwenRealtimeClient {
@@ -260,6 +265,18 @@ export class QwenRealtimeClient {
       inputMode: this.snapshot.inputMode,
     };
     this.emitSnapshot();
+  }
+
+  requestTeaching(): void {
+    // The legacy direct WebRTC transport has no application relay channel.
+  }
+
+  beginTeachingMute(): void {
+    // The legacy direct WebRTC transport has no application relay channel.
+  }
+
+  muteTeaching(): void {
+    // The legacy direct WebRTC transport has no application relay channel.
   }
 
   setMicrophoneMuted(muted: boolean): void {

@@ -44,6 +44,13 @@ import {
   type QwenRealtimeOptions,
   type RealtimeClientSnapshot,
 } from "./QwenRealtimeClient.js";
+import {
+  parseTeachingRelayFrame,
+  teachingAudioGateAckFrame,
+  teachingMuteFrame,
+  teachingRequestFrame,
+  teachingStateFromRelayFrame,
+} from "../teaching/teaching-state.js";
 
 export type {
   InputMode,
@@ -115,6 +122,13 @@ export class QwenWebSocketRealtimeClient {
   private reconnectDeadlineTask: ScheduledTask | null = null;
   private removeForegroundListener: (() => void) | null = null;
   private terminalSocketError = false;
+  private teachingStateRevision = -1;
+  private teachingStateFingerprint = "";
+  private teachingAudioGateRevision = 0;
+  private teachingAudioGateValue: boolean | null = null;
+  private teachingAudioGateOpen = true;
+  private teachingRequestPending = false;
+  private teachingMutePending = false;
 
   constructor(
     private readonly legacyRemoteAudio: HTMLAudioElement,
@@ -229,6 +243,24 @@ export class QwenWebSocketRealtimeClient {
     }
     this.terminalSocketError = false;
     this.beginReconnect("正在按你的选择重新连接", true);
+  }
+
+  requestTeaching(): void {
+    if (this.teachingMutePending) return;
+    this.teachingRequestPending = true;
+    this.flushTeachingControls();
+  }
+
+  beginTeachingMute(): void {
+    this.teachingRequestPending = false;
+    this.applyTeachingAudioGate(false);
+  }
+
+  muteTeaching(): void {
+    this.teachingRequestPending = false;
+    this.teachingMutePending = true;
+    this.applyTeachingAudioGate(false);
+    this.flushTeachingControls();
   }
 
   setMicrophoneMuted(muted: boolean): void {
@@ -502,6 +534,11 @@ export class QwenWebSocketRealtimeClient {
     this.pendingSpeechIds.clear();
     this.awaitingCommittedSpeechIds.clear();
     this.committedSpeechIds.clear();
+    this.teachingStateRevision = -1;
+    this.teachingStateFingerprint = "";
+    this.teachingAudioGateRevision = 0;
+    this.teachingAudioGateValue = null;
+    this.teachingAudioGateOpen = false;
     this.relayReady = false;
     this.configurationSent = false;
     this.sessionConfigured = false;
@@ -586,6 +623,43 @@ export class QwenWebSocketRealtimeClient {
     }
 
     const relayFrame = readRelayControlFrame(raw);
+    const teachingFrame = parseTeachingRelayFrame(raw);
+    if (teachingFrame.kind === "invalid") {
+      this.reportError(
+        "INVALID_TEACHING_RELAY_FRAME",
+        "收到无效的学习小支线控制帧。",
+      );
+      return;
+    }
+    if (teachingFrame.kind === "state") {
+      const fingerprint = JSON.stringify(teachingFrame.frame);
+      if (
+        teachingFrame.frame.revision === this.teachingStateRevision &&
+        fingerprint !== this.teachingStateFingerprint
+      ) {
+        this.reportError(
+          "CONFLICTING_TEACHING_STATE_REVISION",
+          "收到版本相同但内容冲突的学习小支线状态。",
+        );
+        return;
+      }
+      if (teachingFrame.frame.revision > this.teachingStateRevision) {
+        this.teachingStateRevision = teachingFrame.frame.revision;
+        this.teachingStateFingerprint = fingerprint;
+        this.callbacks.onTeachingState?.(
+          teachingStateFromRelayFrame(teachingFrame.frame),
+        );
+      }
+      return;
+    }
+    if (teachingFrame.kind === "audio_gate") {
+      this.handleTeachingAudioGate(
+        teachingFrame.frame.revision,
+        teachingFrame.frame.open,
+      );
+      return;
+    }
+
     if (relayFrame) {
       this.handleRelayControlFrame(relayFrame);
       return;
@@ -606,6 +680,7 @@ export class QwenWebSocketRealtimeClient {
       if (!this.relayReady) {
         this.relayReady = true;
         this.configureSession();
+        this.flushTeachingControls();
       }
       return;
     }
@@ -720,10 +795,10 @@ export class QwenWebSocketRealtimeClient {
     const responseCreated = qwenResponseCreatedEventSchema.safeParse(event);
     if (responseCreated.success) {
       this.responseCreatePending = false;
-      const admission = this.responseAudio?.beginResponse(
-        responseCreated.data.response.id,
-      );
-      if (!admission?.accepted) {
+      const admission = this.teachingAudioGateOpen
+        ? this.responseAudio?.beginResponse(responseCreated.data.response.id)
+        : null;
+      if (!this.teachingAudioGateOpen || !admission?.accepted) {
         shouldProjectEvent = false;
       }
       if (admission?.shouldCancel) {
@@ -732,7 +807,11 @@ export class QwenWebSocketRealtimeClient {
     }
 
     const audioDelta = readResponseAudioDelta(event);
-    if (audioDelta) {
+    if (
+      audioDelta &&
+      this.teachingAudioGateOpen &&
+      this.responseAudio?.currentResponseId === audioDelta.responseId
+    ) {
       try {
         const samples = decodePcm16Base64(audioDelta.delta);
         const result = this.responseAudio?.enqueue(
@@ -768,6 +847,9 @@ export class QwenWebSocketRealtimeClient {
       transcriptResponseId &&
       this.responseAudio?.currentResponseId !== transcriptResponseId
     ) {
+      shouldProjectEvent = false;
+    }
+    if (!this.teachingAudioGateOpen && event.type.startsWith("response.")) {
       shouldProjectEvent = false;
     }
 
@@ -910,6 +992,82 @@ export class QwenWebSocketRealtimeClient {
     this.callbacks.onProviderEvent?.("client", event);
   }
 
+  private sendRelayControlEvent(event: unknown): boolean {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== SOCKET_OPEN || !this.relayReady) {
+      return false;
+    }
+    try {
+      socket.send(JSON.stringify(event));
+      return true;
+    } catch {
+      this.reportError(
+        "TEACHING_CONTROL_SEND_FAILED",
+        "学习小支线控制没有发送成功，请检查实时连接。",
+      );
+      return false;
+    }
+  }
+
+  private flushTeachingControls(): void {
+    if (this.teachingMutePending) {
+      if (this.sendRelayControlEvent(teachingMuteFrame(createEventId()))) {
+        this.teachingMutePending = false;
+      }
+      return;
+    }
+    if (
+      this.teachingRequestPending &&
+      this.sendRelayControlEvent(teachingRequestFrame(createEventId()))
+    ) {
+      this.teachingRequestPending = false;
+    }
+  }
+
+  private handleTeachingAudioGate(revision: number, open: boolean): void {
+    if (revision < this.teachingAudioGateRevision) return;
+    if (
+      revision === this.teachingAudioGateRevision &&
+      this.teachingAudioGateValue !== null &&
+      open !== this.teachingAudioGateValue
+    ) {
+      this.reportError(
+        "CONFLICTING_TEACHING_AUDIO_GATE_REVISION",
+        "收到版本相同但开关冲突的学习音频控制帧。",
+      );
+      return;
+    }
+    if (revision > this.teachingAudioGateRevision) {
+      this.teachingAudioGateRevision = revision;
+      this.teachingAudioGateValue = open;
+      this.applyTeachingAudioGate(open);
+    }
+    this.sendRelayControlEvent(
+      teachingAudioGateAckFrame(createEventId(), revision),
+    );
+  }
+
+  private applyTeachingAudioGate(open: boolean): void {
+    if (open === this.teachingAudioGateOpen) return;
+    this.teachingAudioGateOpen = open;
+    this.applyMicrophoneGate();
+    this.responseAudio?.reset();
+    this.responseCreatePending = false;
+    this.projection = {
+      ...this.projection,
+      activity:
+        this.projection.activity === "user_speaking"
+          ? "user_speaking"
+          : this.sessionConfigured
+            ? "listening"
+            : "idle",
+      responseActive: false,
+      activeResponseId: null,
+      assistantDraft: "",
+    };
+    this.syncProjectionToSnapshot();
+  }
+
   private sendResponseCancel(): void {
     if (!this.isSocketOpen() || !this.relayReady) {
       return;
@@ -941,6 +1099,7 @@ export class QwenWebSocketRealtimeClient {
     this.microphone?.setEnabled(
       this.sessionConfigured &&
         this.snapshot.connection === "active" &&
+        this.teachingAudioGateOpen &&
         !this.snapshot.microphoneMuted &&
         modeAllowsAudio,
     );
@@ -1032,6 +1191,13 @@ export class QwenWebSocketRealtimeClient {
     this.seenEventIds.clear();
     this.socketBackpressureReported = false;
     this.terminalSocketError = false;
+    this.teachingStateRevision = -1;
+    this.teachingStateFingerprint = "";
+    this.teachingAudioGateRevision = 0;
+    this.teachingAudioGateValue = null;
+    this.teachingAudioGateOpen = true;
+    this.teachingRequestPending = false;
+    this.teachingMutePending = false;
   }
 }
 

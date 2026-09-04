@@ -677,6 +677,7 @@ function Bindings({
           "conversation_summary",
           "memory_extraction",
           "memory_embedding",
+          "teaching_plan_generation",
         ] as const
       ).map((purpose) => {
         const kind =
@@ -698,7 +699,11 @@ function Bindings({
                 event.target.value && onChange(purpose, event.target.value)
               }
             >
-              <option value="">尚未设置</option>
+              <option value="">
+                {purpose === "teaching_plan_generation"
+                  ? "未配置（无法生成短期计划）"
+                  : "尚未设置"}
+              </option>
               {settings.models
                 .filter(
                   (model) => model.kind === kind && model.status === "enabled",
@@ -709,6 +714,9 @@ function Bindings({
                   </option>
                 ))}
             </select>
+            {purpose === "teaching_plan_generation" && (
+              <small>{teachingPlanGenerationPurposeHelp}</small>
+            )}
           </label>
         );
       })}
@@ -938,9 +946,13 @@ const statusLabels = {
   enabled: "已启用",
   disabled: "已停用",
 } as const;
-const purposeLabels: Record<ModelPurpose, string> = {
+export const teachingPlanGenerationPurposeHelp =
+  "必需用途。成人配置短期计划时由该大模型生成待确认草稿；当前不联网检索，也不会读取儿童会话或记忆。";
+
+export const purposeLabels: Record<ModelPurpose, string> = {
   realtime_default: "新角色默认实时模型",
   conversation_summary: "会话摘要模型",
   memory_extraction: "长期记忆提取模型",
   memory_embedding: "长期记忆向量化（内置 Mem0）",
+  teaching_plan_generation: "教学计划生成模型（短期计划必需）",
 };

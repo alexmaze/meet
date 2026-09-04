@@ -4,6 +4,8 @@ import {
   qwenResponseCreateEventSchema,
   qwenSessionUpdateEventSchema,
   qwenUserTextItemCreateEventSchema,
+  realtimeTeachingClientControlFrameSchema,
+  type QwenSessionUpdateEvent,
   type QwenRealtimeModel,
 } from "@meet/protocol";
 import { isIP } from "node:net";
@@ -11,6 +13,14 @@ import WebSocket, { type ClientOptions, type RawData } from "ws";
 
 import type { AppConfig } from "./config.js";
 import { normalizeQwenRealtimeEndpoint } from "./qwen.js";
+import {
+  completeQwenTeachingBaseSession,
+  matchesQwenTeachingBaseSession,
+  parseQwenTeachingSessionUpdatedEvent,
+  QwenTeachingSessionController,
+  type QwenTeachingRuntimeSnapshot,
+  type QwenTeachingSessionDependencies,
+} from "./teaching/qwen-teaching-session-controller.js";
 
 export const QWEN_RELAY_CLIENT_MAX_MESSAGE_BYTES = 256 * 1024;
 export const QWEN_RELAY_UPSTREAM_MAX_MESSAGE_BYTES = 2 * 1024 * 1024;
@@ -41,8 +51,20 @@ export type QwenWebSocketRelayOptions = {
     relationshipContext?: string;
     history?: QwenContinuityMessage[];
   };
+  teaching?: QwenWebSocketTeachingOptions;
   webSocketFactory?: QwenWebSocketFactory;
 };
+
+export type QwenWebSocketTeachingOptions = Readonly<{
+  runtime: QwenTeachingRuntimeSnapshot;
+  dependencies: QwenTeachingSessionDependencies;
+  now?: () => number;
+  timeouts?: Readonly<{
+    gateAckMs?: number;
+    updateAckMs?: number;
+    responseDoneMs?: number;
+  }>;
+}>;
 
 export type QwenContinuityMessage = {
   id: string;
@@ -103,6 +125,7 @@ export function relayQwenWebSocket({
   config,
   model,
   runtime,
+  teaching,
   webSocketFactory = defaultWebSocketFactory,
 }: QwenWebSocketRelayOptions): WebSocket | null {
   if (!config.apiKey || !config.endpoint) {
@@ -137,6 +160,10 @@ export function relayQwenWebSocket({
   let rateWindowAudioBytes = 0;
   let rateWindowControlEvents = 0;
   let sessionTimeout: NodeJS.Timeout | null = null;
+  let expectedTeachingBaseSession: QwenSessionUpdateEvent["session"] | null =
+    null;
+  let teachingBaseAcknowledged = false;
+  let teachingController: QwenTeachingSessionController | null = null;
   const pendingClientMessages: Buffer[] = [];
 
   const stop = (
@@ -150,9 +177,57 @@ export function relayQwenWebSocket({
     sessionTimeout = null;
     pendingClientMessages.length = 0;
     pendingBytes = 0;
+    teachingController?.dispose();
 
     if (source !== "client") closeSocket(client, code, reason);
     if (source !== "upstream") closeOrTerminateUpstream(upstream);
+  };
+
+  if (teaching) {
+    teachingController = new QwenTeachingSessionController({
+      runtime: teaching.runtime,
+      dependencies: teaching.dependencies,
+      now: teaching.now,
+      timeouts: teaching.timeouts,
+      transport: {
+        sendClientFrame: (frame) => sendJson(client, frame),
+        sendUpstreamEvent: (event) =>
+          sendWithBackpressure(
+            upstream,
+            Buffer.from(JSON.stringify(event)),
+            false,
+          ),
+        safetyClose: () => {
+          sendRelayError(
+            client,
+            "TEACHING_SAFETY_RESET",
+            "教学状态未能安全确认，请重新连接继续普通聊天。",
+          );
+          stop("relay", CLOSE_INTERNAL_ERROR, "Teaching safety reset");
+        },
+      },
+    });
+  }
+
+  const injectContinuity = (): boolean => {
+    if (historyInjected) return true;
+    historyInjected = true;
+    for (const event of buildQwenContinuityEvents(
+      runtime.history ?? [],
+      runtime.relationshipContext,
+    )) {
+      const payload = Buffer.from(JSON.stringify(event));
+      if (!sendWithBackpressure(upstream, payload, false)) {
+        sendRelayError(
+          client,
+          "RELAY_BACKPRESSURE",
+          "续聊上下文注入失败，请重新连接。",
+        );
+        stop("relay", CLOSE_TRY_AGAIN_LATER, "History injection failed");
+        return false;
+      }
+    }
+    return true;
   };
 
   client.on("message", (data, isBinary) => {
@@ -168,13 +243,29 @@ export function relayQwenWebSocket({
     }
 
     const message = rawDataToBuffer(data);
-    const eventType = readAllowedQwenClientEventType(message, runtime);
     if (
       message.byteLength === 0 ||
-      message.byteLength > QWEN_RELAY_CLIENT_MAX_MESSAGE_BYTES ||
+      message.byteLength > QWEN_RELAY_CLIENT_MAX_MESSAGE_BYTES
+    ) {
+      sendRelayError(
+        client,
+        "INVALID_CLIENT_EVENT",
+        "实时事件格式或大小无效。",
+      );
+      stop("relay", CLOSE_POLICY_VIOLATION, "Invalid client event");
+      return;
+    }
+    const parsedJson = parseJsonMessage(message);
+    const teachingFrame =
+      realtimeTeachingClientControlFrameSchema.safeParse(parsedJson);
+    const eventType = teachingFrame.success
+      ? teachingFrame.data.type
+      : readAllowedQwenClientEventType(message, runtime);
+    if (
       !eventType ||
-      (!sessionConfigured && eventType !== "session.update") ||
-      (sessionConfigured && eventType === "session.update")
+      (!teachingFrame.success &&
+        ((!sessionConfigured && eventType !== "session.update") ||
+          (sessionConfigured && eventType === "session.update")))
     ) {
       sendRelayError(
         client,
@@ -207,7 +298,40 @@ export function relayQwenWebSocket({
       stop("relay", CLOSE_POLICY_VIOLATION, "Realtime rate exceeded");
       return;
     }
-    if (eventType === "session.update") sessionConfigured = true;
+    if (teachingFrame.success) {
+      if (teachingController) {
+        teachingController.handleClientFrame(teachingFrame.data);
+      } else {
+        sendJson(client, {
+          type: "relay.teaching.state",
+          revision: 0,
+          state: "unavailable",
+          canRequest: false,
+          canMute: false,
+        });
+      }
+      return;
+    }
+    if (eventType === "session.update") {
+      sessionConfigured = true;
+      if (teachingController) {
+        const parsed = qwenSessionUpdateEventSchema.safeParse(parsedJson);
+        if (!parsed.success) {
+          sendRelayError(
+            client,
+            "INVALID_CLIENT_EVENT",
+            "实时事件格式或大小无效。",
+          );
+          stop("relay", CLOSE_POLICY_VIOLATION, "Invalid client event");
+          return;
+        }
+        expectedTeachingBaseSession = parsed.data.session;
+      }
+    } else if (teachingController && !teachingController.isInputGateOpen()) {
+      // The browser has already been asked to close its local RTP/control
+      // gate. Consume any in-flight provider control without forwarding it.
+      return;
+    }
 
     if (!upstreamReady) {
       if (pendingBytes + message.byteLength > MAX_PENDING_CLIENT_BYTES) {
@@ -275,27 +399,84 @@ export function relayQwenWebSocket({
       stop("relay", CLOSE_INTERNAL_ERROR, "Upstream message too large");
       return;
     }
-    if (
+    if (teachingController) {
+      if (isBinary) {
+        sendRelayError(
+          client,
+          "TEACHING_SAFETY_RESET",
+          "教学状态未能安全确认，请重新连接继续普通聊天。",
+        );
+        stop("relay", CLOSE_INTERNAL_ERROR, "Teaching safety reset");
+        return;
+      }
+      const providerEvent = parseJsonMessage(message);
+      const providerType = readUnknownEventType(providerEvent);
+      if (!providerType) {
+        sendRelayError(
+          client,
+          "TEACHING_SAFETY_RESET",
+          "教学状态未能安全确认，请重新连接继续普通聊天。",
+        );
+        stop("relay", CLOSE_INTERNAL_ERROR, "Teaching safety reset");
+        return;
+      }
+      if (providerType === "session.updated" && !teachingBaseAcknowledged) {
+        const session = parseQwenTeachingSessionUpdatedEvent(providerEvent);
+        const expected = expectedTeachingBaseSession;
+        if (
+          !session ||
+          !expected ||
+          !matchesQwenTeachingBaseSession(session, {
+            model,
+            modalities: expected.modalities,
+            voice: expected.voice,
+            inputAudioFormat: expected.input_audio_format,
+            outputAudioFormat: expected.output_audio_format,
+            instructions: expected.instructions,
+            maxHistoryTurns: expected.max_history_turns,
+            turnDetection: expected.turn_detection.type,
+          })
+        ) {
+          sendRelayError(
+            client,
+            "TEACHING_SAFETY_RESET",
+            "教学状态未能安全确认，请重新连接继续普通聊天。",
+          );
+          stop("relay", CLOSE_INTERNAL_ERROR, "Teaching safety reset");
+          return;
+        }
+        teachingBaseAcknowledged = true;
+        if (!injectContinuity()) return;
+        // Open the browser-side teaching gate before exposing session.updated.
+        // The client keeps its microphone disabled until session.updated, while
+        // the relay keeps dropping input until the gate ACK arrives. This
+        // ordering avoids a brief un-gated microphone window at startup.
+        teachingController.configureBase(
+          completeQwenTeachingBaseSession(session, {
+            inputAudioFormat: expected.input_audio_format,
+            outputAudioFormat: expected.output_audio_format,
+            instructions: expected.instructions,
+            maxHistoryTurns: expected.max_history_turns,
+          }),
+          session.eventId,
+        );
+        if (!sendWithBackpressure(client, message, false)) {
+          stop("relay", CLOSE_TRY_AGAIN_LATER, "Relay backpressure");
+          return;
+        }
+        return;
+      }
+      if (teachingBaseAcknowledged) {
+        const disposition =
+          teachingController.handleProviderEvent(providerEvent);
+        if (!disposition.forward) return;
+      }
+    } else if (
       !historyInjected &&
       !isBinary &&
       readJsonEventType(message) === "session.updated"
     ) {
-      historyInjected = true;
-      for (const event of buildQwenContinuityEvents(
-        runtime.history ?? [],
-        runtime.relationshipContext,
-      )) {
-        const payload = Buffer.from(JSON.stringify(event));
-        if (!sendWithBackpressure(upstream, payload, false)) {
-          sendRelayError(
-            client,
-            "RELAY_BACKPRESSURE",
-            "续聊上下文注入失败，请重新连接。",
-          );
-          stop("relay", CLOSE_TRY_AGAIN_LATER, "History injection failed");
-          return;
-        }
-      }
+      if (!injectContinuity()) return;
     }
     if (!sendWithBackpressure(client, message, isBinary)) {
       stop("relay", CLOSE_TRY_AGAIN_LATER, "Relay backpressure");
@@ -397,17 +578,24 @@ function qwenContextItem(
 }
 
 function readJsonEventType(message: Buffer): string | null {
+  return readUnknownEventType(parseJsonMessage(message));
+}
+
+function parseJsonMessage(message: Buffer): unknown {
   try {
-    const parsed = JSON.parse(message.toString("utf8")) as unknown;
-    return typeof parsed === "object" &&
-      parsed !== null &&
-      !Array.isArray(parsed) &&
-      typeof Reflect.get(parsed, "type") === "string"
-      ? (Reflect.get(parsed, "type") as string)
-      : null;
+    return JSON.parse(message.toString("utf8")) as unknown;
   } catch {
     return null;
   }
+}
+
+function readUnknownEventType(input: unknown): string | null {
+  return typeof input === "object" &&
+    input !== null &&
+    !Array.isArray(input) &&
+    typeof Reflect.get(input, "type") === "string"
+    ? (Reflect.get(input, "type") as string)
+    : null;
 }
 
 function defaultWebSocketFactory(
@@ -503,9 +691,12 @@ function sendWithBackpressure(
   }
 }
 
-function sendJson(socket: WebSocket, value: Record<string, string>): void {
+function sendJson(
+  socket: WebSocket,
+  value: Readonly<Record<string, unknown>>,
+): boolean {
   const message = Buffer.from(JSON.stringify(value));
-  sendWithBackpressure(socket, message, false);
+  return sendWithBackpressure(socket, message, false);
 }
 
 function sendRelayError(

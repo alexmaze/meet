@@ -1,4 +1,8 @@
 import {
+  isDynamicTeachingBindingApproved,
+  isDynamicTeachingModel,
+} from "@meet/database";
+import {
   characterIdParamsSchema,
   conversationRuntimeSnapshotSchema,
   conversationRealtimeQuerySchema,
@@ -54,11 +58,19 @@ import {
 import {
   isAllowedWebSocketOrigin,
   relayQwenWebSocket,
+  type QwenWebSocketTeachingOptions,
   type QwenWebSocketFactory,
 } from "../qwen-websocket.js";
+import {
+  TeachingServiceError,
+  type TeachingService,
+} from "../teaching/service.js";
 import { exchangeQwenOffer, QwenGatewayError } from "../qwen.js";
 
 type FetchFunction = typeof globalThis.fetch;
+type DynamicTeachingCapability = NonNullable<
+  NonNullable<AppConfig["teaching"]>["dynamicQwen"]
+>;
 
 export async function registerCharacterRoutes(
   app: FastifyInstance,
@@ -70,6 +82,8 @@ export async function registerCharacterRoutes(
   qwenWebSocketFactory?: QwenWebSocketFactory,
   doubaoWebSocketFactory?: DoubaoWebSocketFactory,
   modelSettings?: ModelSettingsService,
+  teachingService?: TeachingService,
+  dynamicTeachingCapability?: DynamicTeachingCapability,
 ): Promise<void> {
   const realtimeHandshakeRateLimiter = new LoginRateLimiter(20, 60_000);
   const voicePreviewRateLimiter = new LoginRateLimiter(10, 60_000);
@@ -84,6 +98,7 @@ export async function registerCharacterRoutes(
       voice: string;
       instructions: string;
       relationshipContext?: string;
+      teaching?: QwenWebSocketTeachingOptions;
       history: Array<{
         id: string;
         role: "user" | "assistant";
@@ -384,6 +399,12 @@ export async function registerCharacterRoutes(
       noStore(reply);
       const actor = await authenticateActor(request, reply, config, auth);
       if (!actor) return;
+      if (actor.accountType === "child") {
+        return reply.code(403).send({
+          code: "REALTIME_TRANSPORT_FORBIDDEN",
+          message: "儿童通话需要先确认本次学习小支线设置。",
+        });
+      }
       const params = characterIdParamsSchema.safeParse(request.params);
       if (!params.success) return invalidCharacterRequest(reply);
 
@@ -558,6 +579,32 @@ export async function registerCharacterRoutes(
               409,
             );
           }
+          const dynamicTeachingApproved = Boolean(
+            dynamicTeachingCapability &&
+            isDynamicTeachingModel(runtime.model) &&
+            isDynamicTeachingBindingApproved(
+              {
+                modelProfileId: configured.profile.id,
+                modelProfileRevision: configured.profile.revision,
+                connectionId: configured.connection.id,
+                connectionRevision: configured.connection.revision,
+              },
+              dynamicTeachingCapability,
+            ),
+          );
+          const teaching =
+            teachingService &&
+            actor.accountType === "child" &&
+            provider === "qwen"
+              ? await createQwenTeachingOptions({
+                  teachingService,
+                  actor,
+                  conversationId: query.data.conversationId,
+                  provider,
+                  model: runtime.model,
+                  dynamicTeachingApproved,
+                })
+              : undefined;
 
           const rateLimit = realtimeHandshakeRateLimiter.consume(
             `${actor.id}:${request.ip}`,
@@ -579,6 +626,7 @@ export async function registerCharacterRoutes(
             voice: runtime.voice,
             instructions: runtime.instructions,
             relationshipContext: continuity.relationshipContext,
+            teaching,
             history: continuity.messages,
           });
           request.log.debug(
@@ -632,10 +680,150 @@ export async function registerCharacterRoutes(
         },
         model: qwenRealtimeModelSchema.parse(context.model),
         runtime,
+        teaching: context.teaching,
         webSocketFactory: qwenWebSocketFactory,
       });
     },
   );
+}
+
+async function createQwenTeachingOptions(input: {
+  teachingService: TeachingService;
+  actor: UserAccount;
+  conversationId: string;
+  provider: RealtimeProviderKind;
+  model: string;
+  dynamicTeachingApproved: boolean;
+}): Promise<QwenWebSocketTeachingOptions | undefined> {
+  const loaded = await input.teachingService.loadRuntimeForReconnect(
+    input.conversationId,
+  );
+  if (loaded.kind === "not_found") {
+    throw new CharacterServiceError(
+      "CHARACTER_REALTIME_UNAVAILABLE",
+      "请先确认本次是否使用学习小支线，再开始实时通话。",
+      409,
+    );
+  }
+  if (loaded.provider !== input.provider || loaded.model !== input.model) {
+    throw new CharacterServiceError(
+      "CHARACTER_REALTIME_UNAVAILABLE",
+      "本次通话的教学状态与实时模型不一致，请重新开始通话。",
+      503,
+    );
+  }
+
+  const state = loaded.state;
+  const hasPlanSnapshot =
+    state.learningPlanId !== null &&
+    state.learningPlanRevision !== null &&
+    state.subject !== null &&
+    state.difficulty !== null &&
+    state.triggerMode !== null;
+  const subject = state.subject ?? "english";
+  const difficulty = state.difficulty ?? "starter";
+  const triggerMode = state.triggerMode ?? "on_request";
+  let databaseRevision = state.revision;
+
+  const updateRevision = (next: { revision: number }): void => {
+    databaseRevision = Math.max(databaseRevision, next.revision);
+  };
+  const requireTransition = (result: {
+    kind:
+      | "transitioned"
+      | "unchanged"
+      | "not_found"
+      | "revision_conflict"
+      | "invalid_state";
+    state?: { revision: number };
+  }): void => {
+    if (
+      (result.kind !== "transitioned" && result.kind !== "unchanged") ||
+      !result.state
+    ) {
+      throw new Error("Teaching state transition failed.");
+    }
+    updateRevision(result.state);
+  };
+
+  return {
+    runtime: {
+      provider: loaded.provider === "qwen" ? "qwen" : "doubao",
+      enabled: hasPlanSnapshot && input.dynamicTeachingApproved,
+      subject,
+      difficulty,
+      triggerMode,
+      startedAtMs: loaded.conversationStartedAt.getTime(),
+      eligibleForGentle:
+        hasPlanSnapshot &&
+        input.dynamicTeachingApproved &&
+        triggerMode === "gentle",
+      validUserTurns: state.validUserTurns,
+      invitationCount: state.invitationCount,
+      sessionMuted: state.state === "muted",
+    },
+    dependencies: {
+      claimInvitation: async (claim) => {
+        if (claim.subject !== subject || claim.difficulty !== difficulty) {
+          throw new Error("Teaching invitation snapshot mismatch.");
+        }
+        const result = await input.teachingService.claimInvitation({
+          conversationId: input.conversationId,
+          subject,
+          explicitRequest: claim.trigger === "on_request",
+        });
+        if (result.kind !== "claimed") {
+          if (result.kind === "not_eligible") return { claimed: false };
+          throw new Error("Teaching invitation claim failed.");
+        }
+        if (!result.compiledDirective) {
+          throw new Error("Teaching content binding failed.");
+        }
+        updateRevision(result.state);
+        return {
+          claimed: true,
+          content: {
+            id: result.contentItemId,
+            directive: result.compiledDirective,
+            maximumAssistantResponses: result.maximumAssistantResponses,
+          },
+        };
+      },
+      recordValidUserTurn: async () => {
+        const result = await input.teachingService.recordValidTurn(
+          input.conversationId,
+        );
+        return result.kind === "recorded"
+          ? { recorded: true, validUserTurns: result.validUserTurns }
+          : { recorded: false, validUserTurns: state.validUserTurns };
+      },
+      persistState: async (event) => {
+        if (event.kind === "session_muted") {
+          const muted = await input.teachingService.muteConversation(
+            input.actor,
+            input.conversationId,
+          );
+          updateRevision(muted);
+          return;
+        }
+        if (event.kind === "restoring") {
+          requireTransition(
+            await input.teachingService.markRestoring(
+              input.conversationId,
+              databaseRevision,
+            ),
+          );
+          return;
+        }
+        requireTransition(
+          await input.teachingService.markCompleted(
+            input.conversationId,
+            databaseRevision,
+          ),
+        );
+      },
+    },
+  };
 }
 
 function toConversationRuntimeSnapshot(
@@ -726,6 +914,18 @@ function sendCharacterError(reply: FastifyReply, error: unknown) {
       reply.request.log.error(
         { ...getSafeErrorLogContext(error.cause), code: error.code },
         "Character repository operation failed",
+      );
+    }
+    return reply.code(error.statusCode).send({
+      code: error.code,
+      message: error.message,
+    });
+  }
+  if (error instanceof TeachingServiceError) {
+    if (error.statusCode >= 500 && error.cause) {
+      reply.request.log.error(
+        { ...getSafeErrorLogContext(error.cause), code: error.code },
+        "Teaching repository operation failed during realtime setup",
       );
     }
     return reply.code(error.statusCode).send({

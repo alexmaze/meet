@@ -4,12 +4,15 @@ import type {
   ConversationRuntimeSnapshot,
   PersonaDefinition,
   ProviderCapabilities,
+  TeachingPlanContentItem,
+  TeachingPlanGenerationInputSnapshot,
   VisualProfile,
   VoiceStyle,
 } from "@meet/protocol";
 import {
   check,
   boolean,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -22,7 +25,19 @@ import {
   uuid,
   varchar,
   text,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
+
+function activeTeachingContentForeignColumns(): [AnyPgColumn, AnyPgColumn] {
+  return [teachingContentRevisions.id, teachingContentRevisions.learningPlanId];
+}
+
+function generatedTeachingContentForeignColumns(): [AnyPgColumn, AnyPgColumn] {
+  return [
+    teachingContentRevisions.id,
+    teachingContentRevisions.generationRequestId,
+  ];
+}
 
 export const accountTypeEnum = pgEnum("user_account_type", [
   "admin",
@@ -96,6 +111,7 @@ export const modelPurposeEnum = pgEnum("model_purpose", [
   "conversation_summary",
   "memory_extraction",
   "memory_embedding",
+  "teaching_plan_generation",
 ]);
 
 export const aiWorkStatusEnum = pgEnum("ai_work_status", [
@@ -137,6 +153,86 @@ export const characterVisibilityEnum = pgEnum("character_visibility", [
 export const characterAuditEventTypeEnum = pgEnum(
   "character_audit_event_type",
   ["created", "updated", "visibility_changed", "copied", "deleted", "restored"],
+);
+
+export const teachingSubjectEnum = pgEnum("teaching_subject", [
+  "english",
+  "math",
+  "science",
+  "chinese",
+  "general",
+]);
+
+export const teachingGradeLevelEnum = pgEnum("teaching_grade_level", [
+  "preschool",
+  "grade_1",
+  "grade_2",
+  "grade_3",
+  "grade_4",
+  "grade_5",
+  "grade_6",
+  "grade_7",
+  "grade_8",
+  "grade_9",
+  "grade_10",
+  "grade_11",
+  "grade_12",
+  "unspecified",
+]);
+
+export const teachingDifficultyEnum = pgEnum("teaching_difficulty", [
+  "starter",
+  "growing",
+  "challenge",
+]);
+
+export const teachingTriggerModeEnum = pgEnum("teaching_trigger_mode", [
+  "on_request",
+  "gentle",
+]);
+
+export const conversationTeachingStateEnum = pgEnum(
+  "conversation_teaching_state",
+  ["unavailable", "available", "active", "restoring", "muted", "completed"],
+);
+
+export const conversationTeachingMuteReasonEnum = pgEnum(
+  "conversation_teaching_mute_reason",
+  ["temporary_conversation", "child_request", "plan_disabled"],
+);
+
+export const teachingEventTypeEnum = pgEnum("teaching_event_type", [
+  "prepared",
+  "child_muted",
+  "plan_disabled",
+  "invitation_claimed",
+  "restoring",
+  "completed",
+]);
+
+export const teachingPlanGenerationStatusEnum = pgEnum(
+  "teaching_plan_generation_status",
+  ["queued", "running", "succeeded", "failed", "superseded"],
+);
+
+export const teachingPlanGenerationModeEnum = pgEnum(
+  "teaching_plan_generation_mode",
+  ["auto", "controlled_template", "text_model"],
+);
+
+export const teachingPlanGeneratorSourceEnum = pgEnum(
+  "teaching_plan_generator_source",
+  ["controlled_template", "text_model"],
+);
+
+export const teachingContentItemKindEnum = pgEnum(
+  "teaching_content_item_kind",
+  [
+    "reviewed_catalog_ref",
+    "pinyin_practice",
+    "multiplication_fact",
+    "model_generated_activity",
+  ],
 );
 
 export const conversationModeEnum = pgEnum("conversation_mode", [
@@ -489,6 +585,46 @@ export const voiceProfiles = pgTable(
   ],
 );
 
+export const teachingSpikeLiveAuthorizations = pgTable(
+  "teaching_spike_live_authorizations",
+  {
+    runId: uuid("run_id").primaryKey(),
+    planHash: varchar("plan_hash", { length: 64 }).notNull(),
+    planJson: jsonb("plan_json").$type<unknown>().notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    reportHash: varchar("report_hash", { length: 64 }),
+    reportJson: jsonb("report_json").$type<unknown>(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("teaching_spike_live_authorizations_expiry_idx").on(table.expiresAt),
+    check(
+      "teaching_spike_live_authorizations_plan_hash_format",
+      sql`${table.planHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "teaching_spike_live_authorizations_plan_json_object",
+      sql`jsonb_typeof(${table.planJson}) = 'object'`,
+    ),
+    check(
+      "teaching_spike_live_authorizations_report_hash_format",
+      sql`${table.reportHash} IS NULL OR ${table.reportHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "teaching_spike_live_authorizations_report_json_object",
+      sql`${table.reportJson} IS NULL OR jsonb_typeof(${table.reportJson}) = 'object'`,
+    ),
+    check(
+      "teaching_spike_live_authorizations_report_terminal_pair",
+      sql`(${table.reportHash} IS NULL AND ${table.reportJson} IS NULL AND ${table.finishedAt} IS NULL) OR (${table.reportHash} IS NOT NULL AND ${table.reportJson} IS NOT NULL AND ${table.finishedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+
 export const modelPurposeBindings = pgTable("model_purpose_bindings", {
   purpose: modelPurposeEnum("purpose").primaryKey(),
   modelProfileId: uuid("model_profile_id")
@@ -619,6 +755,368 @@ export const characterAuditEvents = pgTable(
   ],
 );
 
+export const childCharacterLearningPlans = pgTable(
+  "child_character_learning_plans",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    childUserId: uuid("child_user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "cascade" }),
+    characterId: uuid("character_id")
+      .notNull()
+      .references(() => characters.id, { onDelete: "restrict" }),
+    enabled: boolean("enabled").notNull(),
+    subject: teachingSubjectEnum("subject").notNull(),
+    difficulty: teachingDifficultyEnum("difficulty").notNull(),
+    triggerMode: teachingTriggerModeEnum("trigger_mode").notNull(),
+    gradeLevel: teachingGradeLevelEnum("grade_level")
+      .notNull()
+      .default("unspecified"),
+    learningGoal: varchar("learning_goal", { length: 300 }),
+    activityCount: integer("activity_count").notNull().default(4),
+    durationDays: integer("duration_days").notNull().default(7),
+    activeContentRevisionId: uuid("active_content_revision_id"),
+    activeContentActivatedAt: timestamp("active_content_activated_at", {
+      withTimezone: true,
+    }),
+    lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true }),
+    contentCursor: integer("content_cursor").notNull().default(0),
+    revision: integer("revision").notNull().default(1),
+    createdByUserId: uuid("created_by_user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "restrict" }),
+    updatedByUserId: uuid("updated_by_user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("child_character_learning_plans_child_character_unique").on(
+      table.childUserId,
+      table.characterId,
+    ),
+    index("child_character_learning_plans_child_enabled_idx").on(
+      table.childUserId,
+      table.enabled,
+      table.updatedAt,
+    ),
+    index("child_character_learning_plans_character_enabled_idx").on(
+      table.characterId,
+      table.enabled,
+    ),
+    foreignKey({
+      name: "child_character_learning_plans_active_own_revision_fk",
+      columns: [table.activeContentRevisionId, table.id],
+      get foreignColumns(): [AnyPgColumn, AnyPgColumn] {
+        return activeTeachingContentForeignColumns();
+      },
+    }).onDelete("no action"),
+    check(
+      "child_character_learning_plans_revision_positive",
+      sql`${table.revision} > 0`,
+    ),
+    check(
+      "child_character_learning_plans_content_cursor_nonnegative",
+      sql`${table.contentCursor} >= 0`,
+    ),
+    check(
+      "child_character_learning_plans_learning_goal_not_blank",
+      sql`${table.learningGoal} IS NULL OR length(btrim(${table.learningGoal})) > 0`,
+    ),
+    check(
+      "child_character_learning_plans_activity_count_bounded",
+      sql`${table.activityCount} BETWEEN 3 AND 8`,
+    ),
+    check(
+      "child_character_learning_plans_duration_days_supported",
+      sql`${table.durationDays} IN (7, 14)`,
+    ),
+    check(
+      "child_character_learning_plans_active_content_pair",
+      sql`(${table.activeContentRevisionId} IS NULL AND ${table.activeContentActivatedAt} IS NULL) OR (${table.activeContentRevisionId} IS NOT NULL AND ${table.activeContentActivatedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+
+export const teachingPlanGenerationRequests = pgTable(
+  "teaching_plan_generation_requests",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    learningPlanId: uuid("learning_plan_id")
+      .notNull()
+      .references(() => childCharacterLearningPlans.id, {
+        onDelete: "cascade",
+      }),
+    clientRequestId: uuid("client_request_id").notNull(),
+    expectedPlanRevision: integer("expected_plan_revision").notNull(),
+    generationMode: teachingPlanGenerationModeEnum("generation_mode")
+      .notNull()
+      .default("text_model"),
+    generatorSource:
+      teachingPlanGeneratorSourceEnum("generator_source").notNull(),
+    status: teachingPlanGenerationStatusEnum("status")
+      .notNull()
+      .default("queued"),
+    inputSnapshot: jsonb("input_snapshot")
+      .$type<TeachingPlanGenerationInputSnapshot>()
+      .notNull(),
+    inputHash: varchar("input_hash", { length: 64 }).notNull(),
+    modelProfileId: uuid("model_profile_id").references(
+      () => providerProfiles.id,
+      { onDelete: "restrict" },
+    ),
+    modelProfileRevision: integer("model_profile_revision"),
+    connectionId: uuid("connection_id").references(() => modelConnections.id, {
+      onDelete: "restrict",
+    }),
+    connectionRevision: integer("connection_revision"),
+    outputContentRevisionId: uuid("output_content_revision_id"),
+    actualModel: varchar("actual_model", { length: 120 }),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    errorCode: varchar("error_code", { length: 80 }),
+    requestedByUserId: uuid("requested_by_user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "restrict" }),
+    requestedAt: timestamp("requested_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("teaching_plan_generation_requests_plan_client_unique").on(
+      table.learningPlanId,
+      table.clientRequestId,
+    ),
+    uniqueIndex("teaching_plan_generation_requests_one_active_per_plan")
+      .on(table.learningPlanId)
+      .where(sql`${table.status} IN ('queued', 'running')`),
+    index("teaching_plan_generation_requests_status_requested_idx").on(
+      table.status,
+      table.requestedAt,
+    ),
+    foreignKey({
+      name: "teaching_plan_generation_requests_output_own_revision_fk",
+      columns: [table.outputContentRevisionId, table.id],
+      get foreignColumns(): [AnyPgColumn, AnyPgColumn] {
+        return generatedTeachingContentForeignColumns();
+      },
+    }).onDelete("no action"),
+    check(
+      "teaching_plan_generation_requests_expected_revision_positive",
+      sql`${table.expectedPlanRevision} > 0`,
+    ),
+    check(
+      "teaching_plan_generation_requests_runtime_matches_source",
+      sql`(
+        ${table.generatorSource} = 'controlled_template'
+        AND ${table.modelProfileId} IS NULL
+        AND ${table.modelProfileRevision} IS NULL
+        AND ${table.connectionId} IS NULL
+        AND ${table.connectionRevision} IS NULL
+      ) OR (
+        ${table.generatorSource} = 'text_model'
+        AND ${table.modelProfileId} IS NOT NULL
+        AND ${table.modelProfileRevision} IS NOT NULL
+        AND ${table.modelProfileRevision} > 0
+        AND ${table.connectionId} IS NOT NULL
+        AND ${table.connectionRevision} IS NOT NULL
+        AND ${table.connectionRevision} > 0
+      )`,
+    ),
+    check(
+      "teaching_plan_generation_requests_mode_matches_source",
+      sql`${table.generationMode} = 'auto' OR (${table.generationMode} = 'controlled_template' AND ${table.generatorSource} = 'controlled_template') OR (${table.generationMode} = 'text_model' AND ${table.generatorSource} = 'text_model')`,
+    ),
+    check(
+      "teaching_plan_generation_requests_input_json_object",
+      sql`jsonb_typeof(${table.inputSnapshot}) = 'object'`,
+    ),
+    check(
+      "teaching_plan_generation_requests_input_identity_matches",
+      sql`${table.inputSnapshot} ? 'schemaVersion' AND ${table.inputSnapshot} ? 'generationMode' AND ${table.inputSnapshot} ? 'generatorSource' AND ${table.inputSnapshot} ? 'goalHash' AND NOT (${table.inputSnapshot} ? 'learningGoal') AND jsonb_typeof(${table.inputSnapshot}->'schemaVersion') = 'string' AND jsonb_typeof(${table.inputSnapshot}->'generationMode') = 'string' AND jsonb_typeof(${table.inputSnapshot}->'generatorSource') = 'string' AND jsonb_typeof(${table.inputSnapshot}->'goalHash') = 'string' AND ${table.inputSnapshot}->>'schemaVersion' IN ('teaching-plan-generation-input-v2', 'teaching-plan-generation-input-v3') AND ${table.inputSnapshot}->>'generationMode' = ${table.generationMode}::text AND ${table.inputSnapshot}->>'generatorSource' = ${table.generatorSource}::text AND ${table.inputSnapshot}->>'goalHash' ~ '^[0-9a-f]{64}$' AND (${table.inputSnapshot}->>'schemaVersion' <> 'teaching-plan-generation-input-v3' OR (${table.generationMode} = 'text_model' AND ${table.generatorSource} = 'text_model'))`,
+    ),
+    check(
+      "teaching_plan_generation_requests_input_hash_format",
+      sql`${table.inputHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "teaching_plan_generation_requests_terminal_time",
+      sql`(${table.status} IN ('succeeded', 'failed', 'superseded')) = (${table.completedAt} IS NOT NULL)`,
+    ),
+    check(
+      "teaching_plan_generation_requests_output_matches_status",
+      sql`(${table.status} = 'succeeded') = (${table.outputContentRevisionId} IS NOT NULL)`,
+    ),
+    check(
+      "teaching_plan_generation_requests_error_matches_status",
+      sql`(${table.status} = 'failed') = (${table.errorCode} IS NOT NULL)`,
+    ),
+    check(
+      "teaching_plan_generation_requests_error_supported",
+      sql`${table.errorCode} IS NULL OR ${table.errorCode} IN ('generator_not_configured', 'model_configuration_changed', 'model_request_failed', 'model_result_unknown', 'invalid_generation_input', 'invalid_model_output', 'content_compilation_failed', 'plan_revision_changed', 'worker_interrupted', 'unsupported_goal', 'needs_clarification')`,
+    ),
+    check(
+      "teaching_plan_generation_requests_usage_nonnegative",
+      sql`(${table.inputTokens} IS NULL OR ${table.inputTokens} >= 0) AND (${table.outputTokens} IS NULL OR ${table.outputTokens} >= 0)`,
+    ),
+    check(
+      "teaching_plan_generation_requests_times_ordered",
+      sql`(${table.startedAt} IS NULL OR ${table.startedAt} >= ${table.requestedAt}) AND (${table.completedAt} IS NULL OR ${table.completedAt} >= ${table.requestedAt})`,
+    ),
+  ],
+);
+
+export const teachingContentRevisions = pgTable(
+  "teaching_content_revisions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    learningPlanId: uuid("learning_plan_id")
+      .notNull()
+      .references(() => childCharacterLearningPlans.id, {
+        onDelete: "cascade",
+      }),
+    revision: integer("revision").notNull(),
+    generationRequestId: uuid("generation_request_id")
+      .notNull()
+      .references(() => teachingPlanGenerationRequests.id, {
+        onDelete: "no action",
+      }),
+    schemaVersion: varchar("schema_version", { length: 60 }).notNull(),
+    compilerVersion: varchar("compiler_version", { length: 60 }).notNull(),
+    title: varchar("title", { length: 80 }).notNull(),
+    normalizedGoal: varchar("normalized_goal", { length: 200 }).notNull(),
+    subject: teachingSubjectEnum("subject").notNull(),
+    difficulty: teachingDifficultyEnum("difficulty").notNull(),
+    gradeLevel: teachingGradeLevelEnum("grade_level").notNull(),
+    activityCount: integer("activity_count").notNull(),
+    durationDays: integer("duration_days").notNull(),
+    contentHash: varchar("content_hash", { length: 64 }).notNull(),
+    createdByUserId: uuid("created_by_user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("teaching_content_revisions_plan_revision_unique").on(
+      table.learningPlanId,
+      table.revision,
+    ),
+    uniqueIndex("teaching_content_revisions_generation_unique").on(
+      table.generationRequestId,
+    ),
+    uniqueIndex("teaching_content_revisions_id_plan_unique").on(
+      table.id,
+      table.learningPlanId,
+    ),
+    uniqueIndex("teaching_content_revisions_id_generation_unique").on(
+      table.id,
+      table.generationRequestId,
+    ),
+    check(
+      "teaching_content_revisions_revision_positive",
+      sql`${table.revision} > 0`,
+    ),
+    check(
+      "teaching_content_revisions_versions_supported",
+      sql`(${table.schemaVersion} = 'generated-teaching-plan-v1' AND ${table.compilerVersion} = 'controlled-teaching-content-v1') OR (${table.schemaVersion} = 'generated-teaching-plan-v2' AND ${table.compilerVersion} = 'model-generated-teaching-content-v2')`,
+    ),
+    check(
+      "teaching_content_revisions_text_not_blank",
+      sql`length(btrim(${table.title})) > 0 AND length(btrim(${table.normalizedGoal})) > 0`,
+    ),
+    check(
+      "teaching_content_revisions_activity_count_bounded",
+      sql`${table.activityCount} BETWEEN 3 AND 8`,
+    ),
+    check(
+      "teaching_content_revisions_duration_days_supported",
+      sql`${table.durationDays} IN (7, 14)`,
+    ),
+    check(
+      "teaching_content_revisions_content_hash_format",
+      sql`${table.contentHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+  ],
+);
+
+export const teachingContentItems = pgTable(
+  "teaching_content_items",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    contentRevisionId: uuid("content_revision_id")
+      .notNull()
+      .references(() => teachingContentRevisions.id, { onDelete: "cascade" }),
+    itemKey: varchar("item_key", { length: 64 }).notNull(),
+    position: integer("position").notNull(),
+    kind: teachingContentItemKindEnum("kind").notNull(),
+    structuredContent: jsonb("structured_content")
+      .$type<TeachingPlanContentItem>()
+      .notNull(),
+    compiledDirective: text("compiled_directive").notNull(),
+    directiveHash: varchar("directive_hash", { length: 64 }).notNull(),
+    maximumAssistantResponses: integer("maximum_assistant_responses")
+      .notNull()
+      .default(2),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("teaching_content_items_revision_key_unique").on(
+      table.contentRevisionId,
+      table.itemKey,
+    ),
+    uniqueIndex("teaching_content_items_revision_position_unique").on(
+      table.contentRevisionId,
+      table.position,
+    ),
+    check(
+      "teaching_content_items_position_bounded",
+      sql`${table.position} BETWEEN 1 AND 8`,
+    ),
+    check(
+      "teaching_content_items_json_object",
+      sql`jsonb_typeof(${table.structuredContent}) = 'object'`,
+    ),
+    check(
+      "teaching_content_items_json_identity_matches",
+      sql`${table.structuredContent} ? 'kind' AND ${table.structuredContent} ? 'key' AND ${table.structuredContent} ? 'order' AND jsonb_typeof(${table.structuredContent}->'kind') = 'string' AND jsonb_typeof(${table.structuredContent}->'key') = 'string' AND jsonb_typeof(${table.structuredContent}->'order') = 'number' AND ${table.structuredContent}->>'kind' = ${table.kind}::text AND ${table.structuredContent}->>'key' = ${table.itemKey} AND ${table.structuredContent}->'order' = to_jsonb(${table.position})`,
+    ),
+    check(
+      "teaching_content_items_structured_content_bounded",
+      sql`octet_length(${table.structuredContent}::text) <= 16000`,
+    ),
+    check(
+      "teaching_content_items_model_source_fixed",
+      sql`${table.kind}::text <> 'model_generated_activity' OR (${table.structuredContent}->>'knowledgeSource' = 'model_only' AND NOT (${table.structuredContent} ? 'source') AND NOT (${table.structuredContent} ? 'sources') AND NOT (${table.structuredContent} ? 'url') AND NOT (${table.structuredContent} ? 'urls') AND NOT (${table.structuredContent} ? 'sourceUrl') AND NOT (${table.structuredContent} ? 'sourceUrls') AND NOT (${table.structuredContent} ? 'citation') AND NOT (${table.structuredContent} ? 'citations') AND NOT (${table.structuredContent} ? 'provenance'))`,
+    ),
+    check(
+      "teaching_content_items_compiled_directive_bounded",
+      sql`length(btrim(${table.compiledDirective})) > 0 AND length(${table.compiledDirective}) <= 4000`,
+    ),
+    check(
+      "teaching_content_items_directive_hash_format",
+      sql`${table.directiveHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "teaching_content_items_response_limit_fixed",
+      sql`${table.maximumAssistantResponses} = 2`,
+    ),
+  ],
+);
+
 export const conversations = pgTable(
   "conversations",
   {
@@ -689,6 +1187,141 @@ export const conversationRuntimeSnapshots = pgTable(
       .notNull()
       .defaultNow(),
   },
+);
+
+export const conversationTeachingStates = pgTable(
+  "conversation_teaching_states",
+  {
+    conversationId: uuid("conversation_id")
+      .primaryKey()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    learningPlanId: uuid("learning_plan_id").references(
+      () => childCharacterLearningPlans.id,
+      { onDelete: "restrict" },
+    ),
+    learningPlanRevision: integer("learning_plan_revision"),
+    subject: teachingSubjectEnum("subject"),
+    difficulty: teachingDifficultyEnum("difficulty"),
+    triggerMode: teachingTriggerModeEnum("trigger_mode"),
+    disclosureVersion: varchar("disclosure_version", { length: 40 }),
+    contentRevisionId: uuid("content_revision_id"),
+    contentCatalogVersion: varchar("content_catalog_version", { length: 40 }),
+    state: conversationTeachingStateEnum("state").notNull(),
+    muteReason: conversationTeachingMuteReasonEnum("mute_reason"),
+    validUserTurns: integer("valid_user_turns").notNull().default(0),
+    invitationCount: integer("invitation_count").notNull().default(0),
+    activeContentItemId: varchar("active_content_item_id", { length: 160 }),
+    revision: integer("revision").notNull().default(1),
+    preparedAt: timestamp("prepared_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("conversation_teaching_states_plan_state_idx").on(
+      table.learningPlanId,
+      table.state,
+    ),
+    foreignKey({
+      name: "conversation_teaching_states_content_own_plan_fk",
+      columns: [table.contentRevisionId, table.learningPlanId],
+      foreignColumns: [
+        teachingContentRevisions.id,
+        teachingContentRevisions.learningPlanId,
+      ],
+    }).onDelete("no action"),
+    check(
+      "conversation_teaching_states_revision_positive",
+      sql`${table.revision} > 0`,
+    ),
+    check(
+      "conversation_teaching_states_counters_bounded",
+      sql`${table.validUserTurns} >= 0 AND ${table.invitationCount} >= 0 AND ${table.invitationCount} <= 1`,
+    ),
+    check(
+      "conversation_teaching_states_snapshot_complete",
+      sql`(
+        (${table.learningPlanId} IS NULL AND ${table.learningPlanRevision} IS NULL AND ${table.subject} IS NULL AND ${table.difficulty} IS NULL AND ${table.triggerMode} IS NULL AND ${table.disclosureVersion} IS NULL AND ${table.contentRevisionId} IS NULL AND ${table.contentCatalogVersion} IS NULL)
+        OR
+        (${table.learningPlanId} IS NOT NULL AND ${table.learningPlanRevision} IS NOT NULL AND ${table.learningPlanRevision} > 0 AND ${table.subject} IS NOT NULL AND ${table.difficulty} IS NOT NULL AND ${table.triggerMode} IS NOT NULL AND ${table.disclosureVersion} IS NOT NULL AND ${table.contentCatalogVersion} IS NOT NULL)
+      )`,
+    ),
+    check(
+      "conversation_teaching_states_disclosure_version_supported",
+      sql`${table.disclosureVersion} IS NULL OR ${table.disclosureVersion} = 'teaching-disclosure-v1'`,
+    ),
+    check(
+      "conversation_teaching_states_content_source_supported",
+      sql`(${table.contentCatalogVersion} IS NULL AND ${table.contentRevisionId} IS NULL) OR (${table.contentCatalogVersion} = 'reviewed-v1' AND ${table.contentRevisionId} IS NULL) OR (${table.contentCatalogVersion} IN ('generated-v1', 'generated-v2') AND ${table.contentRevisionId} IS NOT NULL)`,
+    ),
+    check(
+      "conversation_teaching_states_state_matches_snapshot",
+      sql`(
+        (${table.state} IN ('available', 'active', 'completed') AND ${table.learningPlanId} IS NOT NULL AND ${table.muteReason} IS NULL)
+        OR
+        (${table.state} = 'restoring' AND ${table.learningPlanId} IS NOT NULL)
+        OR
+        (${table.state} = 'unavailable' AND ${table.learningPlanId} IS NULL AND ${table.muteReason} IS NULL)
+        OR
+        (${table.state} = 'muted' AND ${table.muteReason} IS NOT NULL)
+      )`,
+    ),
+    check(
+      "conversation_teaching_states_active_item_matches_state",
+      sql`(
+        (${table.state} IN ('active', 'restoring') AND ${table.activeContentItemId} IS NOT NULL AND ${table.invitationCount} = 1)
+        OR
+        (${table.state} = 'muted' AND (${table.activeContentItemId} IS NULL OR ${table.invitationCount} = 1))
+        OR
+        (${table.state} IN ('available', 'unavailable') AND ${table.activeContentItemId} IS NULL AND ${table.invitationCount} = 0)
+        OR
+        (${table.state} = 'completed' AND ${table.activeContentItemId} IS NULL AND ${table.invitationCount} = 1)
+      )`,
+    ),
+    check(
+      "conversation_teaching_states_active_item_not_blank",
+      sql`${table.activeContentItemId} IS NULL OR length(btrim(${table.activeContentItemId})) > 0`,
+    ),
+  ],
+);
+
+export const teachingEvents = pgTable(
+  "teaching_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    learningPlanId: uuid("learning_plan_id").references(
+      () => childCharacterLearningPlans.id,
+      { onDelete: "set null" },
+    ),
+    eventType: teachingEventTypeEnum("event_type").notNull(),
+    actorUserId: uuid("actor_user_id").references(() => userAccounts.id, {
+      onDelete: "set null",
+    }),
+    stateRevision: integer("state_revision").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("teaching_events_conversation_type_revision_unique").on(
+      table.conversationId,
+      table.eventType,
+      table.stateRevision,
+    ),
+    index("teaching_events_conversation_created_idx").on(
+      table.conversationId,
+      table.createdAt,
+    ),
+    check(
+      "teaching_events_state_revision_positive",
+      sql`${table.stateRevision} > 0`,
+    ),
+  ],
 );
 
 export const conversationMessages = pgTable(
@@ -1097,14 +1730,37 @@ export type ModelConnectionRecord = typeof modelConnections.$inferSelect;
 export type NewModelConnectionRecord = typeof modelConnections.$inferInsert;
 export type VoiceProfileRecord = typeof voiceProfiles.$inferSelect;
 export type NewVoiceProfileRecord = typeof voiceProfiles.$inferInsert;
+export type TeachingSpikeLiveAuthorizationRecord =
+  typeof teachingSpikeLiveAuthorizations.$inferSelect;
+export type NewTeachingSpikeLiveAuthorizationRecord =
+  typeof teachingSpikeLiveAuthorizations.$inferInsert;
 export type CharacterRecord = typeof characters.$inferSelect;
 export type NewCharacterRecord = typeof characters.$inferInsert;
 export type CharacterAuditEvent = typeof characterAuditEvents.$inferSelect;
 export type NewCharacterAuditEvent = typeof characterAuditEvents.$inferInsert;
+export type ChildCharacterLearningPlanRecord =
+  typeof childCharacterLearningPlans.$inferSelect;
+export type NewChildCharacterLearningPlanRecord =
+  typeof childCharacterLearningPlans.$inferInsert;
+export type TeachingPlanGenerationRequestRecord =
+  typeof teachingPlanGenerationRequests.$inferSelect;
+export type NewTeachingPlanGenerationRequestRecord =
+  typeof teachingPlanGenerationRequests.$inferInsert;
+export type TeachingContentRevisionRecord =
+  typeof teachingContentRevisions.$inferSelect;
+export type NewTeachingContentRevisionRecord =
+  typeof teachingContentRevisions.$inferInsert;
+export type TeachingContentItemRecord =
+  typeof teachingContentItems.$inferSelect;
+export type NewTeachingContentItemRecord =
+  typeof teachingContentItems.$inferInsert;
 export type ConversationRecord = typeof conversations.$inferSelect;
 export type NewConversationRecord = typeof conversations.$inferInsert;
 export type ConversationRuntimeSnapshotRecord =
   typeof conversationRuntimeSnapshots.$inferSelect;
+export type ConversationTeachingStateRecord =
+  typeof conversationTeachingStates.$inferSelect;
+export type TeachingEventRecord = typeof teachingEvents.$inferSelect;
 export type ConversationMessageRecord =
   typeof conversationMessages.$inferSelect;
 export type NewConversationMessageRecord =

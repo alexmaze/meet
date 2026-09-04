@@ -421,7 +421,11 @@ export class ModelBindingJobReconciler {
   ) {}
 
   async enqueueWaiting(purpose: ModelPurpose, modelProfileId: string) {
-    if (purpose === "realtime_default" || purpose === "memory_embedding") {
+    if (
+      purpose === "realtime_default" ||
+      purpose === "memory_embedding" ||
+      purpose === "teaching_plan_generation"
+    ) {
       return;
     }
     await this.db.transaction(async (tx) => {

@@ -4,6 +4,7 @@ import type {
   RealtimeConnectionState,
   RealtimeProvidersResponse,
   TranscriptSegment,
+  UserAccount,
 } from "@meet/protocol";
 import { realtimeProvidersResponseSchema } from "@meet/protocol";
 import {
@@ -22,6 +23,21 @@ import {
   completeConversation,
   createConversation,
 } from "../history/conversation-api.js";
+import TeachingCallControls from "../teaching/TeachingCallControls.js";
+import {
+  getTeachingAvailability,
+  persistThenMuteTeaching,
+  prepareConversationTeaching,
+  TeachingApiError,
+} from "../teaching/teaching-api.js";
+import {
+  initialTeachingCallState,
+  resolveCallTeachingChoice,
+  unavailableTeachingAvailability,
+  type TeachingAvailability,
+  type TeachingCallState,
+  type TeachingChoice,
+} from "../teaching/teaching-state.js";
 import {
   initialClientSnapshot,
   type InputMode,
@@ -62,6 +78,7 @@ type ConversationPersistence = {
 
 type CharacterCallProps = {
   runtime: CharacterRuntimeResponse;
+  user: UserAccount;
   onExit: () => void;
   onUnauthorized: () => void;
 };
@@ -88,6 +105,7 @@ const activityLabels = {
 
 export default function CharacterCall({
   runtime,
+  user,
   onExit,
   onUnauthorized,
 }: CharacterCallProps) {
@@ -117,6 +135,24 @@ export default function CharacterCall({
     useState<RealtimeProvidersResponse | null>(null);
   const [configError, setConfigError] = useState("");
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [callStarting, setCallStarting] = useState(false);
+  const [teachingAvailability, setTeachingAvailability] =
+    useState<TeachingAvailability | null>(null);
+  const [teachingAvailabilityLoading, setTeachingAvailabilityLoading] =
+    useState(user.accountType === "child");
+  const [teachingAvailabilityError, setTeachingAvailabilityError] =
+    useState(false);
+  const [teachingAvailabilityReload, setTeachingAvailabilityReload] =
+    useState(0);
+  const [teachingChoice, setTeachingChoice] = useState<TeachingChoice | null>(
+    null,
+  );
+  const [teachingState, setTeachingState] = useState<TeachingCallState>(() =>
+    initialTeachingCallState(unavailableTeachingAvailability(), "chat_only"),
+  );
+  const [teachingActionPending, setTeachingActionPending] = useState<
+    "request" | "mute" | null
+  >(null);
 
   const character = runtime.character;
   const launch = mapRuntimeToLaunchOptions(runtime);
@@ -125,6 +161,44 @@ export default function CharacterCall({
     history,
   );
   const captionPlaceholder = getCaptionPlaceholder(snapshot, character.name);
+  const realtimeProvider = launch.ok ? launch.provider : null;
+
+  useEffect(() => {
+    if (user.accountType !== "child") {
+      setTeachingAvailabilityLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setTeachingAvailability(null);
+    setTeachingAvailabilityLoading(true);
+    setTeachingAvailabilityError(false);
+    void getTeachingAvailability(character.id, controller.signal)
+      .then((availability) => {
+        setTeachingAvailability(
+          realtimeProvider === "doubao"
+            ? unavailableTeachingAvailability()
+            : availability,
+        );
+        setTeachingAvailabilityLoading(false);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        if (error instanceof TeachingApiError && error.status === 401) {
+          onUnauthorized();
+          return;
+        }
+        setTeachingAvailability(unavailableTeachingAvailability());
+        setTeachingAvailabilityError(true);
+        setTeachingAvailabilityLoading(false);
+      });
+    return () => controller.abort();
+  }, [
+    character.id,
+    onUnauthorized,
+    realtimeProvider,
+    teachingAvailabilityReload,
+    user.accountType,
+  ]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -320,21 +394,40 @@ export default function CharacterCall({
     }
   };
 
-  const startCall = async () => {
+  const startCall = async (choice?: TeachingChoice) => {
     if (
       !audioRef.current ||
       hasClient ||
+      callStarting ||
       !launch.ok ||
       !selectedProviderConfig?.enabled ||
       !selectedProviderConfig.configured
     )
       return;
+    const childTeachingChoice = resolveCallTeachingChoice(
+      user.accountType,
+      conversationMode,
+      choice,
+    );
+    if (user.accountType === "child" && !childTeachingChoice) return;
+    const effectiveAvailability =
+      teachingAvailability ?? unavailableTeachingAvailability();
+    setCallStarting(true);
+    if (childTeachingChoice) {
+      setTeachingChoice(childTeachingChoice);
+      setTeachingState(
+        initialTeachingCallState(effectiveAvailability, childTeachingChoice),
+      );
+    }
     setErrorMessage("");
     setPersistenceError("");
     setHistory([]);
     setEventLog([]);
 
-    if (persistenceRef.current && !(await finishPersistence())) return;
+    if (persistenceRef.current && !(await finishPersistence())) {
+      setCallStarting(false);
+      return;
+    }
 
     let conversationId: string;
     try {
@@ -351,12 +444,56 @@ export default function CharacterCall({
         pending: [],
         flushing: null,
       };
-    } catch (error) {
-      if (error instanceof ConversationApiError && error.status === 401) {
-        onUnauthorized();
-      } else {
-        setPersistenceError("无法创建通话记录，请稍后重试。通话尚未开始。");
+      if (childTeachingChoice) {
+        const teachingPreparation =
+          childTeachingChoice === "enabled"
+            ? effectiveAvailability.enabled
+              ? {
+                  choice: "enabled" as const,
+                  expectedConfigurationRevision:
+                    effectiveAvailability.configurationRevision,
+                  acknowledgedDisclosureVersion:
+                    effectiveAvailability.disclosureVersion,
+                }
+              : null
+            : { choice: "chat_only" as const };
+        if (!teachingPreparation) {
+          throw new TeachingApiError(
+            409,
+            "TEACHING_CONFIGURATION_REVISION_CONFLICT",
+          );
+        }
+        const prepared = await prepareConversationTeaching(
+          conversation.id,
+          teachingPreparation,
+        );
+        setTeachingState(prepared);
       }
+    } catch (error) {
+      const unauthorized =
+        (error instanceof ConversationApiError ||
+          error instanceof TeachingApiError) &&
+        error.status === 401;
+      const teachingConfigurationChanged =
+        error instanceof TeachingApiError && error.status === 409;
+      if (unauthorized) {
+        onUnauthorized();
+      }
+      await finishPersistence();
+      if (!unauthorized) {
+        setPersistenceError(
+          teachingConfigurationChanged
+            ? "学习小支线的设置刚刚更新了。请重新查看说明，再选择是否开启；通话尚未开始。"
+            : error instanceof TeachingApiError
+              ? "无法安全准备学习小支线，请稍后重试。通话尚未开始。"
+              : "无法创建通话记录，请稍后重试。通话尚未开始。",
+        );
+      }
+      if (teachingConfigurationChanged) {
+        setTeachingAvailabilityReload((current) => current + 1);
+      }
+      setTeachingChoice(null);
+      setCallStarting(false);
       return;
     }
 
@@ -380,6 +517,10 @@ export default function CharacterCall({
       onError: (error) => setErrorMessage(error.message),
       onUnauthorized,
       onBeforeReconnect: flushPersistence,
+      onTeachingState: (nextState) => {
+        setTeachingState(nextState);
+        setTeachingActionPending(null);
+      },
     };
     const client: RealtimeClient =
       launch.provider === "doubao"
@@ -400,6 +541,9 @@ export default function CharacterCall({
       clientRef.current = null;
       setHasClient(false);
       await finishPersistence();
+      setTeachingChoice(null);
+    } finally {
+      setCallStarting(false);
     }
   };
 
@@ -407,8 +551,11 @@ export default function CharacterCall({
     const client = clientRef.current;
     clientRef.current = null;
     setHasClient(false);
+    setCallStarting(false);
+    setTeachingActionPending(null);
     await client?.close();
     await finishPersistence();
+    setTeachingChoice(null);
   };
 
   const exitCall = async () => {
@@ -432,6 +579,53 @@ export default function CharacterCall({
   const beginPushToTalk = (event: ReactPointerEvent<HTMLButtonElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
     clientRef.current?.setPushToTalkActive(true);
+  };
+
+  const requestTeaching = () => {
+    if (!teachingState.canRequest || teachingActionPending) return;
+    setTeachingActionPending("request");
+    clientRef.current?.requestTeaching();
+  };
+
+  const muteTeaching = async () => {
+    if (!teachingState.canMute || teachingActionPending) return;
+    const client = clientRef.current;
+    const conversationId = persistenceRef.current?.id;
+    setTeachingActionPending("mute");
+    setTeachingState((current) => ({
+      revision: current.revision,
+      state: "restoring",
+      canRequest: false,
+      canMute: false,
+    }));
+    client?.beginTeachingMute();
+    if (!client || !conversationId) {
+      setErrorMessage("无法确认当前通话的学习状态，已为安全起见停止通话。");
+      await endCall();
+      return;
+    }
+    try {
+      const persistedState = await persistThenMuteTeaching(conversationId, {
+        sendRelayMute: () => {
+          if (clientRef.current === client) client.muteTeaching();
+        },
+        stopOnFailure: async () => {
+          if (clientRef.current === client) await endCall();
+        },
+      });
+      if (clientRef.current === client) {
+        setTeachingState(persistedState);
+        setTeachingActionPending(null);
+      }
+    } catch (error) {
+      if (error instanceof TeachingApiError && error.status === 401) {
+        onUnauthorized();
+      } else {
+        setErrorMessage(
+          "没有安全切回普通聊天，通话已停止。请重新开始后选择“本次只聊天”。",
+        );
+      }
+    }
   };
 
   return (
@@ -533,11 +727,40 @@ export default function CharacterCall({
         )}
 
       <footer className="immersive-call-controls">
+        {user.accountType === "child" && !hasClient && (
+          <TeachingCallControls
+            phase="precall"
+            characterName={character.name}
+            availability={teachingAvailability}
+            loading={teachingAvailabilityLoading}
+            loadError={teachingAvailabilityError}
+            temporary={conversationMode === "temporary"}
+            guardianHistoryAccess={user.guardianHistoryAccess ?? "allowed"}
+            disabled={
+              callStarting ||
+              !launch.ok ||
+              !selectedProviderConfig?.enabled ||
+              !selectedProviderConfig.configured ||
+              Boolean(configError)
+            }
+            onEnable={() => void startCall("enabled")}
+            onChatOnly={() => void startCall("chat_only")}
+          />
+        )}
+        {user.accountType === "child" && hasClient && teachingChoice && (
+          <TeachingCallControls
+            phase="incall"
+            state={teachingState}
+            actionPending={teachingActionPending}
+            onRequest={requestTeaching}
+            onMute={() => void muteTeaching()}
+          />
+        )}
         <div className="call-mode-switch" aria-label="通话记忆模式">
           <button
             className={conversationMode === "normal" ? "selected" : ""}
             type="button"
-            disabled={hasClient}
+            disabled={hasClient || callStarting}
             onClick={() => setConversationMode("normal")}
           >
             延续关系
@@ -545,7 +768,7 @@ export default function CharacterCall({
           <button
             className={conversationMode === "temporary" ? "selected" : ""}
             type="button"
-            disabled={hasClient}
+            disabled={hasClient || callStarting}
             onClick={() => setConversationMode("temporary")}
           >
             临时对话
@@ -555,7 +778,7 @@ export default function CharacterCall({
           <button
             className={inputMode === "hands_free" ? "selected" : ""}
             type="button"
-            disabled={hasClient}
+            disabled={hasClient || callStarting}
             onClick={() => setInputMode("hands_free")}
           >
             免提
@@ -563,14 +786,14 @@ export default function CharacterCall({
           <button
             className={inputMode === "push_to_talk" ? "selected" : ""}
             type="button"
-            disabled={hasClient}
+            disabled={hasClient || callStarting}
             onClick={() => setInputMode("push_to_talk")}
           >
             按住说话
           </button>
         </div>
         <div className="call-control-row">
-          {!hasClient ? (
+          {!hasClient && user.accountType !== "child" ? (
             <button
               className="call-start-button"
               type="button"
@@ -578,13 +801,15 @@ export default function CharacterCall({
                 !launch.ok ||
                 !selectedProviderConfig?.enabled ||
                 !selectedProviderConfig.configured ||
-                Boolean(configError)
+                Boolean(configError) ||
+                callStarting
               }
               onClick={() => void startCall()}
             >
-              <span aria-hidden="true">●</span> 开始通话
+              <span aria-hidden="true">●</span>{" "}
+              {callStarting ? "正在开始…" : "开始通话"}
             </button>
-          ) : (
+          ) : hasClient ? (
             <>
               <button
                 className={`call-round-button ${snapshot.microphoneMuted ? "active" : ""}`}
@@ -646,7 +871,7 @@ export default function CharacterCall({
                 结束
               </button>
             </>
-          )}
+          ) : null}
         </div>
       </footer>
 
@@ -685,7 +910,7 @@ export default function CharacterCall({
               <select
                 id="call-microphone"
                 value={selectedMicrophoneId}
-                disabled={hasClient}
+                disabled={hasClient || callStarting}
                 onChange={(event) => selectMicrophone(event.target.value)}
               >
                 <option value="">系统默认麦克风</option>
@@ -697,7 +922,7 @@ export default function CharacterCall({
               </select>
               <button
                 type="button"
-                disabled={hasClient}
+                disabled={hasClient || callStarting}
                 onClick={() => void refreshMicrophones()}
               >
                 刷新

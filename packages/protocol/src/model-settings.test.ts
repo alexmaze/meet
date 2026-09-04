@@ -4,6 +4,7 @@ import {
   BUILTIN_EMBEDDING_MODELS,
   createModelConnectionRequestSchema,
   createModelProfileRequestSchema,
+  modelPurposeSchema,
   modelSettingsResponseSchema,
   updateModelConnectionRequestSchema,
 } from "./model-settings.js";
@@ -24,6 +25,12 @@ const connection = {
 };
 
 describe("model settings protocol", () => {
+  it("reserves an explicit text-model purpose for plan generation", () => {
+    expect(modelPurposeSchema.parse("teaching_plan_generation")).toBe(
+      "teaching_plan_generation",
+    );
+  });
+
   it("accepts credentials on writes but never in management responses", () => {
     expect(
       createModelConnectionRequestSchema.safeParse({

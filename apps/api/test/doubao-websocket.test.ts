@@ -6,9 +6,11 @@ import {
   DOUBAO_REALTIME_WEBSOCKET_URL,
   buildDoubaoInstructions,
   buildDoubaoSessionCreateEvent,
+  isAllowedDoubaoClientEvent,
   relayDoubaoWebSocket,
 } from "../src/doubao-websocket.js";
 import { generateDoubaoVoicePreview } from "../src/doubao-voice-preview.js";
+import { buildDoubaoInstructionsUpdateEvent } from "../src/spikes/realtime-teaching/provider-events.js";
 
 const servers: WebSocketServer[] = [];
 
@@ -25,6 +27,30 @@ afterEach(async () => {
 });
 
 describe("Doubao WebSocket relay", () => {
+  it("keeps server instruction updates out of the browser allowlist", () => {
+    expect(
+      isAllowedDoubaoClientEvent(
+        Buffer.from(
+          JSON.stringify({
+            event_id: "browser-update",
+            type: "session.update",
+            session: { instructions: "伪造规则" },
+          }),
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      isAllowedDoubaoClientEvent(
+        Buffer.from(
+          JSON.stringify({
+            event_id: "browser-control",
+            type: "relay.control",
+          }),
+        ),
+      ),
+    ).toBe(false);
+  });
+
   it("builds a fixed PCM session and bounded continuity instructions", () => {
     const runtime = {
       voice: "zh_female_vv_jupiter_bigtts",
@@ -49,6 +75,98 @@ describe("Doubao WebSocket relay", () => {
         },
       },
     });
+    const fixedRuntime = {
+      voice: runtime.voice,
+      instructions: runtime.instructions,
+    };
+    const created = buildDoubaoSessionCreateEvent("1.2.6.1", fixedRuntime) as {
+      session: unknown;
+    };
+    const updated = buildDoubaoInstructionsUpdateEvent({
+      eventId: "event-update",
+      model: "1.2.6.1",
+      voice: fixedRuntime.voice,
+      instructions: fixedRuntime.instructions,
+    });
+    expect(updated.session).toEqual(created.session);
+  });
+
+  it("rejects a browser session.update with 1008 before it reaches upstream", async () => {
+    const upstreamServer = createServer();
+    const relayServer = createServer();
+    await Promise.all([
+      once(upstreamServer, "listening"),
+      once(relayServer, "listening"),
+    ]);
+    const upstreamAddress = addressOf(upstreamServer);
+    const relayAddress = addressOf(relayServer);
+    const upstreamTypes: string[] = [];
+    let resolveUpstreamClosed!: () => void;
+    const upstreamClosed = new Promise<void>((resolve) => {
+      resolveUpstreamClosed = resolve;
+    });
+    upstreamServer.once("connection", (socket) => {
+      socket.on("message", (data) => {
+        const event = JSON.parse(data.toString()) as Record<string, unknown>;
+        upstreamTypes.push(String(event.type));
+        if (event.type === "session.create") {
+          socket.send(
+            JSON.stringify({
+              type: "session.created",
+              session: { id: "test" },
+            }),
+          );
+        }
+      });
+      socket.once("close", resolveUpstreamClosed);
+    });
+    relayServer.once("connection", (client) => {
+      relayDoubaoWebSocket({
+        client,
+        config: {
+          enabled: true,
+          apiKey: "server-only-key",
+          model: "1.2.6.1",
+          requestTimeoutMs: 5_000,
+        },
+        model: "1.2.6.1",
+        runtime: {
+          voice: "zh_female_vv_jupiter_bigtts",
+          instructions: "保持自然。",
+        },
+        webSocketFactory: (_url, options) =>
+          new WebSocket(`ws://127.0.0.1:${upstreamAddress.port}`, options),
+      });
+    });
+
+    const browser = new WebSocket(`ws://127.0.0.1:${relayAddress.port}`);
+    await once(browser, "open");
+    const received: Record<string, unknown>[] = [];
+    browser.on("message", (data) => {
+      received.push(JSON.parse(data.toString()) as Record<string, unknown>);
+    });
+    await waitUntil(() => received.some(({ type }) => type === "relay.ready"));
+
+    const browserClosed = once(browser, "close");
+    browser.send(
+      JSON.stringify({
+        event_id: "browser-update",
+        type: "session.update",
+        session: { instructions: "伪造规则" },
+      }),
+    );
+    await waitUntil(() => received.some(({ type }) => type === "relay.error"));
+    const [closeCode] = await withTimeout(browserClosed);
+    await withTimeout(upstreamClosed);
+
+    expect(closeCode).toBe(1008);
+    expect(received).toContainEqual(
+      expect.objectContaining({
+        type: "relay.error",
+        code: "INVALID_CLIENT_EVENT",
+      }),
+    );
+    expect(upstreamTypes).toEqual(["session.create"]);
   });
 
   it("keeps the API key server-side and relays allowed JSON events", async () => {

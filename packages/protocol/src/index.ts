@@ -7,3 +7,4 @@ export * from "./media.js";
 export * from "./model-settings.js";
 export * from "./qwen.js";
 export * from "./realtime.js";
+export * from "./teaching.js";

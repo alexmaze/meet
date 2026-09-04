@@ -2,6 +2,7 @@ import fastifyCookie from "@fastify/cookie";
 import fastifyWebsocket from "@fastify/websocket";
 import {
   createDatabaseClient,
+  findResolvedModelRuntimeForPurpose,
   resolveMemoryEmbeddingConfiguration,
   type ConversationCheckpointHook,
   type ConversationCompletionHook,
@@ -49,6 +50,10 @@ import { PostgresMediaRepository } from "./media/postgres-repository.js";
 import type { MediaRepository } from "./media/repository.js";
 import { MediaService } from "./media/service.js";
 import { ModelSettingsService } from "./model-settings/service.js";
+import { PostgresTeachingRepository } from "./teaching/postgres-repository.js";
+import type { TeachingRepository } from "./teaching/repository.js";
+import { TeachingService } from "./teaching/service.js";
+import { ShortPlanGenerator } from "./teaching/short-plan-generator.js";
 import {
   QWEN_RELAY_CLIENT_MAX_MESSAGE_BYTES,
   type QwenWebSocketFactory,
@@ -61,6 +66,7 @@ import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerMemoryRoutes } from "./routes/memories.js";
 import { registerMediaRoutes } from "./routes/media.js";
 import { registerRealtimeRoutes } from "./routes/realtime.js";
+import { registerTeachingRoutes } from "./routes/teaching.js";
 
 type FetchFunction = typeof globalThis.fetch;
 
@@ -73,6 +79,8 @@ export type BuildAppOptions = {
   conversationRepository?: ConversationRepository | null;
   memoryRepository?: MemoryRepository | null;
   mediaRepository?: MediaRepository | null;
+  teachingRepository?: TeachingRepository | null;
+  shortPlanGenerator?: ShortPlanGenerator;
   mediaStore?: MediaStore | null;
   databaseClient?: DatabaseClient | null;
   conversationCompletionHook?: ConversationCompletionHook | null;
@@ -194,6 +202,15 @@ export async function buildApp(
         ? new PostgresMediaRepository(databaseClient.db, mediaCleanupHook)
         : null
       : options.mediaRepository;
+  const teachingRepository =
+    options.teachingRepository === undefined
+      ? databaseClient
+        ? new PostgresTeachingRepository(
+            databaseClient.db,
+            config.teaching?.dynamicQwen,
+          )
+        : null
+      : options.teachingRepository;
   const mediaStore =
     options.mediaStore === undefined
       ? new LocalMediaStore(config.media?.localDirectory ?? "./data/media")
@@ -265,10 +282,11 @@ export async function buildApp(
     purpose: ModelPurpose,
     modelProfileId: string,
   ) => {
-    if (purpose !== "memory_embedding") {
+    if (purpose === "conversation_summary" || purpose === "memory_extraction") {
       await modelBindingReconciler?.enqueueWaiting(purpose, modelProfileId);
       return;
     }
+    if (purpose !== "memory_embedding") return;
     const store = await resolveSemanticMemoryStore(semanticMemoryStore);
     if (store && ownedJobBoss && databaseClient) {
       await new MemoryIndexJobReconciler(
@@ -286,6 +304,34 @@ export async function buildApp(
     reconcileBinding,
     options.config,
     config.embedding?.localCacheDirectory ?? "./data/embedding-models",
+  );
+  const shortPlanGenerator =
+    options.shortPlanGenerator ??
+    new ShortPlanGenerator({
+      fetchFunction: options.fetchFunction,
+      resolveTextRuntime: async (selector) => {
+        if (!databaseClient) return null;
+        const runtime = await findResolvedModelRuntimeForPurpose(
+          databaseClient.db,
+          "teaching_plan_generation",
+        );
+        if (!runtime) return null;
+        if (
+          selector &&
+          (runtime.profile.id !== selector.modelProfileId ||
+            runtime.profile.revision !== selector.modelProfileRevision ||
+            runtime.connection.id !== selector.connectionId ||
+            runtime.connection.revision !== selector.connectionRevision)
+        ) {
+          return null;
+        }
+        return runtime;
+      },
+    });
+  const teaching = new TeachingService(
+    teachingRepository,
+    () => new Date(),
+    shortPlanGenerator,
   );
 
   if (ownedJobBoss || ownedDatabaseClient || ownedSemanticMemoryStoreResolver) {
@@ -316,6 +362,7 @@ export async function buildApp(
   await registerAuthRoutes(app, config, auth);
   await registerAdminMemberRoutes(app, config, auth, members);
   await registerAdminModelSettingsRoutes(app, config, auth, modelSettings);
+  await registerTeachingRoutes(app, config, auth, teaching);
   await registerCharacterRoutes(
     app,
     config,
@@ -326,6 +373,8 @@ export async function buildApp(
     options.qwenWebSocketFactory,
     options.doubaoWebSocketFactory,
     modelSettings,
+    teachingRepository ? teaching : undefined,
+    config.teaching?.dynamicQwen,
   );
   await registerConversationRoutes(app, config, auth, conversations);
   await registerMemoryRoutes(app, config, auth, memories);

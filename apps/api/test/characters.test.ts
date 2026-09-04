@@ -584,9 +584,23 @@ describe("character routes", () => {
     expect(runtime.body).not.toContain("never-return-this-api-key");
     expect(runtime.body).not.toContain("secretRef");
 
-    const session = await request(
+    const childSession = await request(
       app,
       child,
+      "POST",
+      `/api/characters/${builtin.id}/realtime/sessions`,
+      "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+      "application/sdp",
+    );
+    expect(childSession.statusCode).toBe(403);
+    expect(childSession.json()).toMatchObject({
+      code: "REALTIME_TRANSPORT_FORBIDDEN",
+    });
+    expect(fetchFunction).not.toHaveBeenCalled();
+
+    const session = await request(
+      app,
+      adult,
       "POST",
       `/api/characters/${builtin.id}/realtime/sessions`,
       "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
@@ -600,7 +614,7 @@ describe("character routes", () => {
 
     const forgedModel = await request(
       app,
-      child,
+      adult,
       "POST",
       `/api/characters/${builtin.id}/realtime/sessions?model=qwen-audio-3.0-realtime-flash`,
       "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",

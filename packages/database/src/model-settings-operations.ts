@@ -27,6 +27,7 @@ import {
   modelConnections,
   modelPurposeBindings,
   providerProfiles,
+  teachingPlanGenerationRequests,
   voiceProfiles,
   type ModelConnectionRecord,
   type ProviderProfileRecord,
@@ -135,12 +136,27 @@ export async function listModelSettings(
     .from(conversationSummaryCheckpoints)
     .where(isNotNull(conversationSummaryCheckpoints.modelProfileId))
     .groupBy(conversationSummaryCheckpoints.modelProfileId);
+  const generationReferenceRows = await db
+    .select({
+      modelProfileId: teachingPlanGenerationRequests.modelProfileId,
+      value: count(),
+    })
+    .from(teachingPlanGenerationRequests)
+    .where(isNotNull(teachingPlanGenerationRequests.modelProfileId))
+    .groupBy(teachingPlanGenerationRequests.modelProfileId);
   const workReferences = new Map<string, number>(
     workReferenceRows.flatMap((row) =>
       row.modelProfileId ? [[row.modelProfileId, Number(row.value)]] : [],
     ),
   );
   for (const row of checkpointReferenceRows) {
+    if (!row.modelProfileId) continue;
+    workReferences.set(
+      row.modelProfileId,
+      (workReferences.get(row.modelProfileId) ?? 0) + Number(row.value),
+    );
+  }
+  for (const row of generationReferenceRows) {
     if (!row.modelProfileId) continue;
     workReferences.set(
       row.modelProfileId,
@@ -512,12 +528,21 @@ export async function deleteModelProfile(
           .where(eq(conversationSummaryCheckpoints.modelProfileId, profileId))
       )[0]?.value ?? 0,
     );
+    const generationRefs = Number(
+      (
+        await tx
+          .select({ value: count() })
+          .from(teachingPlanGenerationRequests)
+          .where(eq(teachingPlanGenerationRequests.modelProfileId, profileId))
+      )[0]?.value ?? 0,
+    );
     if (
       profile.everEnabled ||
       refs > 0 ||
       bindingRefs > 0 ||
       workRefs > 0 ||
-      checkpointRefs > 0
+      checkpointRefs > 0 ||
+      generationRefs > 0
     ) {
       return "referenced";
     }

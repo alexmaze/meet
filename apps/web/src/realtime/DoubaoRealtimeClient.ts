@@ -222,6 +222,18 @@ export class DoubaoRealtimeClient implements RealtimeClient {
     this.beginReconnect("正在按你的选择重新连接", true);
   }
 
+  requestTeaching(): void {
+    // Teaching relay controls are intentionally unavailable for Doubao.
+  }
+
+  beginTeachingMute(): void {
+    // Teaching relay controls are intentionally unavailable for Doubao.
+  }
+
+  muteTeaching(): void {
+    // Teaching relay controls are intentionally unavailable for Doubao.
+  }
+
   setMicrophoneMuted(muted: boolean): void {
     this.snapshot = { ...this.snapshot, microphoneMuted: muted };
     this.applyMicrophoneGate();

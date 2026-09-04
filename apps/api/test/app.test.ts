@@ -835,6 +835,123 @@ describe("Meet API", () => {
     ).toBeUndefined();
   });
 
+  it("keeps dynamic Qwen teaching disabled unless exact reviewed bindings are configured", () => {
+    expect(loadConfig({}).teaching?.dynamicQwen).toBeUndefined();
+    expect(() =>
+      loadConfig({
+        TEACHING_QWEN_DYNAMIC_ENABLED: "true",
+      }),
+    ).toThrow(/必须同时绑定模型配置与连接/);
+    expect(() =>
+      loadConfig({
+        TEACHING_QWEN_DYNAMIC_ENABLED: "false",
+        TEACHING_QWEN_MODEL_PROFILE_ID: "00000000-0000-4000-8000-000000000001",
+      }),
+    ).toThrow(/只能在 TEACHING_QWEN_DYNAMIC_ENABLED=true/);
+    expect(() =>
+      loadConfig({
+        TEACHING_QWEN_DYNAMIC_ENABLED: "false",
+        TEACHING_QWEN_DYNAMIC_ADDITIONAL_BINDINGS: JSON.stringify([
+          {
+            modelProfileId: "00000000-0000-4000-8000-000000000003",
+            modelProfileRevision: 7,
+            connectionId: "00000000-0000-4000-8000-000000000002",
+            connectionRevision: 5,
+          },
+        ]),
+      }),
+    ).toThrow(/只能在 TEACHING_QWEN_DYNAMIC_ENABLED=true/);
+
+    expect(
+      loadConfig({
+        TEACHING_QWEN_DYNAMIC_ENABLED: "true",
+        TEACHING_QWEN_MODEL_PROFILE_ID: "00000000-0000-4000-8000-000000000001",
+        TEACHING_QWEN_MODEL_PROFILE_REVISION: "3",
+        TEACHING_QWEN_CONNECTION_ID: "00000000-0000-4000-8000-000000000002",
+        TEACHING_QWEN_CONNECTION_REVISION: "5",
+      }).teaching?.dynamicQwen,
+    ).toEqual({
+      bindings: [
+        {
+          modelProfileId: "00000000-0000-4000-8000-000000000001",
+          modelProfileRevision: 3,
+          connectionId: "00000000-0000-4000-8000-000000000002",
+          connectionRevision: 5,
+        },
+      ],
+    });
+  });
+
+  it("adds strictly validated dynamic Qwen teaching bindings", () => {
+    const environment = {
+      TEACHING_QWEN_DYNAMIC_ENABLED: "true",
+      TEACHING_QWEN_MODEL_PROFILE_ID: "00000000-0000-4000-8000-000000000001",
+      TEACHING_QWEN_MODEL_PROFILE_REVISION: "3",
+      TEACHING_QWEN_CONNECTION_ID: "00000000-0000-4000-8000-000000000002",
+      TEACHING_QWEN_CONNECTION_REVISION: "5",
+    };
+    const flashBinding = {
+      modelProfileId: "00000000-0000-4000-8000-000000000003",
+      modelProfileRevision: 7,
+      connectionId: "00000000-0000-4000-8000-000000000002",
+      connectionRevision: 5,
+    };
+
+    expect(
+      loadConfig({
+        ...environment,
+        TEACHING_QWEN_DYNAMIC_ADDITIONAL_BINDINGS: JSON.stringify([
+          flashBinding,
+        ]),
+      }).teaching?.dynamicQwen,
+    ).toEqual({
+      bindings: [
+        {
+          modelProfileId: "00000000-0000-4000-8000-000000000001",
+          modelProfileRevision: 3,
+          connectionId: "00000000-0000-4000-8000-000000000002",
+          connectionRevision: 5,
+        },
+        flashBinding,
+      ],
+    });
+
+    expect(() =>
+      loadConfig({
+        ...environment,
+        TEACHING_QWEN_DYNAMIC_ADDITIONAL_BINDINGS: "not-json",
+      }),
+    ).toThrow(/必须是合法的 JSON 数组/);
+    expect(() =>
+      loadConfig({
+        ...environment,
+        TEACHING_QWEN_DYNAMIC_ADDITIONAL_BINDINGS: JSON.stringify([
+          { ...flashBinding, unexpected: true },
+        ]),
+      }),
+    ).toThrow(/unexpected/);
+    expect(() =>
+      loadConfig({
+        ...environment,
+        TEACHING_QWEN_DYNAMIC_ADDITIONAL_BINDINGS: JSON.stringify([
+          { ...flashBinding, modelProfileRevision: 0 },
+        ]),
+      }),
+    ).toThrow(/TEACHING_QWEN_DYNAMIC_ADDITIONAL_BINDINGS/);
+    expect(() =>
+      loadConfig({
+        ...environment,
+        TEACHING_QWEN_DYNAMIC_ADDITIONAL_BINDINGS: JSON.stringify([
+          {
+            ...flashBinding,
+            modelProfileId: environment.TEACHING_QWEN_MODEL_PROFILE_ID,
+            modelProfileRevision: 3,
+          },
+        ]),
+      }),
+    ).toThrow(/不能重复绑定同一模型配置修订/);
+  });
+
   it("defaults session cookies to Secure and requires an explicit local override", () => {
     expect(loadConfig({}).auth.cookieSecure).toBe(true);
     expect(loadConfig({ AUTH_COOKIE_SECURE: "false" }).auth.cookieSecure).toBe(

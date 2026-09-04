@@ -17,7 +17,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:generate": "drizzle-kit generate --config drizzle.config.ts",
-    "db:migrate": "drizzle-kit migrate --config drizzle.config.ts"
+    "db:migrate": "drizzle-kit migrate --config drizzle.config.ts",
+    "db:migrate:teaching-spike": "drizzle-kit migrate --config drizzle.teaching-spike.config.ts"
   },
   "dependencies": {
     "@meet/protocol": "workspace:*",

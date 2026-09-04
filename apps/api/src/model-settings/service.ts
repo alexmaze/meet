@@ -46,6 +46,11 @@ import type { QwenWebSocketFactory } from "../qwen-websocket.js";
 import { normalizeQwenRealtimeEndpoint } from "../qwen.js";
 
 type FetchFunction = typeof globalThis.fetch;
+const DEEPSEEK_MODEL_ID_PATTERN = /^deepseek(?:[-_/.]|$)/iu;
+const DEEPSEEK_TEST_MAX_TOKENS = 128;
+const TEXT_MODEL_TEST_SYSTEM_PROMPT =
+  '请只输出 JSON（json）对象，不要输出 Markdown、注释或其他文字。完整 JSON 示例：{"ok":true}';
+const TEXT_MODEL_TEST_USER_PROMPT = "请按上述 JSON 格式返回连通性测试结果。";
 
 export class ModelSettingsServiceError extends Error {
   constructor(
@@ -124,6 +129,7 @@ export class ModelSettingsService {
           "conversation_summary",
           "memory_extraction",
           "memory_embedding",
+          "teaching_plan_generation",
         ] as const
       ).map((purpose) => ({
         purpose,
@@ -517,8 +523,10 @@ export class ModelSettingsService {
       doubao.apiKey
     ) {
       return {
-        profile: { id: profileId } as ProviderProfileRecord,
+        profile: { id: profileId, revision: 1 } as ProviderProfileRecord,
         connection: {
+          id: "00000000-0000-4000-8000-0000000000b1",
+          revision: 1,
           adapter: "doubao_realtime" as const,
           endpoint:
             "wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue",
@@ -534,8 +542,10 @@ export class ModelSettingsService {
       config.qwen.endpoint
     ) {
       return {
-        profile: { id: profileId } as ProviderProfileRecord,
+        profile: { id: profileId, revision: 1 } as ProviderProfileRecord,
         connection: {
+          id: "00000000-0000-4000-8000-0000000000a1",
+          revision: 1,
           adapter: "qwen_realtime" as const,
           endpoint: config.qwen.endpoint,
           apiKey: config.qwen.apiKey,
@@ -559,6 +569,8 @@ export class ModelSettingsService {
 }
 
 type ActiveConnection = {
+  id: string;
+  revision: number;
   adapter: ModelConnectionRecord["adapter"];
   endpoint: string;
   apiKey: string;
@@ -569,6 +581,8 @@ function candidateConnection(
   connection: ModelConnectionRecord,
 ): ActiveConnection {
   return {
+    id: connection.id,
+    revision: connection.revision,
     adapter: connection.adapter,
     endpoint: connection.pendingEndpoint ?? connection.endpoint ?? "",
     apiKey: connection.pendingApiKey ?? connection.apiKey ?? "",
@@ -662,18 +676,12 @@ async function testTextModel(
         Authorization: `Bearer ${connection.apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model: profile.model,
-        messages: [
-          { role: "system", content: "请只按 JSON 格式返回测试结果。" },
-          { role: "user", content: '返回 {"ok":true}。' },
-        ],
-        response_format: { type: "json_object" },
-        temperature: 0,
-        ...(connection.compatibilityPreset === "dashscope"
-          ? { enable_thinking: false }
-          : {}),
-      }),
+      body: JSON.stringify(
+        buildTextModelTestRequestBody({
+          model: profile.model,
+          compatibilityPreset: connection.compatibilityPreset,
+        }),
+      ),
       signal: AbortSignal.timeout(15_000),
     },
   );
@@ -691,6 +699,31 @@ async function testTextModel(
     .object({ ok: z.literal(true) })
     .parse(JSON.parse(content ?? ""));
   if (!parsed.ok) throw new Error("Text model test JSON was invalid.");
+}
+
+export function buildTextModelTestRequestBody(input: {
+  model: string;
+  compatibilityPreset: string | null;
+}) {
+  const dashscope = input.compatibilityPreset === "dashscope";
+  const deepseek =
+    !dashscope && DEEPSEEK_MODEL_ID_PATTERN.test(input.model.trim());
+  return {
+    model: input.model,
+    messages: [
+      {
+        role: dashscope || deepseek ? "system" : "developer",
+        content: TEXT_MODEL_TEST_SYSTEM_PROMPT,
+      },
+      { role: "user", content: TEXT_MODEL_TEST_USER_PROMPT },
+    ],
+    response_format: { type: "json_object" },
+    ...(dashscope
+      ? { enable_thinking: false }
+      : deepseek
+        ? { max_tokens: DEEPSEEK_TEST_MAX_TOKENS }
+        : {}),
+  };
 }
 
 async function testEmbeddingModel(

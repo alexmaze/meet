@@ -34,6 +34,7 @@ export const modelPurposeSchema = z.enum([
   "conversation_summary",
   "memory_extraction",
   "memory_embedding",
+  "teaching_plan_generation",
 ]);
 export type ModelPurpose = z.infer<typeof modelPurposeSchema>;
 
