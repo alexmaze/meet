@@ -31,6 +31,13 @@ import {
   canCreateCharacter,
   presentCharacterError,
 } from "./characters/character-logic.js";
+import {
+  RelationshipTransferApiError,
+  downloadRelationshipTransfer,
+  exportCharacterRelationship,
+  importCharacterRelationship,
+  parseRelationshipTransferFile,
+} from "./characters/relationship-transfer-api.js";
 import HistoryPage from "./history/HistoryPage.js";
 import MemoryPage from "./memory/MemoryPage.js";
 import CharacterCall from "./realtime/CharacterCall.js";
@@ -307,6 +314,82 @@ export default function App(session: AuthenticatedAppSession) {
     }
   };
 
+  const exportRelationship = async (character: Character) => {
+    if (busyAction) return;
+    setBusyAction("export");
+    setNotice(null);
+    try {
+      const exported = await exportCharacterRelationship(character.id);
+      downloadRelationshipTransfer(exported.transferPackage, exported.fileName);
+      setNotice({
+        kind: "success",
+        message: `已导出 ${exported.transferPackage.payload.conversations.length} 次通话和 ${exported.transferPackage.payload.memories.length} 条长期记忆。`,
+      });
+    } catch (error) {
+      if (handleUnauthorized(error, session.invalidateSession)) return;
+      setNotice({
+        kind: "error",
+        message:
+          error instanceof RelationshipTransferApiError
+            ? error.message
+            : "导出失败，请稍后重试。",
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const importRelationship = async (character: Character, file: File) => {
+    if (busyAction) return;
+    setBusyAction("import");
+    setNotice(null);
+    try {
+      const transferPackage = await parseRelationshipTransferFile(file);
+      const sourceCharacter = transferPackage.payload.character;
+      const sameCharacter = characterIdentityMatches(
+        sourceCharacter,
+        character,
+      );
+      if (
+        !sameCharacter &&
+        !window.confirm(
+          `这份文件来自“${sourceCharacter.name}”，当前选择的是“${character.name}”。导入后，这些历史和记忆会用于当前角色。仍要继续吗？`,
+        )
+      ) {
+        return;
+      }
+      if (
+        !window.confirm(
+          `将文件中的 ${transferPackage.payload.conversations.length} 次通话和 ${transferPackage.payload.memories.length} 条记忆合并到当前账号与“${character.name}”的关系中。已有数据不会被覆盖，重复内容会跳过。继续吗？`,
+        )
+      ) {
+        return;
+      }
+      const result = await importCharacterRelationship(
+        character.id,
+        transferPackage,
+        !sameCharacter,
+      );
+      setNotice({
+        kind: "success",
+        message: result.wasAlreadyImported
+          ? "这份迁移文件之前已经导入，未重复写入数据。"
+          : `迁移完成：新增 ${result.importedConversations} 次通话和 ${result.importedMemories} 条记忆，跳过 ${result.skippedConversations + result.skippedMemories} 条重复数据。`,
+      });
+    } catch (error) {
+      if (handleUnauthorized(error, session.invalidateSession)) return;
+      setNotice({
+        kind: "error",
+        message:
+          error instanceof RelationshipTransferApiError
+            ? error.message
+            : "导入失败，当前账号的数据没有改变。",
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const navigate = (next: ProductSection) => {
     setSection(next);
     setDetail({ status: "idle" });
@@ -428,6 +511,12 @@ export default function App(session: AuthenticatedAppSession) {
                   onToggleVisibility={() => void performDetailAction("share")}
                   onRestore={() => void performDetailAction("restore")}
                   onDelete={() => void performDetailAction("delete")}
+                  onExportRelationship={() =>
+                    void exportRelationship(detail.character)
+                  }
+                  onImportRelationship={(file) =>
+                    void importRelationship(detail.character, file)
+                  }
                 />
               )}
             </>
@@ -709,11 +798,32 @@ function PwaNotice({
 }
 
 function handleUnauthorized(error: unknown, invalidate: () => void): boolean {
-  if (error instanceof CharacterApiError && error.status === 401) {
+  if (
+    (error instanceof CharacterApiError ||
+      error instanceof RelationshipTransferApiError) &&
+    error.status === 401
+  ) {
     invalidate();
     return true;
   }
   return false;
+}
+
+function characterIdentityMatches(
+  source: { name: string; systemKey: string | null },
+  target: Pick<Character, "name" | "systemKey">,
+): boolean {
+  if (source.systemKey || target.systemKey) {
+    return Boolean(
+      source.systemKey &&
+      target.systemKey &&
+      source.systemKey === target.systemKey,
+    );
+  }
+  return (
+    source.name.trim().toLocaleLowerCase("zh-CN") ===
+    target.name.trim().toLocaleLowerCase("zh-CN")
+  );
 }
 
 function blurActiveControl(): void {

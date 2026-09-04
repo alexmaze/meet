@@ -3269,6 +3269,56 @@ summary:focus-visible {
   box-shadow: 0 12px 36px rgba(58, 47, 39, 0.05);
 }
 
+.relationship-transfer-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-top: 18px;
+}
+
+.relationship-transfer-card h2 {
+  margin-bottom: 8px;
+}
+
+.relationship-transfer-card p {
+  max-width: 680px;
+  margin: 0 0 6px;
+}
+
+.relationship-transfer-card small {
+  display: block;
+  line-height: 1.6;
+}
+
+.relationship-transfer-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.relationship-transfer-actions button {
+  min-height: 39px;
+  padding: 0 14px;
+  border: 1px solid rgba(48, 39, 32, 0.11);
+  border-radius: 10px;
+  color: #554b44;
+  background: #faf7f2;
+  font-size: 10px;
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
 .detail-card h2 {
   margin: 0 0 20px;
   font-size: 21px;
@@ -4962,6 +5012,11 @@ summary:focus-visible {
   }
   .detail-actions button.danger {
     margin-left: 0;
+  }
+  .relationship-transfer-card,
+  .relationship-transfer-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
   .editor-section {
     grid-template-columns: 1fr;

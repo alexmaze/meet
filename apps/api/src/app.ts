@@ -50,6 +50,9 @@ import { PostgresMediaRepository } from "./media/postgres-repository.js";
 import type { MediaRepository } from "./media/repository.js";
 import { MediaService } from "./media/service.js";
 import { ModelSettingsService } from "./model-settings/service.js";
+import { PostgresRelationshipTransferRepository } from "./relationship-transfers/postgres-repository.js";
+import type { RelationshipTransferRepository } from "./relationship-transfers/repository.js";
+import { RelationshipTransferService } from "./relationship-transfers/service.js";
 import { PostgresTeachingRepository } from "./teaching/postgres-repository.js";
 import type { TeachingRepository } from "./teaching/repository.js";
 import { TeachingService } from "./teaching/service.js";
@@ -66,6 +69,7 @@ import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerMemoryRoutes } from "./routes/memories.js";
 import { registerMediaRoutes } from "./routes/media.js";
 import { registerRealtimeRoutes } from "./routes/realtime.js";
+import { registerRelationshipTransferRoutes } from "./routes/relationship-transfers.js";
 import { registerTeachingRoutes } from "./routes/teaching.js";
 
 type FetchFunction = typeof globalThis.fetch;
@@ -78,6 +82,7 @@ export type BuildAppOptions = {
   characterRepository?: CharacterRepository | null;
   conversationRepository?: ConversationRepository | null;
   memoryRepository?: MemoryRepository | null;
+  relationshipTransferRepository?: RelationshipTransferRepository | null;
   mediaRepository?: MediaRepository | null;
   teachingRepository?: TeachingRepository | null;
   shortPlanGenerator?: ShortPlanGenerator;
@@ -196,6 +201,15 @@ export async function buildApp(
         ? new PostgresMemoryRepository(databaseClient.db, memoryIndexHook)
         : null
       : options.memoryRepository;
+  const relationshipTransferRepository =
+    options.relationshipTransferRepository === undefined
+      ? databaseClient
+        ? new PostgresRelationshipTransferRepository(
+            databaseClient.db,
+            memoryIndexHook,
+          )
+        : null
+      : options.relationshipTransferRepository;
   const mediaRepository =
     options.mediaRepository === undefined
       ? databaseClient && mediaCleanupHook
@@ -274,6 +288,9 @@ export async function buildApp(
   );
   const media = new MediaService(mediaRepository, mediaStore);
   const characters = new CharacterService(characterRepository, media);
+  const relationshipTransfers = new RelationshipTransferService(
+    relationshipTransferRepository,
+  );
   const modelBindingReconciler =
     ownedJobBoss && databaseClient
       ? new ModelBindingJobReconciler(ownedJobBoss, databaseClient.db)
@@ -377,6 +394,12 @@ export async function buildApp(
     config.teaching?.dynamicQwen,
   );
   await registerConversationRoutes(app, config, auth, conversations);
+  await registerRelationshipTransferRoutes(
+    app,
+    config,
+    auth,
+    relationshipTransfers,
+  );
   await registerMemoryRoutes(app, config, auth, memories);
   await registerMediaRoutes(app, config, auth, media);
   await registerRealtimeRoutes(app, config, auth, modelSettings);

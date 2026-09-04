@@ -1714,6 +1714,102 @@ export const memoryIndexEntries = pgTable(
   ],
 );
 
+export const relationshipTransferImports = pgTable(
+  "relationship_transfer_imports",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    targetUserId: uuid("target_user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "cascade" }),
+    targetCharacterId: uuid("target_character_id")
+      .notNull()
+      .references(() => characters.id, { onDelete: "restrict" }),
+    transferId: uuid("transfer_id").notNull(),
+    packageChecksum: varchar("package_checksum", { length: 64 }).notNull(),
+    sourceCharacterName: varchar("source_character_name", {
+      length: 80,
+    }).notNull(),
+    sourceCharacterSystemKey: varchar("source_character_system_key", {
+      length: 120,
+    }),
+    importedConversationCount: integer("imported_conversation_count")
+      .notNull()
+      .default(0),
+    skippedConversationCount: integer("skipped_conversation_count")
+      .notNull()
+      .default(0),
+    importedMemoryCount: integer("imported_memory_count").notNull().default(0),
+    skippedMemoryCount: integer("skipped_memory_count").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("relationship_transfer_imports_user_transfer_unique").on(
+      table.targetUserId,
+      table.transferId,
+    ),
+    index("relationship_transfer_imports_user_character_created_idx").on(
+      table.targetUserId,
+      table.targetCharacterId,
+      table.createdAt,
+    ),
+    check(
+      "relationship_transfer_imports_checksum_format",
+      sql`${table.packageChecksum} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "relationship_transfer_imports_source_name_not_blank",
+      sql`length(btrim(${table.sourceCharacterName})) > 0`,
+    ),
+    check(
+      "relationship_transfer_imports_counts_nonnegative",
+      sql`${table.importedConversationCount} >= 0 AND ${table.skippedConversationCount} >= 0 AND ${table.importedMemoryCount} >= 0 AND ${table.skippedMemoryCount} >= 0`,
+    ),
+  ],
+);
+
+export const relationshipTransferConversationOrigins = pgTable(
+  "relationship_transfer_conversation_origins",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    transferImportId: uuid("transfer_import_id")
+      .notNull()
+      .references(() => relationshipTransferImports.id, {
+        onDelete: "cascade",
+      }),
+    targetUserId: uuid("target_user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "cascade" }),
+    targetCharacterId: uuid("target_character_id")
+      .notNull()
+      .references(() => characters.id, { onDelete: "restrict" }),
+    sourceConversationId: uuid("source_conversation_id").notNull(),
+    importedConversationId: uuid("imported_conversation_id").references(
+      () => conversations.id,
+      { onDelete: "set null" },
+    ),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex(
+      "relationship_transfer_origins_user_character_source_unique",
+    ).on(
+      table.targetUserId,
+      table.targetCharacterId,
+      table.sourceConversationId,
+    ),
+    uniqueIndex("relationship_transfer_origins_conversation_unique")
+      .on(table.importedConversationId)
+      .where(sql`${table.importedConversationId} IS NOT NULL`),
+    index("relationship_transfer_origins_import_idx").on(
+      table.transferImportId,
+    ),
+  ],
+);
+
 export type UserAccount = typeof userAccounts.$inferSelect;
 export type NewUserAccount = typeof userAccounts.$inferInsert;
 export type PasswordCredential = typeof passwordCredentials.$inferSelect;

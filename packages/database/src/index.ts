@@ -9,6 +9,7 @@ export * from "./memory-operations.js";
 export * from "./memory-index-operations.js";
 export * from "./media-operations.js";
 export * from "./model-settings-operations.js";
+export * from "./relationship-transfer-operations.js";
 export * from "./teaching-plan-generation-operations.js";
 export * from "./teaching-operations.js";
 export * from "./schema.js";

@@ -1,5 +1,5 @@
 import type { Character, UserAccount } from "@meet/protocol";
-import type { CSSProperties } from "react";
+import { useRef, type CSSProperties } from "react";
 
 import { getCharacterActionVisibility } from "./character-logic.js";
 import { VisibilityBadge } from "./CharacterLibrary.js";
@@ -16,6 +16,8 @@ type CharacterDetailProps = {
   onToggleVisibility: () => void;
   onRestore: () => void;
   onDelete: () => void;
+  onExportRelationship: () => void;
+  onImportRelationship: (file: File) => void;
 };
 
 export default function CharacterDetail({
@@ -30,7 +32,10 @@ export default function CharacterDetail({
   onToggleVisibility,
   onRestore,
   onDelete,
+  onExportRelationship,
+  onImportRelationship,
 }: CharacterDetailProps) {
+  const importInput = useRef<HTMLInputElement>(null);
   const actions = getCharacterActionVisibility(user, character.permissions);
   const policy = character.conversationPolicy;
   const usesCustomPrompt = character.persona.definitionMode === "custom_prompt";
@@ -77,7 +82,7 @@ export default function CharacterDetail({
             <button
               className="product-primary-button detail-call"
               type="button"
-              disabled={busyAction === "call"}
+              disabled={Boolean(busyAction)}
               onClick={onCall}
             >
               <span aria-hidden="true">●</span>
@@ -148,6 +153,46 @@ export default function CharacterDetail({
           )}
         </section>
       )}
+
+      <section className="detail-card relationship-transfer-card">
+        <div>
+          <p className="product-eyebrow">DATA TRANSFER</p>
+          <h2>迁移我和这个角色的数据</h2>
+          <p>
+            导出当前账号的文字历史、会话摘要和长期记忆，再登录另一个账号并在对应角色中导入。
+          </p>
+          <small>
+            文件包含私人内容，请妥善保管；不会包含账号、密码、模型密钥或旧服务的运行时凭据。
+          </small>
+        </div>
+        <div className="relationship-transfer-actions">
+          <button
+            type="button"
+            disabled={Boolean(busyAction)}
+            onClick={onExportRelationship}
+          >
+            {busyAction === "export" ? "正在整理…" : "导出关系数据"}
+          </button>
+          <button
+            type="button"
+            disabled={Boolean(busyAction)}
+            onClick={() => importInput.current?.click()}
+          >
+            {busyAction === "import" ? "正在导入…" : "从文件导入"}
+          </button>
+          <input
+            ref={importInput}
+            className="visually-hidden"
+            type="file"
+            accept="application/json,.json"
+            onChange={(event) => {
+              const file = event.currentTarget.files?.[0];
+              event.currentTarget.value = "";
+              if (file) onImportRelationship(file);
+            }}
+          />
+        </div>
+      </section>
 
       <div className="detail-grid">
         <section className="detail-card detail-persona">
