@@ -329,6 +329,19 @@ export class QwenTeachingSessionController {
     );
   }
 
+  /** Renewal may not abandon a claimed invitation or an unacknowledged gate. */
+  isSafeToRenew(): boolean {
+    return (
+      this.phase === "idle" &&
+      !this.claimedInvitation &&
+      !this.queuedTrigger &&
+      this.pendingClaimEpoch === null &&
+      !this.pendingGate &&
+      !this.pendingUpdate &&
+      !this.muteInProgress
+    );
+  }
+
   handleClientFrame(frame: RealtimeTeachingClientControlFrame): void {
     if (this.isClosed()) return;
     if (this.seenClientEventIds.has(frame.event_id)) return;

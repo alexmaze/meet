@@ -119,6 +119,10 @@ class FakePlayback implements PcmPlaybackOutput {
   generation = 0;
   chunks: TaggedPcmChunk[] = [];
 
+  get hasPendingAudio(): boolean {
+    return this.chunks.length > 0;
+  }
+
   async start(): Promise<void> {}
 
   reset(generation: number): void {
@@ -239,6 +243,253 @@ async function startClient(
 }
 
 describe("QwenWebSocketRealtimeClient", () => {
+  it("settles a manually stopped reply before renewing instead of retaining its draft forever", async () => {
+    const h = createHarness();
+    await startClient(h.client);
+    const socket = h.sockets[0]!;
+    activateSocket(socket);
+    socket.receive({ type: "response.created", response: { id: "stopped" } });
+    socket.receive({
+      type: "response.audio_transcript.delta",
+      response_id: "stopped",
+      delta: "我正说到这里",
+    });
+    h.client.interrupt();
+    announceRenewal(socket);
+    h.scheduler.advance(750);
+    expect(sentTypes(socket)).not.toContain("relay.renewal_prepare");
+    socket.receive({
+      type: "response.done",
+      response: {
+        id: "stopped",
+        status: "cancelled",
+        status_details: { reason: "client_cancelled" },
+      },
+    });
+    h.scheduler.advance(750);
+    expect(h.snapshots.at(-1)?.assistantCaption).toBe("");
+    expect(sentTypes(socket)).toContain("relay.renewal_prepare");
+  });
+
+  it("clears failed ASR draft after an invalid turn before renewing", async () => {
+    const h = createHarness();
+    await startClient(h.client);
+    const socket = h.sockets[0]!;
+    activateSocket(socket);
+    socket.receive({
+      type: "input_audio_buffer.speech_started",
+      item_id: "noise",
+    });
+    socket.receive({
+      type: "conversation.item.input_audio_transcription.delta",
+      item_id: "noise",
+      text: "杂音",
+    });
+    socket.receive({
+      type: "input_audio_buffer.speech_stopped",
+      item_id: "noise",
+      reason: "turn_invalid",
+    });
+    socket.receive({
+      type: "conversation.item.input_audio_transcription.failed",
+      item_id: "noise",
+    });
+    announceRenewal(socket);
+    h.scheduler.advance(750);
+    expect(h.snapshots.at(-1)?.userCaption).toBe("");
+    expect(sentTypes(socket)).toContain("relay.renewal_prepare");
+  });
+
+  it("voluntarily renews the same business call after saving and reopens a non-teaching microphone", async () => {
+    const h = createHarness();
+    await startClient(h.client);
+    const first = h.sockets[0]!;
+    activateSocket(first);
+    announceRenewal(first);
+    h.scheduler.advance(750);
+    const request = renewalPrepare(first);
+    expect(request).toBeDefined();
+    first.receive({ type: "relay.renewal_ready", event_id: request.event_id });
+    await finishRenewalWork(h);
+    expect(h.beforeReconnect).toHaveBeenCalled();
+    expect(first.readyState).toBe(3);
+    expect(h.sockets).toHaveLength(2);
+    expect(h.socketUrls[1]).toBe(h.socketUrls[0]);
+    const replacement = h.sockets[1]!;
+    replacement.open();
+    replacement.receive({ type: "relay.ready", teaching: false });
+    replacement.receive({ type: "session.updated" });
+    expect(h.snapshots.at(-1)).toMatchObject({
+      connection: "active",
+      detail: "已自动续接，可以继续聊天",
+    });
+    expect(h.microphones).toHaveLength(1);
+    expect(h.playbacks).toHaveLength(1);
+    expect(h.microphones[0]?.enabled).toBe(true);
+    expect(sentTypes(replacement)).toEqual(["session.update"]);
+    expect(h.errors).toEqual([]);
+    expect(
+      h.providerEvents.some((event) =>
+        JSON.stringify(event).includes("renewal"),
+      ),
+    ).toBe(false);
+  });
+
+  it("waits for consumed audio after response.done before preparing renewal", async () => {
+    const h = createHarness();
+    await startClient(h.client);
+    const socket = h.sockets[0]!;
+    activateSocket(socket);
+    socket.receive({
+      type: "response.created",
+      response: { id: "long-reply" },
+    });
+    socket.receive({
+      type: "response.audio.delta",
+      response_id: "long-reply",
+      item_id: "audio",
+      output_index: 0,
+      content_index: 0,
+      delta: encodePcm16Base64(new Int16Array([700, 700])),
+    });
+    socket.receive({
+      type: "response.done",
+      response: { id: "long-reply", status: "completed" },
+    });
+    announceRenewal(socket);
+    h.scheduler.advance(2_000);
+    expect(sentTypes(socket)).not.toContain("relay.renewal_prepare");
+    h.playbacks[0]!.chunks = [];
+    h.scheduler.advance(250);
+    expect(sentTypes(socket)).toContain("relay.renewal_prepare");
+  });
+
+  it("waits for late final ASR even when the response has finished", async () => {
+    const h = createHarness();
+    await startClient(h.client);
+    const socket = h.sockets[0]!;
+    activateSocket(socket);
+    socket.receive({
+      type: "input_audio_buffer.speech_started",
+      item_id: "utterance",
+      audio_start_ms: 0,
+    });
+    socket.receive({
+      type: "input_audio_buffer.speech_stopped",
+      item_id: "utterance",
+      audio_end_ms: 500,
+    });
+    socket.receive({
+      type: "input_audio_buffer.committed",
+      item_id: "utterance",
+    });
+    socket.receive({ type: "response.created", response: { id: "reply" } });
+    socket.receive({
+      type: "response.done",
+      response: { id: "reply", status: "completed" },
+    });
+    announceRenewal(socket);
+    h.scheduler.advance(2_000);
+    expect(sentTypes(socket)).not.toContain("relay.renewal_prepare");
+    socket.receive({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "utterance",
+      transcript: "我喜欢星星",
+    });
+    h.scheduler.advance(750);
+    expect(sentTypes(socket)).toContain("relay.renewal_prepare");
+  });
+
+  it("does not renew in an active teaching activity", async () => {
+    const h = createHarness();
+    await startClient(h.client);
+    const socket = h.sockets[0]!;
+    activateSocket(socket);
+    socket.receive({
+      type: "relay.teaching.state",
+      revision: 1,
+      state: "active",
+      canRequest: false,
+      canMute: true,
+    });
+    announceRenewal(socket);
+    h.scheduler.advance(2_000);
+    expect(sentTypes(socket)).not.toContain("relay.renewal_prepare");
+    socket.receive({
+      type: "relay.teaching.state",
+      revision: 2,
+      state: "completed",
+      canRequest: false,
+      canMute: false,
+    });
+    h.scheduler.advance(750);
+    expect(sentTypes(socket)).toContain("relay.renewal_prepare");
+  });
+
+  it("cancels preparation before sending new microphone speech", async () => {
+    const h = createHarness();
+    await startClient(h.client);
+    const socket = h.sockets[0]!;
+    activateSocket(socket);
+    announceRenewal(socket);
+    h.scheduler.advance(750);
+    h.microphones[0]?.emit(new Int16Array(320));
+    expect(sentTypes(socket).at(-1)).toBe("relay.renewal_prepare");
+    h.microphones[0]?.emit(new Int16Array([900, -900]));
+    expect(sentTypes(socket).slice(-2)).toEqual([
+      "relay.renewal_cancel",
+      "input_audio_buffer.append",
+    ]);
+    expect(socket.readyState).toBe(1);
+  });
+
+  it("keeps the existing transport on save failure and ignores a late ACK after ending", async () => {
+    const h = createHarness();
+    await startClient(h.client);
+    const socket = h.sockets[0]!;
+    activateSocket(socket);
+    announceRenewal(socket);
+    h.scheduler.advance(750);
+    const request = renewalPrepare(socket);
+    h.beforeReconnect.mockRejectedValueOnce(new Error("offline"));
+    socket.receive({ type: "relay.renewal_ready", event_id: request.event_id });
+    await finishRenewalWork(h);
+    expect(socket.readyState).toBe(1);
+    expect(h.sockets).toHaveLength(1);
+    expect(h.microphones[0]?.enabled).toBe(true);
+    await h.client.close();
+    socket.receive({ type: "relay.renewal_ready", event_id: request.event_id });
+    h.scheduler.advance(60_000);
+    await finishRenewalWork(h);
+    expect(h.sockets).toHaveLength(1);
+    expect(h.snapshots.at(-1)?.connection).toBe("closed");
+  });
+
+  it("does not let a timed-out persistence attempt replace a later retry", async () => {
+    const h = createHarness();
+    await startClient(h.client);
+    activateSocket(h.sockets[0]);
+    let resolve!: () => void;
+    h.beforeReconnect.mockImplementationOnce(
+      () =>
+        new Promise<void>((done) => {
+          resolve = done;
+        }),
+    );
+    h.sockets[0]?.disconnect();
+    h.scheduler.advance(1_000);
+    await settleAsyncWork();
+    h.scheduler.advance(29_000);
+    expect(h.snapshots.at(-1)?.connection).toBe("paused");
+    h.client.retry();
+    h.scheduler.advance(0);
+    await finishRenewalWork(h);
+    expect(h.sockets).toHaveLength(2);
+    resolve();
+    await finishRenewalWork(h);
+    expect(h.sockets).toHaveLength(2);
+  });
+
   it("binds the authenticated conversation id to the realtime socket URL", async () => {
     const harness = createHarness();
     await startClient(harness.client);
@@ -1044,6 +1295,28 @@ function activateSocket(socket: FakeSocket | undefined): void {
   socket?.open();
   socket?.receive({ type: "relay.ready" });
   socket?.receive({ type: "session.updated" });
+}
+
+function announceRenewal(socket: FakeSocket): void {
+  socket.receive({
+    type: "relay.renewal_due",
+    reason: "connection_age",
+    remainingMs: 120_000,
+  });
+}
+
+function renewalPrepare(socket: FakeSocket): { event_id: string } {
+  return socket.sent
+    .map((payload) => JSON.parse(payload) as { type: string; event_id: string })
+    .find((frame) => frame.type === "relay.renewal_prepare")!;
+}
+
+async function finishRenewalWork(
+  h: ReturnType<typeof createHarness>,
+): Promise<void> {
+  for (let step = 0; step < 8; step++) await Promise.resolve();
+  h.scheduler.advance(0);
+  for (let step = 0; step < 8; step++) await Promise.resolve();
 }
 
 function sentTypes(socket: FakeSocket | undefined): string[] {

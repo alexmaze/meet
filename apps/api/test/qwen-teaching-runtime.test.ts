@@ -892,6 +892,24 @@ describe("Qwen teaching WebSocket relay", () => {
 
 type ControllerHarness = ReturnType<typeof createControllerHarness>;
 
+describe("Qwen teaching renewal safety", () => {
+  it("allows renewal only after base acknowledgment and outside claiming or active teaching", async () => {
+    const harness = createControllerHarness();
+    expect(harness.controller.isSafeToRenew()).toBe(false);
+    await configureController(harness);
+    expect(harness.controller.isSafeToRenew()).toBe(true);
+    harness.controller.handleClientFrame({
+      type: "relay.teaching.request",
+      event_id: "renewal-safety-request",
+    });
+    expect(harness.controller.isSafeToRenew()).toBe(false);
+    await waitForGate(harness.clientFrames, false, 1);
+    expect(harness.controller.isSafeToRenew()).toBe(false);
+    harness.controller.dispose();
+    expect(harness.controller.isSafeToRenew()).toBe(false);
+  });
+});
+
 function createControllerHarness(input?: {
   runtime?: QwenTeachingRuntimeSnapshot;
   now?: () => number;

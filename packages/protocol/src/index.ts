@@ -7,5 +7,6 @@ export * from "./media.js";
 export * from "./model-settings.js";
 export * from "./qwen.js";
 export * from "./realtime.js";
+export * from "./realtime-renewal.js";
 export * from "./relationship-transfer.js";
 export * from "./teaching.js";

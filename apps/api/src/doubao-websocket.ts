@@ -4,6 +4,7 @@ import {
   doubaoResponseCancelEventSchema,
   doubaoSessionCloseEventSchema,
   doubaoSpeechTextCommitEventSchema,
+  realtimeRenewalClientFrameSchema,
   type DoubaoRealtimeModel,
 } from "@meet/protocol";
 import WebSocket, { type ClientOptions, type RawData } from "ws";
@@ -11,6 +12,10 @@ import WebSocket, { type ClientOptions, type RawData } from "ws";
 import type { AppConfig } from "./config.js";
 import { buildDoubaoSessionConfig } from "./doubao-session.js";
 import type { QwenContinuityMessage } from "./qwen-websocket.js";
+import {
+  RealtimeRenewalController,
+  REALTIME_RENEWAL_MAX_SESSION_MS,
+} from "./realtime-renewal.js";
 
 export {
   buildDoubaoInstructions,
@@ -23,7 +28,7 @@ export const DOUBAO_REALTIME_WEBSOCKET_URL =
 export const DOUBAO_RELAY_CLIENT_MAX_MESSAGE_BYTES = 256 * 1024;
 export const DOUBAO_RELAY_UPSTREAM_MAX_MESSAGE_BYTES = 2 * 1024 * 1024;
 export const DOUBAO_RELAY_MAX_AUDIO_BASE64_CHARACTERS = 128 * 1024;
-export const DOUBAO_RELAY_MAX_SESSION_MS = 30 * 60 * 1000;
+export const DOUBAO_RELAY_MAX_SESSION_MS = REALTIME_RENEWAL_MAX_SESSION_MS;
 
 const MAX_PENDING_CLIENT_BYTES = 512 * 1024;
 const MAX_SOCKET_BUFFERED_BYTES = 1024 * 1024;
@@ -95,6 +100,12 @@ export function relayDoubaoWebSocket({
   let rateWindowControlEvents = 0;
   let sessionTimeout: NodeJS.Timeout | null = null;
   const pendingClientMessages: Buffer[] = [];
+  const renewal = new RealtimeRenewalController({
+    provider: "doubao",
+    sendClientFrame: (frame) => sendJson(client, frame),
+    isSafeToRenew: () =>
+      !stopped && upstreamReady && sessionCreated && !gracefulCloseRequested,
+  });
 
   const stop = (
     source: "client" | "upstream" | "relay",
@@ -107,6 +118,7 @@ export function relayDoubaoWebSocket({
     sessionTimeout = null;
     pendingClientMessages.length = 0;
     pendingBytes = 0;
+    renewal.dispose();
     if (source !== "client") closeSocket(client, code, reason);
     if (source !== "upstream") closeOrTerminate(upstream);
   };
@@ -123,7 +135,11 @@ export function relayDoubaoWebSocket({
       return;
     }
     const message = rawDataToBuffer(data);
-    const eventType = readAllowedDoubaoClientEventType(message);
+    const parsedJson = parseJsonMessage(message);
+    const renewalFrame = realtimeRenewalClientFrameSchema.safeParse(parsedJson);
+    const eventType = renewalFrame.success
+      ? renewalFrame.data.type
+      : readAllowedDoubaoClientEventType(message);
     if (
       message.byteLength === 0 ||
       message.byteLength > DOUBAO_RELAY_CLIENT_MAX_MESSAGE_BYTES ||
@@ -159,6 +175,11 @@ export function relayDoubaoWebSocket({
       stop("relay", CLOSE_POLICY_VIOLATION, "Realtime rate exceeded");
       return;
     }
+    if (renewalFrame.success) {
+      renewal.handleClientFrame(renewalFrame.data);
+      return;
+    }
+    renewal.observeClientEvent(parsedJson);
     if (eventType === "session.close") gracefulCloseRequested = true;
 
     if (!upstreamReady || !sessionCreated) {
@@ -233,8 +254,10 @@ export function relayDoubaoWebSocket({
       return;
     }
     const type = readJsonEventType(message);
+    renewal.observeProviderEvent(parseJsonMessage(message));
     if (type === "session.created" && !sessionCreated) {
       sessionCreated = true;
+      renewal.markSessionReady();
       sendJson(client, { type: "relay.ready" });
       for (const pending of pendingClientMessages) {
         if (!sendWithBackpressure(upstream, pending, false)) {
@@ -293,7 +316,7 @@ export function relayDoubaoWebSocket({
       "本次实时通话已达到最长时长，请重新连接。",
     );
     stop("relay", CLOSE_NORMAL, "Realtime session expired");
-  }, DOUBAO_RELAY_MAX_SESSION_MS);
+  }, renewal.remainingMs);
   sessionTimeout.unref();
   return upstream;
 }
@@ -369,6 +392,14 @@ function readJsonEventType(message: Buffer): string | null {
       typeof Reflect.get(input, "type") === "string"
       ? (Reflect.get(input, "type") as string)
       : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseJsonMessage(message: Buffer): unknown {
+  try {
+    return JSON.parse(message.toString("utf8")) as unknown;
   } catch {
     return null;
   }

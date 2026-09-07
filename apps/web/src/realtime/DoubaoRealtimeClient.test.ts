@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   MicrophonePcmCaptureOptions,
@@ -63,6 +63,10 @@ class FakePlayback implements PcmPlaybackOutput {
   generation = 0;
   chunks: TaggedPcmChunk[] = [];
 
+  get hasPendingAudio(): boolean {
+    return this.chunks.length > 0;
+  }
+
   async start(): Promise<void> {}
   reset(generation: number): void {
     this.generation = generation;
@@ -81,6 +85,8 @@ function createHarness(
   inputMode: "hands_free" | "push_to_talk" = "hands_free",
 ) {
   const socket = new FakeSocket();
+  const sockets: FakeSocket[] = [];
+  const socketUrls: string[] = [];
   const microphones: FakeMicrophone[] = [];
   const playback = new FakePlayback();
   const transcripts: Array<{
@@ -88,9 +94,22 @@ function createHarness(
     text: string;
     status: "completed" | "interrupted";
   }> = [];
-  const snapshots: Array<{ connection: string; activity: string }> = [];
+  const snapshots: Array<{
+    connection: string;
+    activity: string;
+    detail: string;
+  }> = [];
+  const beforeReconnect = vi
+    .fn<() => Promise<void>>()
+    .mockResolvedValue(undefined);
+  const errors: Array<{ code: string; message: string }> = [];
   const dependencies: DoubaoRealtimeClientDependencies = {
-    createSocket: () => socket as unknown as WebSocket,
+    createSocket: (url) => {
+      const next = sockets.length === 0 ? socket : new FakeSocket();
+      sockets.push(next);
+      socketUrls.push(url);
+      return next as unknown as WebSocket;
+    },
     createPlayback: () => playback,
     createMicrophone: (options) => {
       const microphone = new FakeMicrophone(options);
@@ -110,12 +129,18 @@ function createHarness(
     {
       onTranscript: (transcript) => transcripts.push(transcript),
       onSnapshot: (snapshot) => snapshots.push(snapshot),
+      onBeforeReconnect: beforeReconnect,
+      onError: (error) => errors.push(error),
     },
     dependencies,
   );
   return {
     client,
     socket,
+    sockets,
+    socketUrls,
+    beforeReconnect,
+    errors,
     microphones,
     playback,
     transcripts,
@@ -126,6 +151,7 @@ function createHarness(
 
 async function startHarness(
   harness: ReturnType<typeof createHarness>,
+  assistantStarts = true,
 ): Promise<void> {
   await harness.client.start({
     characterId: "character-one",
@@ -133,7 +159,7 @@ async function startHarness(
     voice: "zh_female_vv_jupiter_bigtts",
     instructions: "保持自然。",
     inputMode: harness.inputMode,
-    assistantStarts: true,
+    assistantStarts,
     openingText: "你好，很高兴见到你。",
   });
   harness.socket.open();
@@ -142,6 +168,59 @@ async function startHarness(
     event_id: "session-created",
     type: "session.created",
     session: { id: "dialog-1" },
+  });
+}
+
+afterEach(() => {
+  vi.clearAllTimers();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+function due(socket: FakeSocket): void {
+  socket.receive({
+    type: "relay.renewal_due",
+    reason: "context_refresh",
+    remainingMs: 120_000,
+  });
+}
+
+function ready(socket: FakeSocket): void {
+  const request = sentEvents(socket).findLast(
+    (event) => event.type === "relay.renewal_prepare",
+  );
+  expect(request).toBeDefined();
+  socket.receive({ type: "relay.renewal_ready", event_id: request?.event_id });
+}
+
+function finishResponse(
+  socket: FakeSocket,
+  responseId: string,
+  audio = false,
+): void {
+  socket.receive({
+    type: "response.output_audio.started",
+    response_id: responseId,
+  });
+  if (audio)
+    socket.receive({
+      type: "response.output_audio.delta",
+      response_id: responseId,
+      delta: "AQD//w==",
+    });
+  socket.receive({
+    type: "response.output_audio.done",
+    response_id: responseId,
+  });
+  socket.receive({ type: "response.done" });
+}
+
+function activateReplacement(socket: FakeSocket): void {
+  socket.open();
+  socket.receive({ type: "relay.ready" });
+  socket.receive({
+    type: "session.created",
+    session: { id: "dialog-replacement" },
   });
 }
 
@@ -212,6 +291,239 @@ describe("DoubaoRealtimeClient", () => {
       expect.objectContaining({ speaker: "assistant", text: "你好呀" }),
     ]);
     expect(harness.playback.chunks).toHaveLength(1);
+  });
+
+  it("renews a quiet session after durable records and graceful close, retaining the call and greeting", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness();
+    await startHarness(harness);
+    finishResponse(harness.socket, "opening-response");
+    due(harness.socket);
+    await vi.advanceTimersByTimeAsync(750);
+    expect(harness.beforeReconnect).not.toHaveBeenCalled();
+    ready(harness.socket);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(harness.beforeReconnect).toHaveBeenCalledTimes(1);
+    expect(sentEvents(harness.socket).at(-1)?.type).toBe("session.close");
+    expect(harness.sockets).toHaveLength(1);
+    expect(harness.snapshots.at(-1)?.detail).toContain("自动续接");
+    expect(harness.microphones[0]?.enabled).toBe(false);
+
+    harness.socket.receive({
+      type: "session.created",
+      session: { id: "late-old-session" },
+    });
+    expect(harness.snapshots.at(-1)?.connection).toBe("reconnecting");
+    harness.socket.receive({ type: "session.closed" });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(harness.sockets).toHaveLength(2);
+    expect(harness.socketUrls[1]).toBe(harness.socketUrls[0]);
+    const next = harness.sockets[1]!;
+    activateReplacement(next);
+    expect(harness.snapshots.at(-1)?.detail).toContain("自动续接");
+    expect(harness.microphones[0]?.enabled).toBe(true);
+    expect(
+      sentEvents(next).some(
+        (event) => event.type === "speech_text_buffer.commit",
+      ),
+    ).toBe(false);
+  });
+
+  it("waits for buffered PCM to drain after provider generation completes", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness();
+    await startHarness(harness, false);
+    finishResponse(harness.socket, "response-a", true);
+    due(harness.socket);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(
+      sentEvents(harness.socket).some(
+        (event) => event.type === "relay.renewal_prepare",
+      ),
+    ).toBe(false);
+    harness.playback.chunks = [];
+    await vi.advanceTimersByTimeAsync(250);
+    expect(sentEvents(harness.socket).at(-1)?.type).toBe(
+      "relay.renewal_prepare",
+    );
+  });
+
+  it("cancels preparation before transmitting new speech without muting capture", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness();
+    await startHarness(harness, false);
+    due(harness.socket);
+    await vi.advanceTimersByTimeAsync(750);
+    const request = sentEvents(harness.socket).at(-1)!;
+    expect(harness.microphones[0]?.enabled).toBe(true);
+    const sentBeforeSilence = harness.socket.sent.length;
+    harness.microphones[0]?.emit(new Int16Array([0, 0]));
+    expect(harness.socket.sent).toHaveLength(sentBeforeSilence);
+    harness.microphones[0]?.emit(new Int16Array([1000, -1000]));
+    expect(
+      sentEvents(harness.socket)
+        .slice(-2)
+        .map((event) => event.type),
+    ).toEqual(["relay.renewal_cancel", "input_audio_buffer.append"]);
+    harness.socket.receive({
+      type: "relay.renewal_ready",
+      event_id: request.event_id,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(harness.beforeReconnect).not.toHaveBeenCalled();
+    expect(harness.snapshots.at(-1)?.connection).toBe("active");
+  });
+
+  it("keeps the existing session usable when transcript persistence fails", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness();
+    harness.beforeReconnect.mockRejectedValueOnce(
+      new Error("database offline"),
+    );
+    await startHarness(harness, false);
+    due(harness.socket);
+    await vi.advanceTimersByTimeAsync(750);
+    ready(harness.socket);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(harness.sockets).toHaveLength(1);
+    expect(harness.socket.readyState).toBe(1);
+    expect(harness.snapshots.at(-1)?.detail).toContain("同步已确认记录");
+    expect(harness.microphones[0]?.enabled).toBe(true);
+    expect(
+      sentEvents(harness.socket).some(
+        (event) => event.type === "session.close",
+      ),
+    ).toBe(false);
+  });
+
+  it("cancels an in-flight flush when user speech arrives and ignores its late result", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness();
+    let resolveFlush!: () => void;
+    harness.beforeReconnect.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveFlush = resolve;
+      }),
+    );
+    await startHarness(harness, false);
+    due(harness.socket);
+    await vi.advanceTimersByTimeAsync(750);
+    ready(harness.socket);
+    await vi.advanceTimersByTimeAsync(0);
+    harness.socket.receive({
+      type: "conversation.item.input_audio_transcription.started",
+    });
+    resolveFlush();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sentEvents(harness.socket).at(-1)?.type).toBe(
+      "relay.renewal_cancel",
+    );
+    expect(harness.socket.readyState).toBe(1);
+    expect(harness.snapshots.at(-1)?.activity).toBe("user_speaking");
+  });
+
+  it("does not prepare while user ASR, the answer, PTT, or hidden playback is pending", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness("push_to_talk");
+    await startHarness(harness, false);
+    due(harness.socket);
+    harness.client.setPushToTalkActive(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    harness.client.setPushToTalkActive(false);
+    harness.socket.receive({
+      type: "conversation.item.input_audio_transcription.started",
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    harness.socket.receive({
+      type: "conversation.item.input_audio_transcription.completed",
+      transcript: "继续讲",
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(
+      sentEvents(harness.socket).some(
+        (event) => event.type === "relay.renewal_prepare",
+      ),
+    ).toBe(false);
+    finishResponse(harness.socket, "response-a");
+    vi.stubGlobal("document", { visibilityState: "hidden" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(
+      sentEvents(harness.socket).some(
+        (event) => event.type === "relay.renewal_prepare",
+      ),
+    ).toBe(false);
+    vi.stubGlobal("document", { visibilityState: "visible" });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(sentEvents(harness.socket).at(-1)?.type).toBe(
+      "relay.renewal_prepare",
+    );
+  });
+
+  it("does not resurrect renewal after the user closes during the old socket wait", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness();
+    await startHarness(harness, false);
+    due(harness.socket);
+    await vi.advanceTimersByTimeAsync(750);
+    ready(harness.socket);
+    await vi.advanceTimersByTimeAsync(0);
+    const closing = harness.client.close();
+    await vi.advanceTimersByTimeAsync(1_500);
+    await closing;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(harness.sockets).toHaveLength(1);
+    expect(harness.snapshots.at(-1)?.connection).toBe("closed");
+  });
+
+  it("does not let a late manual close tear down a newly started call", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness();
+    await startHarness(harness, false);
+    const oldClosing = harness.client.close();
+    await harness.client.start({
+      characterId: "another-character",
+      conversationId: "734f595e-12e6-4c19-a780-b85d82f8991d",
+      voice: "zh_female_vv_jupiter_bigtts",
+      instructions: "自然交谈。",
+      inputMode: "hands_free",
+      assistantStarts: false,
+    });
+    activateReplacement(harness.sockets[1]!);
+    await vi.advanceTimersByTimeAsync(1_500);
+    await oldClosing;
+    expect(harness.sockets[1]?.readyState).toBe(1);
+    expect(harness.snapshots.at(-1)?.connection).toBe("active");
+  });
+
+  it("includes graceful close in the 30 second budget and fences a late recovery after retry", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness();
+    let resolveOldFlush!: () => void;
+    const oldFlush = new Promise<void>((resolve) => {
+      resolveOldFlush = resolve;
+    });
+    harness.beforeReconnect
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(oldFlush);
+    await startHarness(harness, false);
+    due(harness.socket);
+    await vi.advanceTimersByTimeAsync(750);
+    ready(harness.socket);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(harness.snapshots.at(-1)?.connection).toBe("reconnecting");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(harness.snapshots.at(-1)?.connection).toBe("paused");
+    expect(harness.errors.at(-1)?.code).toBe("REALTIME_RECONNECT_TIMEOUT");
+
+    harness.client.retry();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(harness.sockets).toHaveLength(2);
+    resolveOldFlush();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(harness.sockets).toHaveLength(2);
+    activateReplacement(harness.sockets[1]!);
+    expect(harness.snapshots.at(-1)?.connection).toBe("active");
   });
 });
 

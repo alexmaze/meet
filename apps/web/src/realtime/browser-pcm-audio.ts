@@ -96,6 +96,7 @@ export interface PcmMicrophoneCapture {
 
 export interface PcmPlaybackOutput extends GenerationPcmSink {
   readonly outputSampleRate: number;
+  readonly hasPendingAudio: boolean;
   start(): Promise<void>;
   ensureRunning(): void;
   stop(): Promise<void>;
@@ -392,6 +393,10 @@ export class LowLatencyPcmQueuePolicy {
   private available = false;
   private queuedSamples = 0;
 
+  get hasPendingAudio(): boolean {
+    return this.queuedSamples > 0;
+  }
+
   reset(generation: number): void {
     this.generation = generation;
     this.queuedSamples = 0;
@@ -429,6 +434,7 @@ export class AudioWorkletPcmPlayback implements PcmPlaybackOutput {
   private processor: AudioWorkletNode | null = null;
   private moduleUrl: string | null = null;
   private generation = 0;
+  private queueRevision = 0;
   private queuePolicy: LowLatencyPcmQueuePolicy | null = null;
   private autoplayErrorReported = false;
   private pointerRetry: EventListener | null = null;
@@ -440,6 +446,10 @@ export class AudioWorkletPcmPlayback implements PcmPlaybackOutput {
 
   get outputSampleRate(): number {
     return this.context?.sampleRate ?? 24_000;
+  }
+
+  get hasPendingAudio(): boolean {
+    return this.queuePolicy?.hasPendingAudio ?? false;
   }
 
   async start(): Promise<void> {
@@ -498,14 +508,14 @@ export class AudioWorkletPcmPlayback implements PcmPlaybackOutput {
     };
     processor.connect(context.destination);
     this.processor = processor;
-    processor.port.postMessage({ type: "reset", generation: this.generation });
+    this.resetPhysicalQueue();
     this.handleContextAvailabilityChange();
   }
 
   reset(generation: number): void {
     this.generation = generation;
     this.queuePolicy?.reset(generation);
-    this.processor?.port.postMessage({ type: "reset", generation });
+    this.resetPhysicalQueue();
   }
 
   enqueue(chunk: TaggedPcmChunk): boolean {
@@ -586,10 +596,7 @@ export class AudioWorkletPcmPlayback implements PcmPlaybackOutput {
     this.generation += 1;
     this.queuePolicy?.reset(this.generation);
     this.queuePolicy?.setAvailable(false);
-    this.processor?.port.postMessage({
-      type: "reset",
-      generation: this.generation,
-    });
+    this.resetPhysicalQueue();
     this.processor?.port.close();
     this.processor?.disconnect();
     const context = this.context;
@@ -614,7 +621,10 @@ export class AudioWorkletPcmPlayback implements PcmPlaybackOutput {
     }
     if (
       input.generation !== this.generation ||
-      typeof input.samples !== "number"
+      input.queueRevision !== this.queueRevision ||
+      typeof input.samples !== "number" ||
+      !Number.isSafeInteger(input.samples) ||
+      input.samples < 0
     ) {
       return;
     }
@@ -673,9 +683,17 @@ export class AudioWorkletPcmPlayback implements PcmPlaybackOutput {
     if (!this.queuePolicy?.setAvailable(false)) {
       return;
     }
+    this.resetPhysicalQueue();
+  }
+
+  private resetPhysicalQueue(): void {
+    // Suspending clears audio without advancing the response generation. Fence
+    // consumed events already in transit so they cannot drain a resumed queue.
+    this.queueRevision += 1;
     this.processor?.port.postMessage({
       type: "reset",
       generation: this.generation,
+      queueRevision: this.queueRevision,
     });
   }
 
@@ -744,6 +762,7 @@ class MeetInterruptiblePlaybackProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
     this.generation = 0;
+    this.queueRevision = 0;
     this.queue = [];
     this.offset = 0;
     this.bufferedFrames = 0;
@@ -766,6 +785,7 @@ class MeetInterruptiblePlaybackProcessor extends AudioWorkletProcessor {
       if (!data || typeof data !== "object") return;
       if (data.type === "reset") {
         this.generation = data.generation;
+        this.queueRevision = data.queueRevision;
         this.queue = [];
         this.offset = 0;
         this.bufferedFrames = 0;
@@ -840,6 +860,7 @@ class MeetInterruptiblePlaybackProcessor extends AudioWorkletProcessor {
       this.port.postMessage({
         type: "consumed",
         generation: this.generation,
+        queueRevision: this.queueRevision,
         samples: this.consumed,
       });
       this.consumed = 0;

@@ -24,6 +24,7 @@ import {
   type PcmPlaybackOutput,
 } from "./browser-pcm-audio.js";
 import { InterruptiblePcmPlayback } from "./interruptible-pcm-playback.js";
+import { SessionRenewal } from "./session-renewal.js";
 import type {
   GenerationPcmSink,
   TaggedPcmChunk,
@@ -87,6 +88,7 @@ type RelayControlFrame = {
   code?: string;
   message?: string;
   status?: number;
+  teaching?: boolean;
 };
 
 /**
@@ -113,11 +115,14 @@ export class QwenWebSocketRealtimeClient {
   private pendingSpeechIds = new Set<string>();
   private awaitingCommittedSpeechIds = new Set<string>();
   private committedSpeechIds = new Set<string>();
+  private pendingTranscriptionIds = new Set<string>();
+  private unfinishedResponseIds = new Set<string>();
   private seenEventIds = new Set<string>();
   private socketBackpressureReported = false;
   private reconnectStartedAt: number | null = null;
   private reconnectAttempt = 0;
   private reconnectAttemptInFlight = false;
+  private reconnectGeneration = 0;
   private reconnectRetryTask: ScheduledTask | null = null;
   private reconnectDeadlineTask: ScheduledTask | null = null;
   private removeForegroundListener: (() => void) | null = null;
@@ -129,6 +134,27 @@ export class QwenWebSocketRealtimeClient {
   private teachingAudioGateOpen = true;
   private teachingRequestPending = false;
   private teachingMutePending = false;
+  private teachingBusy = false;
+  private plannedReconnect = false;
+  private readonly renewal = new SessionRenewal({
+    now: () => this.now(),
+    schedule: (callback, delay) => this.scheduleTask(callback, delay),
+    isSafe: () => this.canRenewSession(),
+    send: (frame) => {
+      if (!this.socket || !this.relayReady) throw new Error("SOCKET_CLOSED");
+      this.socket.send(JSON.stringify(frame));
+    },
+    flushRecords: async () => {
+      await this.callbacks.onBeforeReconnect?.();
+    },
+    renew: () => {
+      if (!this.socket || !this.canRenewSession()) return;
+      this.plannedReconnect = true;
+      this.detachSocket(this.socket);
+      this.beginReconnect("正在自动续接，马上继续聊天", true);
+    },
+    notice: (detail) => this.updateConnection(this.snapshot.connection, detail),
+  });
 
   constructor(
     private readonly legacyRemoteAudio: HTMLAudioElement,
@@ -246,17 +272,20 @@ export class QwenWebSocketRealtimeClient {
   }
 
   requestTeaching(): void {
+    this.renewal.activity();
     if (this.teachingMutePending) return;
     this.teachingRequestPending = true;
     this.flushTeachingControls();
   }
 
   beginTeachingMute(): void {
+    this.renewal.activity();
     this.teachingRequestPending = false;
     this.applyTeachingAudioGate(false);
   }
 
   muteTeaching(): void {
+    this.renewal.activity();
     this.teachingRequestPending = false;
     this.teachingMutePending = true;
     this.applyTeachingAudioGate(false);
@@ -283,10 +312,12 @@ export class QwenWebSocketRealtimeClient {
       return;
     }
     this.pushToTalkActive = active;
+    this.renewal.activity();
     this.applyMicrophoneGate();
   }
 
   interrupt(): void {
+    this.renewal.activity();
     const expectPendingResponse =
       this.projection.responseActive ||
       this.responseCreatePending ||
@@ -298,7 +329,8 @@ export class QwenWebSocketRealtimeClient {
       ...this.projection,
       activity: "listening",
       responseActive: false,
-      activeResponseId: null,
+      // Keep the identity until its terminal event commits the interrupted
+      // draft. PCM admission already rejects all subsequent old deltas.
     };
     this.syncProjectionToSnapshot();
     if (interruptedResponseId) {
@@ -311,6 +343,7 @@ export class QwenWebSocketRealtimeClient {
     if (!normalized) {
       return;
     }
+    this.renewal.activity();
     this.sendClientEvent(
       qwenUserTextItemCreateEventSchema.parse({
         event_id: createEventId(),
@@ -491,11 +524,13 @@ export class QwenWebSocketRealtimeClient {
 
     this.reconnectAttemptInFlight = true;
     const lifecycle = this.lifecycle;
+    const reconnectGeneration = this.reconnectGeneration;
     try {
       await this.microphone?.ensureAvailable();
       await this.callbacks.onBeforeReconnect?.();
       if (
         lifecycle !== this.lifecycle ||
+        reconnectGeneration !== this.reconnectGeneration ||
         this.manuallyClosing ||
         this.reconnectStartedAt === null
       ) {
@@ -507,25 +542,37 @@ export class QwenWebSocketRealtimeClient {
       this.sessionConfigured = false;
       this.updateConnection(
         "reconnecting",
-        `正在进行第 ${this.reconnectAttempt} 次恢复尝试`,
+        this.plannedReconnect
+          ? "正在自动续接，马上继续聊天"
+          : `正在进行第 ${this.reconnectAttempt} 次恢复尝试`,
       );
       this.openSocket(lifecycle);
     } catch {
-      if (lifecycle === this.lifecycle && this.reconnectStartedAt !== null) {
+      if (
+        lifecycle === this.lifecycle &&
+        reconnectGeneration === this.reconnectGeneration &&
+        this.reconnectStartedAt !== null
+      ) {
         this.updateConnection(
           "reconnecting",
           "已确认记录暂时无法同步，稍后继续恢复",
         );
       }
     } finally {
-      this.reconnectAttemptInFlight = false;
-      if (!this.socket && this.reconnectStartedAt !== null) {
-        this.scheduleReconnectAttempt();
+      if (
+        lifecycle === this.lifecycle &&
+        reconnectGeneration === this.reconnectGeneration
+      ) {
+        this.reconnectAttemptInFlight = false;
+        if (!this.socket && this.reconnectStartedAt !== null) {
+          this.scheduleReconnectAttempt();
+        }
       }
     }
   }
 
   private resetTransportForReconnect(): void {
+    this.renewal.reset();
     this.microphone?.setEnabled(false);
     this.responseAudio?.reset();
     this.responseCreatePending = false;
@@ -534,6 +581,9 @@ export class QwenWebSocketRealtimeClient {
     this.pendingSpeechIds.clear();
     this.awaitingCommittedSpeechIds.clear();
     this.committedSpeechIds.clear();
+    this.pendingTranscriptionIds.clear();
+    this.unfinishedResponseIds.clear();
+    this.teachingBusy = false;
     this.teachingStateRevision = -1;
     this.teachingStateFingerprint = "";
     this.teachingAudioGateRevision = 0;
@@ -546,6 +596,8 @@ export class QwenWebSocketRealtimeClient {
   }
 
   private pauseConnection(detail: string, code: string): void {
+    this.renewal.reset();
+    this.plannedReconnect = false;
     this.clearReconnectState();
     if (this.socket) this.detachSocket(this.socket);
     this.microphone?.setEnabled(false);
@@ -581,6 +633,7 @@ export class QwenWebSocketRealtimeClient {
   }
 
   private clearReconnectState(): void {
+    this.reconnectGeneration += 1;
     this.reconnectRetryTask?.cancel();
     this.reconnectRetryTask = null;
     this.reconnectDeadlineTask?.cancel();
@@ -622,6 +675,7 @@ export class QwenWebSocketRealtimeClient {
       return;
     }
 
+    if (this.renewal.handleFrame(raw)) return;
     const relayFrame = readRelayControlFrame(raw);
     const teachingFrame = parseTeachingRelayFrame(raw);
     if (teachingFrame.kind === "invalid") {
@@ -644,6 +698,10 @@ export class QwenWebSocketRealtimeClient {
         return;
       }
       if (teachingFrame.frame.revision > this.teachingStateRevision) {
+        this.renewal.activity();
+        this.teachingBusy =
+          teachingFrame.frame.state === "active" ||
+          teachingFrame.frame.state === "restoring";
         this.teachingStateRevision = teachingFrame.frame.revision;
         this.teachingStateFingerprint = fingerprint;
         this.callbacks.onTeachingState?.(
@@ -678,6 +736,9 @@ export class QwenWebSocketRealtimeClient {
   private handleRelayControlFrame(frame: RelayControlFrame): void {
     if (frame.type === "relay.ready") {
       if (!this.relayReady) {
+        // Teaching relays open their gate before session.updated. An explicit
+        // non-teaching relay needs no such ACK, including after replacement.
+        if (frame.teaching === false) this.teachingAudioGateOpen = true;
         this.relayReady = true;
         this.configureSession();
         this.flushTeachingControls();
@@ -730,6 +791,14 @@ export class QwenWebSocketRealtimeClient {
       this.rememberEventId(event.event_id);
     }
 
+    if (
+      event.type.startsWith("response.") ||
+      event.type.startsWith("input_audio_buffer.") ||
+      event.type.startsWith("conversation.item.input_audio_transcription.")
+    ) {
+      this.renewal.activity();
+    }
+
     this.callbacks.onProviderEvent?.(
       "server",
       summarizeAudioEventForDiagnostics(event),
@@ -739,6 +808,7 @@ export class QwenWebSocketRealtimeClient {
 
     const speechStarted = qwenSpeechStartedEventSchema.safeParse(event);
     if (speechStarted.success) {
+      this.pendingTranscriptionIds.add(speechStarted.data.item_id);
       this.pendingSpeechIds.add(speechStarted.data.item_id);
       if (this.pendingSpeechIds.size === 1) {
         this.responseAudio?.speechStarted();
@@ -758,6 +828,7 @@ export class QwenWebSocketRealtimeClient {
       if (speechStopped.data.reason !== "turn_invalid") {
         this.awaitingCommittedSpeechIds.add(speechStopped.data.item_id);
       } else {
+        this.pendingTranscriptionIds.delete(speechStopped.data.item_id);
         this.awaitingCommittedSpeechIds.delete(speechStopped.data.item_id);
         this.committedSpeechIds.delete(speechStopped.data.item_id);
       }
@@ -794,6 +865,7 @@ export class QwenWebSocketRealtimeClient {
 
     const responseCreated = qwenResponseCreatedEventSchema.safeParse(event);
     if (responseCreated.success) {
+      this.unfinishedResponseIds.add(responseCreated.data.response.id);
       this.responseCreatePending = false;
       const admission = this.teachingAudioGateOpen
         ? this.responseAudio?.beginResponse(responseCreated.data.response.id)
@@ -833,6 +905,7 @@ export class QwenWebSocketRealtimeClient {
 
     const responseDone = qwenResponseDoneEventSchema.safeParse(event);
     if (responseDone.success) {
+      this.unfinishedResponseIds.delete(responseDone.data.response.id);
       this.responseAudio?.responseDone(
         responseDone.data.response.id,
         responseDone.data.response.status === "cancelled",
@@ -840,6 +913,22 @@ export class QwenWebSocketRealtimeClient {
           ? responseDone.data.response.status_details.reason
           : undefined,
       );
+    }
+
+    if (
+      event.type === "conversation.item.input_audio_transcription.completed" ||
+      event.type === "conversation.item.input_audio_transcription.failed"
+    ) {
+      const itemId =
+        typeof event.item_id === "string"
+          ? event.item_id
+          : this.pendingTranscriptionIds.size === 1
+            ? this.pendingTranscriptionIds.values().next().value
+            : undefined;
+      if (itemId) this.pendingTranscriptionIds.delete(itemId);
+      if (event.type.endsWith(".failed")) {
+        this.projection = { ...this.projection, userDraft: "" };
+      }
     }
 
     const transcriptResponseId = readTranscriptResponseId(event);
@@ -884,13 +973,17 @@ export class QwenWebSocketRealtimeClient {
     }
     this.sessionConfigured = true;
     const resumed = this.completeReconnect();
+    const renewed = resumed && this.plannedReconnect;
+    this.plannedReconnect = false;
     this.updateConnection(
       "active",
-      resumed
-        ? "连接已恢复，已接回确认过的对话"
-        : this.microphone?.microphoneLabel
-          ? `已连接，麦克风：${this.microphone.microphoneLabel}`
-          : "已连接，可以开始说话",
+      renewed
+        ? "已自动续接，可以继续聊天"
+        : resumed
+          ? "连接已恢复，已接回确认过的对话"
+          : this.microphone?.microphoneLabel
+            ? `已连接，麦克风：${this.microphone.microphoneLabel}`
+            : "已连接，可以开始说话",
     );
     this.applyMicrophoneGate();
 
@@ -933,6 +1026,7 @@ export class QwenWebSocketRealtimeClient {
     ) {
       return;
     }
+    if (!this.renewal.allowMicrophonePacket(samples)) return;
 
     const maximumBufferedBytes =
       this.dependencies.maxSocketBufferedBytes ??
@@ -1049,6 +1143,7 @@ export class QwenWebSocketRealtimeClient {
 
   private applyTeachingAudioGate(open: boolean): void {
     if (open === this.teachingAudioGateOpen) return;
+    this.renewal.activity();
     this.teachingAudioGateOpen = open;
     this.applyMicrophoneGate();
     this.responseAudio?.reset();
@@ -1091,6 +1186,34 @@ export class QwenWebSocketRealtimeClient {
 
   private isCurrentSocket(socket: WebSocket, lifecycle: number): boolean {
     return this.socket === socket && this.lifecycle === lifecycle;
+  }
+
+  private canRenewSession(): boolean {
+    return (
+      this.snapshot.connection === "active" &&
+      this.sessionConfigured &&
+      this.relayReady &&
+      !this.manuallyClosing &&
+      this.socket?.readyState === SOCKET_OPEN &&
+      this.socket.bufferedAmount === 0 &&
+      this.playback?.hasPendingAudio === false &&
+      !this.pushToTalkActive &&
+      this.teachingAudioGateOpen &&
+      !this.teachingBusy &&
+      !this.teachingRequestPending &&
+      !this.teachingMutePending &&
+      !this.responseCreatePending &&
+      this.unfinishedResponseIds.size === 0 &&
+      this.pendingSpeechIds.size === 0 &&
+      this.awaitingCommittedSpeechIds.size === 0 &&
+      this.pendingTranscriptionIds.size === 0 &&
+      !this.projection.responseActive &&
+      this.projection.activity === "listening" &&
+      !this.projection.userDraft &&
+      !this.projection.assistantDraft &&
+      (typeof document === "undefined" ||
+        document.visibilityState === "visible")
+    );
   }
 
   private applyMicrophoneGate(): void {
@@ -1150,6 +1273,11 @@ export class QwenWebSocketRealtimeClient {
 
   private teardown(): void {
     this.lifecycle += 1;
+    this.renewal.reset();
+    this.plannedReconnect = false;
+    this.teachingBusy = false;
+    this.pendingTranscriptionIds.clear();
+    this.unfinishedResponseIds.clear();
     this.clearReconnectState();
     this.removeForegroundListener?.();
     this.removeForegroundListener = null;
@@ -1248,6 +1376,7 @@ function readRelayControlFrame(input: unknown): RelayControlFrame | null {
     code: typeof input.code === "string" ? input.code : undefined,
     message: typeof input.message === "string" ? input.message : undefined,
     status: typeof input.status === "number" ? input.status : undefined,
+    teaching: typeof input.teaching === "boolean" ? input.teaching : undefined,
   };
 }
 

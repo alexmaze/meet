@@ -5,6 +5,7 @@ import {
   qwenSessionUpdateEventSchema,
   qwenUserTextItemCreateEventSchema,
   realtimeTeachingClientControlFrameSchema,
+  realtimeRenewalClientFrameSchema,
   type QwenSessionUpdateEvent,
   type QwenRealtimeModel,
 } from "@meet/protocol";
@@ -13,6 +14,10 @@ import WebSocket, { type ClientOptions, type RawData } from "ws";
 
 import type { AppConfig } from "./config.js";
 import { normalizeQwenRealtimeEndpoint } from "./qwen.js";
+import {
+  RealtimeRenewalController,
+  REALTIME_RENEWAL_MAX_SESSION_MS,
+} from "./realtime-renewal.js";
 import {
   completeQwenTeachingBaseSession,
   matchesQwenTeachingBaseSession,
@@ -27,7 +32,7 @@ export const QWEN_RELAY_UPSTREAM_MAX_MESSAGE_BYTES = 2 * 1024 * 1024;
 export const QWEN_RELAY_MAX_AUDIO_BASE64_CHARACTERS = 128 * 1024;
 export const QWEN_RELAY_MAX_CLIENT_BYTES_PER_SECOND = 256 * 1024;
 export const QWEN_RELAY_MAX_CONTROL_EVENTS_PER_SECOND = 30;
-export const QWEN_RELAY_MAX_SESSION_MS = 30 * 60 * 1000;
+export const QWEN_RELAY_MAX_SESSION_MS = REALTIME_RENEWAL_MAX_SESSION_MS;
 
 const MAX_PENDING_CLIENT_BYTES = 512 * 1024;
 const MAX_SOCKET_BUFFERED_BYTES = 1024 * 1024;
@@ -164,6 +169,15 @@ export function relayQwenWebSocket({
     null;
   let teachingBaseAcknowledged = false;
   let teachingController: QwenTeachingSessionController | null = null;
+  const renewal = new RealtimeRenewalController({
+    provider: "qwen",
+    sendClientFrame: (frame) => sendJson(client, frame),
+    isSafeToRenew: () =>
+      !stopped &&
+      upstreamReady &&
+      historyInjected &&
+      (teachingController?.isSafeToRenew() ?? true),
+  });
   const pendingClientMessages: Buffer[] = [];
 
   const stop = (
@@ -178,6 +192,7 @@ export function relayQwenWebSocket({
     pendingClientMessages.length = 0;
     pendingBytes = 0;
     teachingController?.dispose();
+    renewal.dispose();
 
     if (source !== "client") closeSocket(client, code, reason);
     if (source !== "upstream") closeOrTerminateUpstream(upstream);
@@ -258,12 +273,16 @@ export function relayQwenWebSocket({
     const parsedJson = parseJsonMessage(message);
     const teachingFrame =
       realtimeTeachingClientControlFrameSchema.safeParse(parsedJson);
-    const eventType = teachingFrame.success
-      ? teachingFrame.data.type
-      : readAllowedQwenClientEventType(message, runtime);
+    const renewalFrame = realtimeRenewalClientFrameSchema.safeParse(parsedJson);
+    const eventType = renewalFrame.success
+      ? renewalFrame.data.type
+      : teachingFrame.success
+        ? teachingFrame.data.type
+        : readAllowedQwenClientEventType(message, runtime);
     if (
       !eventType ||
       (!teachingFrame.success &&
+        !renewalFrame.success &&
         ((!sessionConfigured && eventType !== "session.update") ||
           (sessionConfigured && eventType === "session.update")))
     ) {
@@ -298,6 +317,12 @@ export function relayQwenWebSocket({
       stop("relay", CLOSE_POLICY_VIOLATION, "Realtime rate exceeded");
       return;
     }
+    if (renewalFrame.success) {
+      renewal.handleClientFrame(renewalFrame.data);
+      return;
+    }
+    // Ordinary audio and controls always abort renewal before proceeding.
+    renewal.observeClientEvent(parsedJson);
     if (teachingFrame.success) {
       if (teachingController) {
         teachingController.handleClientFrame(teachingFrame.data);
@@ -384,7 +409,10 @@ export function relayQwenWebSocket({
     }
     pendingClientMessages.length = 0;
     pendingBytes = 0;
-    sendJson(client, { type: "relay.ready" });
+    sendJson(client, {
+      type: "relay.ready",
+      teaching: Boolean(teachingController),
+    });
   });
 
   upstream.on("message", (data, isBinary) => {
@@ -399,6 +427,8 @@ export function relayQwenWebSocket({
       stop("relay", CLOSE_INTERNAL_ERROR, "Upstream message too large");
       return;
     }
+    const renewalProviderEvent = isBinary ? null : parseJsonMessage(message);
+    renewal.observeProviderEvent(renewalProviderEvent);
     if (teachingController) {
       if (isBinary) {
         sendRelayError(
@@ -460,6 +490,7 @@ export function relayQwenWebSocket({
           }),
           session.eventId,
         );
+        renewal.markSessionReady();
         if (!sendWithBackpressure(client, message, false)) {
           stop("relay", CLOSE_TRY_AGAIN_LATER, "Relay backpressure");
           return;
@@ -477,6 +508,7 @@ export function relayQwenWebSocket({
       readJsonEventType(message) === "session.updated"
     ) {
       if (!injectContinuity()) return;
+      renewal.markSessionReady();
     }
     if (!sendWithBackpressure(client, message, isBinary)) {
       stop("relay", CLOSE_TRY_AGAIN_LATER, "Relay backpressure");
@@ -506,7 +538,7 @@ export function relayQwenWebSocket({
       "本次实时通话已达到最长时长，请重新连接。",
     );
     stop("relay", CLOSE_NORMAL, "Realtime session expired");
-  }, QWEN_RELAY_MAX_SESSION_MS);
+  }, renewal.remainingMs);
   sessionTimeout.unref();
 
   return upstream;

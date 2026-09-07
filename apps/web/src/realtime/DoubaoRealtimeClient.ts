@@ -30,6 +30,7 @@ import {
   type PcmPlaybackOutput,
 } from "./browser-pcm-audio.js";
 import { InterruptiblePcmPlayback } from "./interruptible-pcm-playback.js";
+import { SessionRenewal } from "./session-renewal.js";
 import type {
   GenerationPcmSink,
   TaggedPcmChunk,
@@ -105,12 +106,37 @@ export class DoubaoRealtimeClient implements RealtimeClient {
   private reconnectDeadlineTask: ScheduledTask | null = null;
   private removeForegroundListener: (() => void) | null = null;
   private terminalSocketError = false;
+  private readonly renewal: SessionRenewal;
+  private pendingUserTranscription = false;
+  private awaitingResponse = false;
+  private responseInProgress = false;
+  private plannedRenewal = false;
+  private renewalClosingSocket: WebSocket | null = null;
+  private reconnectGeneration = 0;
 
   constructor(
     private readonly legacyRemoteAudio: HTMLAudioElement,
     private readonly callbacks: RealtimeClientCallbacks = {},
     private readonly dependencies: DoubaoRealtimeClientDependencies = {},
-  ) {}
+  ) {
+    this.renewal = new SessionRenewal({
+      now: () => this.now(),
+      schedule: (callback, delayMs) => this.scheduleTask(callback, delayMs),
+      isSafe: () => this.isSafeToRenew(),
+      send: (frame) => {
+        if (!this.isSocketOpen()) throw new Error("实时连接尚未就绪。");
+        this.socket!.send(JSON.stringify(frame));
+      },
+      flushRecords: async () => {
+        await this.callbacks.onBeforeReconnect?.();
+      },
+      renew: () => {
+        void this.renewSession();
+      },
+      notice: (detail) =>
+        this.updateConnection(this.snapshot.connection, detail),
+    });
+  }
 
   async start(options: RealtimeClientOptions): Promise<void> {
     this.teardown();
@@ -182,7 +208,10 @@ export class DoubaoRealtimeClient implements RealtimeClient {
   }
 
   async close(): Promise<void> {
+    const lifecycle = this.lifecycle;
     this.manuallyClosing = true;
+    this.renewal.reset();
+    this.clearReconnectState();
     const socket = this.socket;
     if (socket?.readyState === SOCKET_OPEN && this.sessionConfigured) {
       try {
@@ -197,6 +226,7 @@ export class DoubaoRealtimeClient implements RealtimeClient {
         // The transport teardown below is the bounded fallback.
       }
     }
+    if (lifecycle !== this.lifecycle || !this.manuallyClosing) return;
     const inputMode = this.snapshot.inputMode;
     this.teardown();
     this.snapshot = {
@@ -235,6 +265,7 @@ export class DoubaoRealtimeClient implements RealtimeClient {
   }
 
   setMicrophoneMuted(muted: boolean): void {
+    this.renewal.activity();
     this.snapshot = { ...this.snapshot, microphoneMuted: muted };
     this.applyMicrophoneGate();
     this.emitSnapshot();
@@ -254,6 +285,7 @@ export class DoubaoRealtimeClient implements RealtimeClient {
       return;
     }
     const wasActive = this.pushToTalkActive;
+    this.renewal.activity();
     this.pushToTalkActive = active;
     this.applyMicrophoneGate();
     if (wasActive && !active && this.sessionConfigured) {
@@ -262,6 +294,7 @@ export class DoubaoRealtimeClient implements RealtimeClient {
   }
 
   interrupt(): void {
+    this.renewal.activity();
     const interruptedResponseId =
       this.responseAudio?.manualInterrupt(
         Boolean(this.activeResponseId) || this.snapshot.activity === "thinking",
@@ -304,11 +337,23 @@ export class DoubaoRealtimeClient implements RealtimeClient {
       if (!this.isCurrentSocket(socket, lifecycle)) return;
       this.updateConnection(
         this.reconnectStartedAt === null ? "connecting" : "reconnecting",
-        "服务端已连接，正在创建豆包实时会话",
+        this.plannedRenewal
+          ? "自动续接已连接，正在恢复豆包实时会话"
+          : "服务端已连接，正在创建豆包实时会话",
       );
     };
     socket.onmessage = (message) => {
       if (!this.isCurrentSocket(socket, lifecycle)) return;
+      if (this.renewalClosingSocket === socket || this.manuallyClosing) {
+        try {
+          if (JSON.parse(String(message.data)).type === "session.closed") {
+            socket.close(1000, "session closed");
+          }
+        } catch {
+          // Closing transport tails must not reactivate or mutate the call.
+        }
+        return;
+      }
       if (typeof message.data !== "string") {
         this.reportError("INVALID_REALTIME_FRAME", "收到非文本的实时控制帧。");
         return;
@@ -316,7 +361,11 @@ export class DoubaoRealtimeClient implements RealtimeClient {
       this.handleSocketMessage(message.data);
     };
     socket.onerror = () => {
-      if (this.isCurrentSocket(socket, lifecycle)) {
+      if (
+        this.isCurrentSocket(socket, lifecycle) &&
+        this.renewalClosingSocket !== socket &&
+        !this.manuallyClosing
+      ) {
         this.reportError(
           "REALTIME_NETWORK_ERROR",
           "实时语音连接发生网络错误，正在自动恢复。",
@@ -325,7 +374,7 @@ export class DoubaoRealtimeClient implements RealtimeClient {
     };
     socket.onclose = (event) => {
       if (!this.isCurrentSocket(socket, lifecycle)) return;
-      if (this.manuallyClosing) return;
+      if (this.manuallyClosing || this.renewalClosingSocket === socket) return;
       this.handleUnexpectedSocketFailure(
         socket,
         lifecycle,
@@ -345,6 +394,7 @@ export class DoubaoRealtimeClient implements RealtimeClient {
       );
       return;
     }
+    if (this.renewal.handleFrame(raw)) return;
     const relayFrame = readRelayControlFrame(raw);
     if (relayFrame) {
       this.handleRelayControlFrame(relayFrame);
@@ -382,6 +432,12 @@ export class DoubaoRealtimeClient implements RealtimeClient {
   private handleProviderEvent(event: DoubaoEvent): void {
     if (event.event_id && this.seenEventIds.has(event.event_id)) return;
     if (event.event_id) this.rememberEventId(event.event_id);
+    if (
+      event.type.startsWith("conversation.item.input_audio_transcription.") ||
+      event.type.startsWith("input_audio_buffer.") ||
+      event.type.startsWith("response.")
+    )
+      this.renewal.activity();
     this.callbacks.onProviderEvent?.(
       "server",
       summarizeAudioEventForDiagnostics(event),
@@ -392,6 +448,7 @@ export class DoubaoRealtimeClient implements RealtimeClient {
     }
 
     if (doubaoUserTranscriptionStartedEventSchema.safeParse(event).success) {
+      this.pendingUserTranscription = true;
       const interrupted = this.responseAudio?.currentResponseId;
       this.responseAudio?.speechStarted();
       this.activeResponseId = null;
@@ -406,6 +463,7 @@ export class DoubaoRealtimeClient implements RealtimeClient {
 
     const userDelta = doubaoUserTranscriptionDeltaEventSchema.safeParse(event);
     if (userDelta.success) {
+      this.pendingUserTranscription = true;
       this.userDraft = userDelta.data.delta
         ? `${this.userDraft}${userDelta.data.delta}`
         : (userDelta.data.text ?? this.userDraft);
@@ -419,6 +477,8 @@ export class DoubaoRealtimeClient implements RealtimeClient {
     const userCompleted =
       doubaoUserTranscriptionCompletedEventSchema.safeParse(event);
     if (userCompleted.success) {
+      this.pendingUserTranscription = false;
+      this.awaitingResponse = true;
       const text =
         userCompleted.data.transcript ??
         userCompleted.data.text ??
@@ -441,9 +501,25 @@ export class DoubaoRealtimeClient implements RealtimeClient {
       };
     }
 
+    if (event.type === "conversation.item.input_audio_transcription.failed") {
+      this.pendingUserTranscription = false;
+      this.userDraft = "";
+      this.snapshot = {
+        ...this.snapshot,
+        activity: "listening",
+        userCaption: "",
+      };
+    }
+    if (event.type === "input_audio_buffer.committed") {
+      this.awaitingResponse = true;
+    }
+
     const audioStarted = doubaoOutputAudioStartedEventSchema.safeParse(event);
-    if (audioStarted.success && audioStarted.data.response_id) {
-      this.beginResponse(audioStarted.data.response_id);
+    if (audioStarted.success) {
+      this.awaitingResponse = false;
+      this.responseInProgress = true;
+      if (audioStarted.data.response_id)
+        this.beginResponse(audioStarted.data.response_id);
     }
 
     const audioDelta = doubaoOutputAudioDeltaEventSchema.safeParse(event);
@@ -478,6 +554,8 @@ export class DoubaoRealtimeClient implements RealtimeClient {
 
     const textDelta = doubaoOutputTextDeltaEventSchema.safeParse(event);
     if (textDelta.success) {
+      this.awaitingResponse = false;
+      this.responseInProgress = true;
       this.assistantDraft += textDelta.data.delta;
       this.snapshot = {
         ...this.snapshot,
@@ -488,6 +566,8 @@ export class DoubaoRealtimeClient implements RealtimeClient {
 
     const textDone = doubaoOutputTextDoneEventSchema.safeParse(event);
     if (textDone.success && textDone.data.text) {
+      this.awaitingResponse = false;
+      this.responseInProgress = true;
       this.assistantDraft = textDone.data.text;
       this.snapshot = {
         ...this.snapshot,
@@ -496,12 +576,17 @@ export class DoubaoRealtimeClient implements RealtimeClient {
     }
 
     const audioDone = doubaoOutputAudioDoneEventSchema.safeParse(event);
-    if (audioDone.success) {
+    if (
+      audioDone.success &&
+      (!this.activeResponseId ||
+        this.activeResponseId === audioDone.data.response_id)
+    ) {
       this.responseAudio?.responseDone(audioDone.data.response_id, false);
       this.commitAssistant("completed", audioDone.data.response_id);
     }
 
     if (doubaoResponseCanceledEventSchema.safeParse(event).success) {
+      this.responseInProgress = false;
       if (this.activeResponseId) {
         this.responseAudio?.responseDone(
           this.activeResponseId,
@@ -512,11 +597,17 @@ export class DoubaoRealtimeClient implements RealtimeClient {
       }
     }
 
-    if (event.type === "response.done" && this.assistantDraft.trim()) {
-      this.commitAssistant(
-        "completed",
-        this.activeResponseId ?? event.event_id ?? "response.done",
-      );
+    if (event.type === "response.done") {
+      this.responseInProgress = false;
+      // The documented usage-only event has no reliable response identity.
+      // Never use it to clear a newer active response or a pending user turn.
+      if (
+        !this.pendingUserTranscription &&
+        !this.activeResponseId &&
+        !this.awaitingResponse
+      ) {
+        this.commitAssistant("completed", event.event_id ?? "response.done");
+      }
     }
 
     const providerError = doubaoErrorEventSchema.safeParse(event);
@@ -536,6 +627,8 @@ export class DoubaoRealtimeClient implements RealtimeClient {
   }
 
   private beginResponse(responseId: string): void {
+    this.awaitingResponse = false;
+    this.responseInProgress = true;
     if (this.activeResponseId === responseId) return;
     const admission = this.responseAudio?.beginResponse(responseId);
     if (admission?.shouldCancel) this.sendResponseCancel();
@@ -574,14 +667,17 @@ export class DoubaoRealtimeClient implements RealtimeClient {
     if (this.sessionConfigured) return;
     this.relayReady = true;
     this.sessionConfigured = true;
+    const planned = this.plannedRenewal;
     const resumed = this.completeReconnect();
     this.updateConnection(
       "active",
-      resumed
-        ? "连接已恢复，已接回确认过的对话"
-        : this.microphone?.microphoneLabel
-          ? `已连接，麦克风：${this.microphone.microphoneLabel}`
-          : "已连接，可以开始说话",
+      planned
+        ? "通话已自动续接，可以继续聊天"
+        : resumed
+          ? "连接已恢复，已接回确认过的对话"
+          : this.microphone?.microphoneLabel
+            ? `已连接，麦克风：${this.microphone.microphoneLabel}`
+            : "已连接，可以开始说话",
     );
     this.snapshot = { ...this.snapshot, activity: "listening" };
     this.applyMicrophoneGate();
@@ -589,6 +685,7 @@ export class DoubaoRealtimeClient implements RealtimeClient {
       this.initialGreetingRequested = true;
       const greeting = this.options.openingText?.trim();
       if (greeting) {
+        this.awaitingResponse = true;
         this.sendClientEvent(
           doubaoSpeechTextCommitEventSchema.parse({
             event_id: createEventId(),
@@ -602,12 +699,15 @@ export class DoubaoRealtimeClient implements RealtimeClient {
   }
 
   private sendMicrophonePacket(samples: Int16Array): void {
+    if (!this.renewal.allowMicrophonePacket(samples)) return;
     const socket = this.socket;
     if (
       !socket ||
       socket.readyState !== SOCKET_OPEN ||
       !this.relayReady ||
-      !this.sessionConfigured
+      !this.sessionConfigured ||
+      this.snapshot.connection !== "active" ||
+      this.manuallyClosing
     ) {
       return;
     }
@@ -640,6 +740,7 @@ export class DoubaoRealtimeClient implements RealtimeClient {
   }
 
   private sendInputCommit(): void {
+    this.awaitingResponse = true;
     try {
       this.sendClientEvent(
         doubaoInputAudioCommitEventSchema.parse({
@@ -697,20 +798,83 @@ export class DoubaoRealtimeClient implements RealtimeClient {
     this.beginReconnect(detail);
   }
 
+  private isSafeToRenew(): boolean {
+    return (
+      this.snapshot.connection === "active" &&
+      this.sessionConfigured &&
+      this.relayReady &&
+      !this.manuallyClosing &&
+      !this.renewalClosingSocket &&
+      !this.pushToTalkActive &&
+      !this.pendingUserTranscription &&
+      !this.awaitingResponse &&
+      !this.responseInProgress &&
+      !this.activeResponseId &&
+      !this.userDraft &&
+      !this.assistantDraft &&
+      this.snapshot.activity !== "user_speaking" &&
+      this.snapshot.activity !== "thinking" &&
+      this.playback?.hasPendingAudio === false &&
+      this.socket?.readyState === SOCKET_OPEN &&
+      this.socket.bufferedAmount === 0 &&
+      (typeof document === "undefined" || document.visibilityState !== "hidden")
+    );
+  }
+
+  private async renewSession(): Promise<void> {
+    const socket = this.socket;
+    if (!socket || !this.isSafeToRenew()) return;
+    const lifecycle = this.lifecycle;
+    this.plannedRenewal = true;
+    this.renewalClosingSocket = socket;
+    this.startReconnectWindow();
+    const generation = this.reconnectGeneration;
+    this.microphone?.setEnabled(false);
+    this.updateConnection("reconnecting", "正在自动续接，保留当前通话和声音");
+    try {
+      this.sendClientEvent(
+        doubaoSessionCloseEventSchema.parse({
+          event_id: createEventId(),
+          type: "session.close",
+        }),
+      );
+      await waitForSocketClose(socket, 1_500);
+    } catch {
+      // The old session is retired after this bounded graceful-close attempt.
+    }
+    if (
+      lifecycle !== this.lifecycle ||
+      this.manuallyClosing ||
+      generation !== this.reconnectGeneration ||
+      this.renewalClosingSocket !== socket ||
+      this.reconnectStartedAt === null
+    )
+      return;
+    this.renewalClosingSocket = null;
+    this.detachSocket(socket);
+    this.beginReconnect("正在自动续接，恢复已确认的对话", true);
+  }
+
+  private startReconnectWindow(): void {
+    if (this.reconnectStartedAt !== null) return;
+    this.reconnectStartedAt = this.now();
+    this.reconnectAttempt = 0;
+    this.reconnectGeneration += 1;
+    this.reconnectDeadlineTask?.cancel();
+    this.reconnectDeadlineTask = this.scheduleTask(() => {
+      this.pauseConnection(
+        this.plannedRenewal
+          ? "自动续接在 30 秒内未完成。你可以重试，或结束并保存已确认记录。"
+          : "连接在 30 秒内未恢复。你可以继续重试，或结束并保存已确认记录。",
+        "REALTIME_RECONNECT_TIMEOUT",
+      );
+    }, RECONNECT_WINDOW_MS);
+  }
+
   private beginReconnect(detail: string, immediately = false): void {
     if (!this.options || this.manuallyClosing) return;
     this.resetTransportForReconnect();
-    if (this.reconnectStartedAt === null) {
-      this.reconnectStartedAt = this.now();
-      this.reconnectAttempt = 0;
-      this.reconnectDeadlineTask?.cancel();
-      this.reconnectDeadlineTask = this.scheduleTask(() => {
-        this.pauseConnection(
-          "连接在 30 秒内未恢复。你可以继续重试，或结束并保存已确认记录。",
-          "REALTIME_RECONNECT_TIMEOUT",
-        );
-      }, RECONNECT_WINDOW_MS);
-    }
+    this.startReconnectWindow();
     this.snapshot = {
       ...this.snapshot,
       connection: "reconnecting",
@@ -766,44 +930,68 @@ export class DoubaoRealtimeClient implements RealtimeClient {
     }
     this.reconnectAttemptInFlight = true;
     const lifecycle = this.lifecycle;
+    const generation = this.reconnectGeneration;
     try {
       await this.microphone?.ensureAvailable();
       await this.callbacks.onBeforeReconnect?.();
-      if (lifecycle !== this.lifecycle || this.manuallyClosing) return;
+      if (
+        lifecycle !== this.lifecycle ||
+        this.manuallyClosing ||
+        generation !== this.reconnectGeneration ||
+        this.reconnectStartedAt === null
+      )
+        return;
       this.reconnectAttempt += 1;
       this.relayReady = false;
       this.sessionConfigured = false;
       this.updateConnection(
         "reconnecting",
-        `正在进行第 ${this.reconnectAttempt} 次恢复尝试`,
+        this.plannedRenewal
+          ? `正在进行第 ${this.reconnectAttempt} 次自动续接`
+          : `正在进行第 ${this.reconnectAttempt} 次恢复尝试`,
       );
       this.openSocket(lifecycle);
     } catch {
+      if (
+        lifecycle !== this.lifecycle ||
+        generation !== this.reconnectGeneration
+      )
+        return;
       this.updateConnection(
         "reconnecting",
         "已确认记录暂时无法同步，稍后继续恢复",
       );
     } finally {
-      this.reconnectAttemptInFlight = false;
-      if (!this.socket && this.reconnectStartedAt !== null) {
-        this.scheduleReconnectAttempt();
+      if (
+        lifecycle === this.lifecycle &&
+        generation === this.reconnectGeneration
+      ) {
+        this.reconnectAttemptInFlight = false;
+        if (!this.socket && this.reconnectStartedAt !== null) {
+          this.scheduleReconnectAttempt();
+        }
       }
     }
   }
 
   private resetTransportForReconnect(): void {
+    this.renewal.reset();
     this.microphone?.setEnabled(false);
     this.responseAudio?.reset();
     this.pushToTalkActive = false;
     this.userDraft = "";
     this.assistantDraft = "";
     this.activeResponseId = null;
+    this.pendingUserTranscription = false;
+    this.awaitingResponse = false;
+    this.responseInProgress = false;
     this.relayReady = false;
     this.sessionConfigured = false;
     this.socketBackpressureReported = false;
   }
 
   private pauseConnection(detail: string, code: string): void {
+    this.renewal.reset();
     this.clearReconnectState();
     if (this.socket) this.detachSocket(this.socket);
     this.microphone?.setEnabled(false);
@@ -834,11 +1022,14 @@ export class DoubaoRealtimeClient implements RealtimeClient {
   private completeReconnect(): boolean {
     const resumed = this.reconnectStartedAt !== null;
     this.clearReconnectState();
+    this.plannedRenewal = false;
     this.terminalSocketError = false;
     return resumed;
   }
 
   private clearReconnectState(): void {
+    this.reconnectGeneration += 1;
+    this.renewalClosingSocket = null;
     this.reconnectRetryTask?.cancel();
     this.reconnectRetryTask = null;
     this.reconnectDeadlineTask?.cancel();
@@ -924,6 +1115,7 @@ export class DoubaoRealtimeClient implements RealtimeClient {
   }
 
   private teardown(): void {
+    this.renewal.reset();
     this.lifecycle += 1;
     this.clearReconnectState();
     this.removeForegroundListener?.();
@@ -941,6 +1133,11 @@ export class DoubaoRealtimeClient implements RealtimeClient {
     this.userDraft = "";
     this.assistantDraft = "";
     this.activeResponseId = null;
+    this.pendingUserTranscription = false;
+    this.awaitingResponse = false;
+    this.responseInProgress = false;
+    this.plannedRenewal = false;
+    this.initialGreetingRequested = false;
     this.seenEventIds.clear();
     this.clearLegacyRemoteAudio();
   }
