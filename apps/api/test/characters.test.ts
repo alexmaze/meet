@@ -63,6 +63,52 @@ const config: AppConfig = {
 };
 
 describe("character routes", () => {
+  it("keeps favorites private, idempotent and available to children", async () => {
+    const repository = seededCharacters();
+    const app = await testApp(repository);
+    const characterId = BUILTIN_CHARACTER_PRESETS[0]!.id;
+    const url = `/api/characters/${characterId}/favorite`;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const result = await request(app, child, "PUT", url, { favorite: true });
+      expect(result.statusCode).toBe(200);
+      expect(result.json()).toEqual({ characterId, favorite: true });
+    }
+    const own = await request(app, child, "GET", "/api/characters/favorites");
+    expect(own.json()).toEqual({ characterIds: [characterId] });
+    expect(own.headers["cache-control"]).toContain("no-store");
+    expect(
+      (await request(app, admin, "GET", "/api/characters/favorites")).json(),
+    ).toEqual({ characterIds: [] });
+    expect(
+      (
+        await request(
+          app,
+          child,
+          "PUT",
+          `/api/characters/${privateCharacterId}/favorite`,
+          { favorite: true },
+        )
+      ).statusCode,
+    ).toBe(404);
+    expect(
+      (
+        await request(app, child, "PUT", url, {
+          favorite: true,
+          userId: adult.id,
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (await app.inject({ method: "GET", url: "/api/characters/favorites" }))
+        .statusCode,
+    ).toBe(401);
+    await request(app, child, "PUT", url, { favorite: false });
+    expect(
+      (await request(app, child, "GET", "/api/characters/favorites")).json(),
+    ).toEqual({ characterIds: [] });
+    await app.close();
+  });
+
   it("requires a signed-in account for character reads and writes", async () => {
     const repository = seededCharacters();
     const app = await testApp(repository);
@@ -666,6 +712,28 @@ describe("character routes", () => {
 });
 
 class MemoryCharacterRepository implements CharacterRepository {
+  readonly favorites = new Map<string, Set<string>>();
+
+  async listFavoriteIds(actorUserId: string) {
+    return [...(this.favorites.get(actorUserId) ?? [])].filter((id) => {
+      const record = this.records.get(id);
+      return record && this.visible(record, actorUserId);
+    });
+  }
+
+  async setFavorite(
+    actorUserId: string,
+    characterId: string,
+    favorite: boolean,
+  ) {
+    if (!(await this.findVisible(actorUserId, characterId))) return false;
+    const ids = this.favorites.get(actorUserId) ?? new Set<string>();
+    if (favorite) ids.add(characterId);
+    else ids.delete(characterId);
+    this.favorites.set(actorUserId, ids);
+    return true;
+  }
+
   readonly records = new Map<string, CharacterAggregate>();
   readonly events: Array<Record<string, unknown>> = [];
   createCalls = 0;
@@ -1134,7 +1202,7 @@ function tokenFor(actor: AuthUserRecord) {
 async function request(
   app: Awaited<ReturnType<typeof buildApp>>,
   actor: AuthUserRecord,
-  method: "GET" | "POST" | "PATCH" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   url: string,
   payload?: unknown,
   contentType = "application/json",

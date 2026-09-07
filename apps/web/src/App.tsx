@@ -2,12 +2,20 @@ import type {
   Character,
   CharacterRuntimeResponse,
   CharacterSummary,
+  ConversationContinuityStatus,
+  ConversationMode,
   CreateCharacterRequest,
   RealtimeModelProfile,
   UserAccount,
   VoiceProfile,
 } from "@meet/protocol";
-import { useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { registerSW } from "virtual:pwa-register";
 
 import type { AuthenticatedAppSession } from "./auth/AuthGate.js";
@@ -20,6 +28,8 @@ import {
   getCharacterCatalog,
   getCharacterRuntime,
   listCharacters,
+  listFavoriteCharacterIds,
+  setCharacterFavorite,
   restoreCharacter,
   updateCharacter,
   updateCharacterVisibility,
@@ -41,6 +51,15 @@ import {
 import HistoryPage from "./history/HistoryPage.js";
 import MemoryPage from "./memory/MemoryPage.js";
 import CharacterCall from "./realtime/CharacterCall.js";
+import { useConversationOverview } from "./history/use-conversation-overview.js";
+import {
+  finishSavedConversation,
+  getPendingEndOperation,
+  getStatus,
+} from "./history/continuity-api.js";
+import { ConversationApiError } from "./history/conversation-api.js";
+import type { MemoryLocation } from "./history/ConversationReview.js";
+import "./continuity.css";
 
 type ProductSection = "characters" | "history" | "memory" | "profile";
 
@@ -77,6 +96,39 @@ export default function App(session: AuthenticatedAppSession) {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [runtime, setRuntime] = useState<CharacterRuntimeResponse | null>(null);
+  const callActiveRef = useRef(false);
+  callActiveRef.current = runtime !== null;
+  const invalidateOutsideCall = useCallback(() => {
+    if (!callActiveRef.current) session.invalidateSession();
+  }, [session.invalidateSession]);
+  const [callOptions, setCallOptions] = useState<{
+    initialMode: ConversationMode;
+    resumeConversationId?: string;
+  }>({ initialMode: "normal" });
+  const [favoriteIds, setFavoriteIds] = useState<string[]>([]);
+  const [favoriteBusyId, setFavoriteBusyId] = useState<string | null>(null);
+  const [overviewReload, setOverviewReload] = useState(0);
+  const [historyConversationId, setHistoryConversationId] = useState<
+    string | undefined
+  >();
+  const [memoryLocation, setMemoryLocation] = useState<
+    MemoryLocation | undefined
+  >();
+  const [callOverlay, setCallOverlay] = useState<
+    | { type: "history"; id: string }
+    | { type: "memory"; location: MemoryLocation }
+    | null
+  >(null);
+  const {
+    overview,
+    loading: overviewLoading,
+    error: overviewError,
+  } = useConversationOverview({
+    userId: user.id,
+    reload: overviewReload,
+    enabled: !runtime && section === "characters" && detail.status === "idle",
+    onUnauthorized: session.invalidateSession,
+  });
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [offlineReady, setOfflineReady] = useState(false);
   const [updateServiceWorker, setUpdateServiceWorker] = useState<
@@ -84,6 +136,23 @@ export default function App(session: AuthenticatedAppSession) {
   >(null);
 
   useEffect(() => {
+    if (runtime) return;
+    const controller = new AbortController();
+    void listFavoriteCharacterIds(controller.signal)
+      .then(setFavoriteIds)
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        if (handleUnauthorized(error, invalidateOutsideCall)) return;
+        setNotice({
+          kind: "error",
+          message: "收藏暂时没有同步，请稍后刷新角色列表。",
+        });
+      });
+    return () => controller.abort();
+  }, [listReload, invalidateOutsideCall, runtime]);
+
+  useEffect(() => {
+    if (runtime) return;
     const controller = new AbortController();
     setCharactersLoading(true);
     setCharactersError("");
@@ -94,22 +163,22 @@ export default function App(session: AuthenticatedAppSession) {
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
-        if (handleUnauthorized(error, session.invalidateSession)) return;
+        if (handleUnauthorized(error, invalidateOutsideCall)) return;
         setCharactersError(presentCharacterError(error, "list"));
         setCharactersLoading(false);
       });
     return () => controller.abort();
-  }, [listReload, session.invalidateSession]);
+  }, [listReload, invalidateOutsideCall, runtime]);
 
   useEffect(() => {
-    if (detail.status !== "loading") return;
+    if (runtime || detail.status !== "loading") return;
     const controller = new AbortController();
     const characterId = detail.characterId;
     void getCharacter(characterId, controller.signal)
       .then((character) => setDetail({ status: "ready", character }))
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
-        if (handleUnauthorized(error, session.invalidateSession)) return;
+        if (handleUnauthorized(error, invalidateOutsideCall)) return;
         setDetail({
           status: "error",
           characterId,
@@ -117,10 +186,10 @@ export default function App(session: AuthenticatedAppSession) {
         });
       });
     return () => controller.abort();
-  }, [detail, session.invalidateSession]);
+  }, [detail, invalidateOutsideCall, runtime]);
 
   useEffect(() => {
-    if (editor.status !== "catalog") return;
+    if (runtime || editor.status !== "catalog") return;
     const controller = new AbortController();
     const character = editor.character;
     setEditorError("");
@@ -150,12 +219,12 @@ export default function App(session: AuthenticatedAppSession) {
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
-        if (handleUnauthorized(error, session.invalidateSession)) return;
+        if (handleUnauthorized(error, invalidateOutsideCall)) return;
         setEditorError(presentCharacterError(error, "detail"));
         setEditor({ status: "closed" });
       });
     return () => controller.abort();
-  }, [editor, session.invalidateSession]);
+  }, [editor, invalidateOutsideCall, runtime]);
 
   useEffect(() => {
     const updater = registerSW({
@@ -190,20 +259,164 @@ export default function App(session: AuthenticatedAppSession) {
     setEditor({ status: "catalog", character });
   };
 
-  const beginCall = async (characterId: string) => {
+  const beginCall = async (
+    characterId: string,
+    initialMode: ConversationMode = "normal",
+  ) => {
     if (busyAction) return;
     setBusyAction(characterId);
     setNotice(null);
     try {
       const value = await getCharacterRuntime(characterId);
+      setCallOptions({ initialMode });
       setRuntime(value);
     } catch (error) {
-      if (handleUnauthorized(error, session.invalidateSession)) return;
+      if (handleUnauthorized(error, invalidateOutsideCall)) return;
       const message = presentCharacterError(error, "runtime");
       setNotice({ kind: "error", message });
     } finally {
       setBusyAction(null);
     }
+  };
+
+  const resumeCall = async (status: ConversationContinuityStatus) => {
+    if (
+      busyAction ||
+      !status.isOwner ||
+      !status.canResume ||
+      status.endRequestId
+    )
+      return;
+    setBusyAction(status.conversation.id);
+    setNotice(null);
+    try {
+      const character = await getCharacter(status.conversation.character.id);
+      setCallOptions({
+        initialMode: status.conversation.mode,
+        resumeConversationId: status.conversation.id,
+      });
+      // The server's prepare result replaces these display defaults before any connection.
+      setRuntime({
+        character,
+        realtime: {
+          provider: character.realtimeModelProfile.provider,
+          realtimeModelProfileId: character.realtimeModelProfile.id,
+          model: status.conversation.model,
+          voice: status.conversation.voice,
+          instructions: "恢复原通话",
+          firstSpeaker: "user",
+          openingLine: null,
+        },
+      });
+    } catch (cause) {
+      if (handleUnauthorized(cause, invalidateOutsideCall)) return;
+      setNotice({
+        kind: "error",
+        message: "这次通话暂时无法恢复。你仍可以查看记录或结束已保存的内容。",
+      });
+      setOverviewReload((current) => current + 1);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const toggleFavorite = async (characterId: string) => {
+    if (favoriteBusyId) return;
+    setFavoriteBusyId(characterId);
+    try {
+      const favorite = await setCharacterFavorite(
+        characterId,
+        !favoriteIds.includes(characterId),
+      );
+      setFavoriteIds((current) =>
+        favorite
+          ? [...new Set([...current, characterId])]
+          : current.filter((id) => id !== characterId),
+      );
+    } catch (cause) {
+      if (handleUnauthorized(cause, invalidateOutsideCall)) return;
+      setNotice({ kind: "error", message: "收藏没有保存成功，请重试。" });
+    } finally {
+      setFavoriteBusyId(null);
+    }
+  };
+
+  const finishInterruptedCall = async (
+    status: ConversationContinuityStatus,
+  ): Promise<void> => {
+    if (busyAction || !status.isOwner || !status.canFinish) return;
+    setBusyAction(status.conversation.id);
+    setNotice(null);
+    try {
+      const marker = getPendingEndOperation(status.conversation.id, user.id);
+      const missing = Math.max(
+        0,
+        (marker?.lastSequence ??
+          status.endTargetSequence ??
+          status.conversation.lastSequence) - status.conversation.lastSequence,
+      );
+      if (
+        missing &&
+        !window.confirm(
+          `原页面还有 ${missing} 条文字未同步，当前设备无法恢复这些文字。只保留服务器已收到的内容并结束吗？`,
+        )
+      )
+        return;
+      await finishSavedConversation(status, user.id, {
+        discardMissing: missing > 0,
+      });
+      setNotice({
+        kind: "success",
+        message: "通话已结束，服务器收到的文字记录已保存。",
+      });
+    } catch (cause) {
+      if (cause instanceof ConversationApiError && cause.status === 401) {
+        session.invalidateSession();
+        return;
+      }
+      const marker = getPendingEndOperation(status.conversation.id, user.id);
+      try {
+        const checked = await getStatus(
+          status.conversation.id,
+          marker?.requestId,
+        );
+        if (checked.connectionState === "completed") {
+          setNotice({
+            kind: "success",
+            message: "已经确认通话结束，文字记录已保存。",
+          });
+          return;
+        }
+      } catch {
+        /* Keep the original request marker for the next status check. */
+      }
+      setNotice({
+        kind: "error",
+        message: "暂时无法确认结束状态，请刷新后重试；已有文字记录不会删除。",
+      });
+    } finally {
+      setBusyAction(null);
+      setOverviewReload((current) => current + 1);
+    }
+  };
+
+  const viewHistory = (conversationId: string) => {
+    if (runtime) {
+      setCallOverlay({ type: "history", id: conversationId });
+      return;
+    }
+    setHistoryConversationId(conversationId);
+    setSection("history");
+    setNotice(null);
+  };
+  const viewMemories = (location: MemoryLocation) => {
+    if (runtime) {
+      setCallOverlay({ type: "memory", location });
+      return;
+    }
+    setMemoryLocation(location);
+    setSection("memory");
+    setNotice(null);
   };
 
   const saveCharacter = async (request: CreateCharacterRequest) => {
@@ -228,7 +441,7 @@ export default function App(session: AuthenticatedAppSession) {
       });
       setListReload((current) => current + 1);
     } catch (error) {
-      if (handleUnauthorized(error, session.invalidateSession)) return;
+      if (handleUnauthorized(error, invalidateOutsideCall)) return;
       setEditorError(presentCharacterError(error, "save"));
     } finally {
       setSaving(false);
@@ -304,7 +517,7 @@ export default function App(session: AuthenticatedAppSession) {
       }
       setListReload((current) => current + 1);
     } catch (error) {
-      if (handleUnauthorized(error, session.invalidateSession)) return;
+      if (handleUnauthorized(error, invalidateOutsideCall)) return;
       setNotice({
         kind: "error",
         message: presentCharacterError(error, action),
@@ -326,7 +539,7 @@ export default function App(session: AuthenticatedAppSession) {
         message: `已导出 ${exported.transferPackage.payload.conversations.length} 次通话和 ${exported.transferPackage.payload.memories.length} 条长期记忆。`,
       });
     } catch (error) {
-      if (handleUnauthorized(error, session.invalidateSession)) return;
+      if (handleUnauthorized(error, invalidateOutsideCall)) return;
       setNotice({
         kind: "error",
         message:
@@ -377,7 +590,7 @@ export default function App(session: AuthenticatedAppSession) {
           : `迁移完成：新增 ${result.importedConversations} 次通话和 ${result.importedMemories} 条记忆，跳过 ${result.skippedConversations + result.skippedMemories} 条重复数据。`,
       });
     } catch (error) {
-      if (handleUnauthorized(error, session.invalidateSession)) return;
+      if (handleUnauthorized(error, invalidateOutsideCall)) return;
       setNotice({
         kind: "error",
         message:
@@ -396,17 +609,59 @@ export default function App(session: AuthenticatedAppSession) {
     setEditor({ status: "closed" });
     setNotice(null);
     setEditorError("");
+    if (next === "history") setHistoryConversationId(undefined);
+    if (next === "memory") setMemoryLocation(undefined);
+    if (next === "characters") setOverviewReload((current) => current + 1);
   };
 
   if (runtime) {
     return (
       <>
-        <CharacterCall
-          runtime={runtime}
-          user={user}
-          onExit={() => setRuntime(null)}
-          onUnauthorized={session.invalidateSession}
-        />
+        <div
+          inert={callOverlay ? true : undefined}
+          aria-hidden={callOverlay ? true : undefined}
+        >
+          <CharacterCall
+            runtime={runtime}
+            user={user}
+            initialMode={callOptions.initialMode}
+            resumeConversationId={callOptions.resumeConversationId}
+            onViewHistory={viewHistory}
+            onViewMemories={viewMemories}
+            onExit={() => {
+              setRuntime(null);
+              setCallOverlay(null);
+              setSection("characters");
+              setDetail({ status: "idle" });
+              setOverviewReload((current) => current + 1);
+            }}
+            onUnauthorized={session.invalidateSession}
+          />
+        </div>
+        {callOverlay && (
+          <ContinuityOverlay onClose={() => setCallOverlay(null)}>
+            {callOverlay.type === "history" ? (
+              <HistoryPage
+                currentUserId={user.id}
+                initialConversationId={callOverlay.id}
+                readOnly
+                onCall={() => undefined}
+                onResume={() => undefined}
+                onFinish={() => Promise.resolve()}
+                onUnauthorized={() => setCallOverlay(null)}
+              />
+            ) : (
+              <MemoryPage
+                key={`${callOverlay.location.characterId}:${callOverlay.location.sourceConversationId}:${callOverlay.location.status}`}
+                initialCharacterId={callOverlay.location.characterId}
+                sourceConversationId={callOverlay.location.sourceConversationId}
+                initialStatus={callOverlay.location.status}
+                onViewHistory={viewHistory}
+                onUnauthorized={() => setCallOverlay(null)}
+              />
+            )}
+          </ContinuityOverlay>
+        )}
         <PwaNotice
           inCall
           updateAvailable={updateAvailable}
@@ -475,6 +730,19 @@ export default function App(session: AuthenticatedAppSession) {
                     onOpen={openCharacter}
                     onCall={(id) => void beginCall(id)}
                     onCreate={beginCreate}
+                    pending={overview.pending}
+                    recent={overview.recent}
+                    overviewLoading={overviewLoading}
+                    overviewError={overviewError}
+                    favoriteIds={favoriteIds}
+                    favoriteBusyId={favoriteBusyId}
+                    onToggleFavorite={(id) => void toggleFavorite(id)}
+                    onResume={(status) => void resumeCall(status)}
+                    onFinish={(status) => void finishInterruptedCall(status)}
+                    onViewHistory={viewHistory}
+                    onRefreshOverview={() =>
+                      setOverviewReload((current) => current + 1)
+                    }
                   />
                 </>
               )}
@@ -517,18 +785,51 @@ export default function App(session: AuthenticatedAppSession) {
                   onImportRelationship={(file) =>
                     void importRelationship(detail.character, file)
                   }
+                  favorite={favoriteIds.includes(detail.character.id)}
+                  favoritePending={favoriteBusyId === detail.character.id}
+                  onToggleFavorite={() =>
+                    void toggleFavorite(detail.character.id)
+                  }
+                  onViewHistory={viewHistory}
+                  onViewMemories={viewMemories}
+                  onUnauthorized={session.invalidateSession}
                 />
               )}
             </>
           )}
           {section === "history" && (
-            <HistoryPage
-              onCall={(characterId) => void beginCall(characterId)}
-              onUnauthorized={session.invalidateSession}
-            />
+            <>
+              {notice && (
+                <div
+                  className={`product-notice ${notice.kind}`}
+                  role={notice.kind === "error" ? "alert" : "status"}
+                >
+                  {notice.message}
+                </div>
+              )}
+              <HistoryPage
+                key={historyConversationId ?? "history-list"}
+                currentUserId={user.id}
+                initialConversationId={historyConversationId}
+                onCall={(characterId, mode) =>
+                  void beginCall(characterId, mode)
+                }
+                onResume={(status) => void resumeCall(status)}
+                onFinish={finishInterruptedCall}
+                onViewMemories={viewMemories}
+                onUnauthorized={session.invalidateSession}
+              />
+            </>
           )}
           {section === "memory" && (
-            <MemoryPage onUnauthorized={session.invalidateSession} />
+            <MemoryPage
+              key={`${memoryLocation?.characterId}:${memoryLocation?.sourceConversationId}:${memoryLocation?.status}`}
+              initialCharacterId={memoryLocation?.characterId}
+              sourceConversationId={memoryLocation?.sourceConversationId}
+              initialStatus={memoryLocation?.status}
+              onViewHistory={viewHistory}
+              onUnauthorized={session.invalidateSession}
+            />
           )}
           {section === "profile" && <ProfilePage session={session} />}
         </div>
@@ -543,6 +844,37 @@ export default function App(session: AuthenticatedAppSession) {
         onUpdate={() => void updateServiceWorker?.(true)}
       />
     </div>
+  );
+}
+
+function ContinuityOverlay({
+  children,
+  onClose,
+}: {
+  children: ReactNode;
+  onClose: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    dialog.current?.showModal();
+  }, []);
+  return (
+    <dialog
+      className="continuity-overlay"
+      ref={dialog}
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+    >
+      <div className="continuity-overlay-bar">
+        <span>查看已保存内容</span>
+        <button type="button" onClick={onClose}>
+          返回通话收尾
+        </button>
+      </div>
+      {children}
+    </dialog>
   );
 }
 

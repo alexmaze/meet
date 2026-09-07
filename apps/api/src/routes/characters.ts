@@ -13,6 +13,7 @@ import {
   qwenRealtimeModelSchema,
   CURRENT_CONTEXT_POLICY_VERSION,
   updateCharacterRequestSchema,
+  setCharacterFavoriteRequestSchema,
   updateCharacterVisibilityRequestSchema,
   voiceProfileIdParamsSchema,
   type CharacterRuntimeResponse,
@@ -21,6 +22,8 @@ import {
   type UserAccount,
 } from "@meet/protocol";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { randomUUID } from "node:crypto";
+import { maintainConversationConnection } from "../conversation-connection-lease.js";
 
 import {
   clearSessionCookie,
@@ -104,6 +107,15 @@ export async function registerCharacterRoutes(
         role: "user" | "assistant";
         text: string;
       }>;
+      connection: {
+        actor: UserAccount;
+        conversationId: string;
+        writer: { clientId: string; epoch: number };
+        connectionId: string;
+        attachedAt: number;
+        heartbeatIntervalMs: number;
+        leaseDurationMs: number;
+      };
     }
   >();
   app.get("/api/characters", async (request, reply) => {
@@ -123,6 +135,35 @@ export async function registerCharacterRoutes(
     if (!actor) return;
     try {
       return await characterService.catalog();
+    } catch (error) {
+      return sendCharacterError(reply, error);
+    }
+  });
+
+  app.get("/api/characters/favorites", async (request, reply) => {
+    noStore(reply);
+    const actor = await authenticateActor(request, reply, config, auth);
+    if (!actor) return;
+    try {
+      return { characterIds: await characterService.favorites(actor) };
+    } catch (error) {
+      return sendCharacterError(reply, error);
+    }
+  });
+
+  app.put("/api/characters/:characterId/favorite", async (request, reply) => {
+    noStore(reply);
+    const actor = await authenticateActor(request, reply, config, auth);
+    if (!actor) return;
+    const params = characterIdParamsSchema.safeParse(request.params);
+    const body = setCharacterFavoriteRequestSchema.safeParse(request.body);
+    if (!params.success || !body.success) return invalidCharacterRequest(reply);
+    try {
+      return await characterService.setFavorite(
+        actor,
+        params.data.characterId,
+        body.data.favorite,
+      );
     } catch (error) {
       return sendCharacterError(reply, error);
     }
@@ -517,6 +558,7 @@ export async function registerCharacterRoutes(
         const params = characterIdParamsSchema.safeParse(request.params);
         if (!params.success) return invalidCharacterRequest(reply);
 
+        let releaseConnection: (() => Promise<void>) | undefined;
         try {
           // 角色可见性检查必须早于传输参数检查，避免枚举私人角色。
           await characterService.assertVisible(actor, params.data.characterId);
@@ -526,6 +568,40 @@ export async function registerCharacterRoutes(
           if (!query.success) {
             return invalidCharacterRequest(reply);
           }
+          const rateLimit = realtimeHandshakeRateLimiter.consume(
+            `${actor.id}:${request.ip}`,
+          );
+          if (!rateLimit.allowed) {
+            reply.header("Retry-After", String(rateLimit.retryAfterSeconds));
+            return reply.code(429).send({
+              code: "RATE_LIMITED",
+              message: "实时连接尝试过于频繁，请稍后再试。",
+            });
+          }
+          const conversationId = query.data.conversationId;
+          const writer = {
+            clientId: query.data.clientId,
+            epoch: query.data.epoch,
+          };
+          const connectionId = randomUUID();
+          const attachedAt = Date.now();
+          const lease = await conversationService.attachConnection(
+            actor,
+            conversationId,
+            writer,
+            connectionId,
+          );
+          releaseConnection = () =>
+            conversationService.detachConnection(
+              actor,
+              conversationId,
+              writer,
+              connectionId,
+            );
+          const releaseOnDisconnect = releaseConnection;
+          request.raw.socket?.once("close", () => {
+            void releaseOnDisconnect().catch(() => {});
+          });
           let continuity = await conversationService.realtimeContext(
             actor,
             query.data.conversationId,
@@ -606,18 +682,16 @@ export async function registerCharacterRoutes(
                 })
               : undefined;
 
-          const rateLimit = realtimeHandshakeRateLimiter.consume(
-            `${actor.id}:${request.ip}`,
-          );
-          if (!rateLimit.allowed) {
-            reply.header("Retry-After", String(rateLimit.retryAfterSeconds));
-            return reply.code(429).send({
-              code: "RATE_LIMITED",
-              message: "实时连接尝试过于频繁，请稍后再试。",
-            });
-          }
-
           websocketContexts.set(request, {
+            connection: {
+              actor,
+              conversationId,
+              writer,
+              connectionId,
+              attachedAt,
+              heartbeatIntervalMs: lease.heartbeatIntervalMs,
+              leaseDurationMs: lease.leaseDurationMs,
+            },
             provider,
             adapter: configured.connection.adapter,
             endpoint: configured.connection.endpoint,
@@ -634,6 +708,7 @@ export async function registerCharacterRoutes(
             "Realtime context assembled",
           );
         } catch (error) {
+          await releaseConnection?.().catch(() => {});
           return sendCharacterError(reply, error);
         }
       },
@@ -651,8 +726,36 @@ export async function registerCharacterRoutes(
         relationshipContext: context.relationshipContext,
         history: context.history,
       };
+      const connection = context.connection;
+      const lifecycle = maintainConversationConnection({
+        socket,
+        ...connection,
+        heartbeat: async (options) => {
+          const authenticated = await auth.authenticate(
+            getSessionToken(request, config),
+          );
+          if (authenticated.id !== connection.actor.id)
+            throw new Error("Session account changed");
+          await conversationService.heartbeatConnection(
+            authenticated,
+            connection.conversationId,
+            connection.writer,
+            connection.connectionId,
+            options,
+          );
+        },
+        detach: () =>
+          conversationService.detachConnection(
+            connection.actor,
+            connection.conversationId,
+            connection.writer,
+            connection.connectionId,
+          ),
+      });
+      if (!lifecycle.isCurrent()) return;
       if (context.provider === "doubao") {
         relayDoubaoWebSocket({
+          lifecycle,
           client: socket,
           config: {
             enabled: true,
@@ -667,6 +770,7 @@ export async function registerCharacterRoutes(
         return;
       }
       relayQwenWebSocket({
+        lifecycle,
         client: socket,
         config: {
           enabled: true,

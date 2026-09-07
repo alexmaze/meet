@@ -24,16 +24,27 @@ type MemoryFilter = "all" | "suggested" | "active";
 
 export default function MemoryPage({
   onUnauthorized,
+  initialCharacterId,
+  sourceConversationId: initialSourceConversationId,
+  initialStatus = "all",
+  onViewHistory,
 }: {
   onUnauthorized: () => void;
+  initialCharacterId?: string;
+  sourceConversationId?: string;
+  initialStatus?: MemoryFilter;
+  onViewHistory?: (conversationId: string) => void;
 }) {
   const [memories, setMemories] = useState<CharacterMemory[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [reload, setReload] = useState(0);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [filter, setFilter] = useState<MemoryFilter>("all");
-  const [characterId, setCharacterId] = useState("all");
+  const [filter, setFilter] = useState<MemoryFilter>(initialStatus);
+  const [characterId, setCharacterId] = useState(initialCharacterId ?? "all");
+  const [sourceConversationId, setSourceConversationId] = useState(
+    initialSourceConversationId,
+  );
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -84,7 +95,10 @@ export default function MemoryPage({
     const controller = new AbortController();
     setLoading(true);
     setError("");
-    void listMemories(controller.signal)
+    void listMemories(controller.signal, {
+      characterId: characterId === "all" ? undefined : characterId,
+      sourceConversationId,
+    })
       .then((items) => {
         setMemories(items);
         setLoading(false);
@@ -99,7 +113,7 @@ export default function MemoryPage({
         setLoading(false);
       });
     return () => controller.abort();
-  }, [onUnauthorized, reload]);
+  }, [onUnauthorized, reload, characterId, sourceConversationId]);
 
   const perform = async (
     memory: CharacterMemory,
@@ -168,6 +182,34 @@ export default function MemoryPage({
           </button>
         </div>
       </header>
+
+      {(sourceConversationId || characterId !== "all") && (
+        <section className="continuity-filter-note" aria-label="记忆范围">
+          <span>
+            {sourceConversationId
+              ? "仅显示这次通话产生的记忆"
+              : "仅显示当前角色的记忆"}
+          </span>
+          {sourceConversationId && onViewHistory && (
+            <button
+              type="button"
+              onClick={() => onViewHistory(sourceConversationId)}
+            >
+              查看来源通话
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              setSourceConversationId(undefined);
+              setCharacterId("all");
+              setFilter("all");
+            }}
+          >
+            查看全部记忆
+          </button>
+        </section>
+      )}
 
       {diagnosticsOpen && (
         <Mem0Diagnostics
@@ -250,8 +292,16 @@ export default function MemoryPage({
       ) : memories.length === 0 ? (
         <div className="memory-empty">
           <span aria-hidden="true">◎</span>
-          <strong>还没有长期记忆</strong>
-          <p>完成普通通话后，明确事实会自动保存，存疑内容会先请你确认。</p>
+          <strong>
+            {sourceConversationId
+              ? "这次通话还没有可见的长期记忆"
+              : "还没有长期记忆"}
+          </strong>
+          <p>
+            {sourceConversationId
+              ? "刚结束的普通通话可能仍在整理，可以稍后刷新。临时对话不新增长期记忆。"
+              : "完成普通通话后，明确事实会自动保存，存疑内容会先请你确认。"}
+          </p>
         </div>
       ) : groups.length === 0 ? (
         <div className="memory-empty memory-filter-empty">
@@ -275,6 +325,7 @@ export default function MemoryPage({
                 setEditingContent("");
               }}
               onAction={(memory, input) => void perform(memory, input)}
+              onViewHistory={onViewHistory}
             />
           ))}
         </div>
@@ -572,6 +623,7 @@ function MemoryGroup({
   onBeginEdit,
   onCancelEdit,
   onAction,
+  onViewHistory,
 }: {
   character: CharacterMemory["character"];
   memories: CharacterMemory[];
@@ -582,6 +634,7 @@ function MemoryGroup({
   onBeginEdit: (memory: CharacterMemory) => void;
   onCancelEdit: () => void;
   onAction: (memory: CharacterMemory, input: ReviewMemoryRequest) => void;
+  onViewHistory?: (conversationId: string) => void;
 }) {
   return (
     <section
@@ -633,6 +686,16 @@ function MemoryGroup({
                 <details className="memory-source">
                   <summary>查看这条记忆的来源</summary>
                   <blockquote>“{memory.sourceExcerpt}”</blockquote>
+                  {memory.sourceConversationId && onViewHistory && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onViewHistory(memory.sourceConversationId!)
+                      }
+                    >
+                      查看来源通话
+                    </button>
+                  )}
                 </details>
               </div>
               <div className="memory-actions">

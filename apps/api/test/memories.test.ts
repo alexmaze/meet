@@ -41,6 +41,29 @@ const config: AppConfig = {
 };
 
 describe("memory routes", () => {
+  it("applies role and source filters within the authenticated account", async () => {
+    const fake = repository();
+    const app = await testApp(fake);
+    const characterId = "3438a5aa-cecc-4cac-ab76-9e46572c2287";
+    const sourceConversationId = "d008c711-47dc-4835-b01f-ac9c03a44418";
+    const result = await injectAs(app, adult, {
+      method: "GET",
+      url: `/api/memories?characterId=${characterId}&sourceConversationId=${sourceConversationId}&status=suggested&limit=20`,
+    });
+    expect(result.statusCode).toBe(200);
+    expect(fake.list).toHaveBeenCalledWith(adult.id, "suggested", 20, {
+      characterId,
+      sourceConversationId,
+    });
+    const forbidden = await injectAs(app, adult, {
+      method: "GET",
+      url: `/api/memories?userId=${otherAdultId}&sourceConversationId=${sourceConversationId}`,
+    });
+    expect(forbidden.statusCode).toBe(404);
+    expect(fake.list).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+
   it("requires authentication", async () => {
     const app = await testApp(repository());
     const response = await app.inject({ method: "GET", url: "/api/memories" });
@@ -59,7 +82,10 @@ describe("memory routes", () => {
     expect(listed.json()).toMatchObject({
       memories: [{ id: memoryId, status: "suggested" }],
     });
-    expect(fake.list).toHaveBeenCalledWith(adult.id, "suggested", 100);
+    expect(fake.list).toHaveBeenCalledWith(adult.id, "suggested", 100, {
+      characterId: undefined,
+      sourceConversationId: undefined,
+    });
 
     const accepted = await injectAs(app, adult, {
       method: "PATCH",
@@ -98,7 +124,7 @@ describe("memory routes", () => {
         })
       ).statusCode,
     ).toBe(404);
-    expect(fake.list).not.toHaveBeenCalledWith(otherAdultId, undefined, 100);
+    expect(fake.list).toHaveBeenCalledTimes(1);
     expect(
       (
         await injectAs(app, admin, {

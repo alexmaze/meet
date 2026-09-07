@@ -17,6 +17,14 @@ export type ConversationMode = z.infer<typeof conversationModeSchema>;
 export const conversationStatusSchema = z.enum(["active", "completed"]);
 export type ConversationStatus = z.infer<typeof conversationStatusSchema>;
 
+export const conversationWriterSchema = z
+  .object({
+    clientId: z.uuid(),
+    epoch: z.number().int().positive(),
+  })
+  .strict();
+export type ConversationWriter = z.infer<typeof conversationWriterSchema>;
+
 export const conversationMessageRoleSchema = z.enum(["user", "assistant"]);
 export const conversationMessageStatusSchema = z.enum([
   "completed",
@@ -110,11 +118,16 @@ export const conversationIdParamsSchema = z
   .strict();
 
 export const conversationRealtimeQuerySchema = z
-  .object({ conversationId: z.uuid() })
+  .object({
+    conversationId: z.uuid(),
+    clientId: z.uuid(),
+    epoch: z.coerce.number().int().positive(),
+  })
   .strict();
 
 export const appendConversationMessagesRequestSchema = z
   .object({
+    writer: conversationWriterSchema,
     messages: z
       .array(
         z
@@ -148,8 +161,16 @@ export const appendConversationMessagesResponseSchema = z.object({
 });
 
 export const completeConversationRequestSchema = z
-  .object({ lastSequence: z.number().int().nonnegative() })
+  .object({
+    writer: conversationWriterSchema,
+    requestId: z.uuid(),
+    lastSequence: z.number().int().nonnegative(),
+    discardMissing: z.boolean().default(false),
+  })
   .strict();
+export type CompleteConversationRequest = z.infer<
+  typeof completeConversationRequestSchema
+>;
 
 export const conversationDetailResponseSchema = z.object({
   conversation: conversationSummarySchema,

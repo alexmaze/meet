@@ -28,6 +28,18 @@ const memory = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("memory API client", () => {
+  it("按角色和来源会话在服务端筛选，避免先截断全部记忆再本地查找", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ memories: [memory] }));
+    vi.stubGlobal("fetch", fetchMock);
+    await listMemories(undefined, {
+      characterId: memory.character.id,
+      sourceConversationId: memory.sourceConversationId,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/memories?characterId=${memory.character.id}&sourceConversationId=${memory.sourceConversationId}`,
+      expect.any(Object),
+    );
+  });
   it("validates the private memory list response", async () => {
     vi.stubGlobal(
       "fetch",

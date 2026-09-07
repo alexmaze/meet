@@ -1,3 +1,4 @@
+import { conversationLifecycleRepositoryFixture } from "./conversation-lifecycle-fixture.js";
 import { once } from "node:events";
 
 import {
@@ -28,7 +29,7 @@ const learningPlanId = "8f1b7f3d-0e1f-4a8d-9967-712f18b2d21b";
 const child = account("4d1c2e31-ad0e-4fa9-9ae8-ae3497069118", "child");
 const adult = account("4d1c2e31-ad0e-4fa9-9ae8-ae3497069117", "adult");
 const character = aggregateFromPreset();
-const websocketUrl = `/api/characters/${character.character.id}/realtime/websocket?conversationId=${conversationId}`;
+const websocketUrl = `/api/characters/${character.character.id}/realtime/websocket?conversationId=${conversationId}&clientId=83e63c3c-7d2c-410b-9052-9f74c6195041&epoch=1`;
 const authHeaders = { cookie: `meet_session=${sessionToken}` };
 
 const config: AppConfig = {
@@ -634,6 +635,12 @@ const characterRepository = characterRepositoryFor(character);
 
 function characterRepositoryFor(aggregate: CharacterAggregate) {
   return {
+    async listFavoriteIds() {
+      return [];
+    },
+    async setFavorite() {
+      return true;
+    },
     async listVisible() {
       return [aggregate];
     },
@@ -668,6 +675,7 @@ function characterRepositoryFor(aggregate: CharacterAggregate) {
 }
 
 const conversationRepository = {
+  ...conversationLifecycleRepositoryFixture(),
   create: vi.fn(async () => {
     throw new Error("unused");
   }),

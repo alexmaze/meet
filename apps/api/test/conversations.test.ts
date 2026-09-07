@@ -1,3 +1,18 @@
+import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
+import {
+  createDatabaseClient,
+  characters as characterTable,
+  userAccounts as accountTable,
+  conversations as conversationTable,
+} from "@meet/database";
+import {
+  conversationContinuityStatusSchema,
+  prepareConversationResponseSchema,
+  completeConversationResponseSchema,
+} from "@meet/protocol";
+import { PostgresConversationRepository } from "../src/conversations/postgres-repository.js";
+import { conversationLifecycleRepositoryFixture } from "./conversation-lifecycle-fixture.js";
 import type {
   AuthUserRecord,
   LoginSessionRecord,
@@ -9,7 +24,10 @@ import type { AppConfig } from "../src/config.js";
 import type { ConversationRepository } from "../src/conversations/repository.js";
 import { ConversationService } from "../src/conversations/service.js";
 import type { ConversationServiceError } from "../src/conversations/service.js";
-import type { ConversationAggregate } from "@meet/database";
+import type {
+  ConversationAggregate,
+  ConversationControlRecord,
+} from "@meet/database";
 import type { SemanticMemoryStore } from "@meet/memory";
 import type { ConversationRuntimeSnapshot } from "@meet/protocol";
 import { describe, expect, it, vi } from "vitest";
@@ -51,6 +69,9 @@ const config: AppConfig = {
     requestTimeoutMs: 15_000,
   },
 };
+
+const writer = { clientId: "83e63c3c-7d2c-410b-9052-9f74c6195041", epoch: 1 };
+const endRequestId = "1580d5cb-ef45-491e-af4d-8f9a9c0b8403";
 
 describe("conversation routes", () => {
   it("requires authentication for history reads and writes", async () => {
@@ -100,7 +121,7 @@ describe("conversation routes", () => {
     const appended = await injectAs(app, adult, {
       method: "POST",
       url: `/api/conversations/${conversationId}/messages`,
-      payload: { messages: [message] },
+      payload: { writer, messages: [message] },
     });
     expect(appended.statusCode).toBe(200);
     expect(appended.json()).toEqual({ acknowledgedSequence: 1 });
@@ -115,18 +136,24 @@ describe("conversation routes", () => {
         },
       ],
       expect.any(Date),
+      writer,
     );
 
     const completed = await injectAs(app, adult, {
       method: "POST",
       url: `/api/conversations/${conversationId}/complete`,
-      payload: { lastSequence: 1 },
+      payload: { writer, requestId: endRequestId, lastSequence: 1 },
     });
     expect(completed.statusCode).toBe(200);
     expect(fake.complete).toHaveBeenCalledWith(
       adult.id,
       conversationId,
-      1,
+      {
+        writer,
+        requestId: endRequestId,
+        lastSequence: 1,
+        discardMissing: false,
+      },
       expect.any(Date),
     );
     await app.close();
@@ -165,6 +192,7 @@ describe("conversation routes", () => {
       .mockResolvedValueOnce({ kind: "sequence_conflict" });
     const app = await testApp(fake);
     const payload = {
+      writer,
       messages: [
         {
           id: "9bb6162e-e85c-4e5d-a3ff-000000000001",
@@ -511,9 +539,433 @@ describe("conversation realtime continuity", () => {
   });
 });
 
+describe("conversation continuity routes", () => {
+  it("requires authenticated access and rejects the old unfenced write bodies", async () => {
+    const fake = repository();
+    const app = await testApp(fake);
+    for (const url of [
+      "/api/conversations/overview",
+      `/api/conversations/${conversationId}/status`,
+    ])
+      expect((await app.inject({ method: "GET", url })).statusCode).toBe(401);
+    for (const [path, payload] of [
+      [
+        "messages",
+        {
+          messages: [
+            {
+              id: endRequestId,
+              sequence: 1,
+              role: "user",
+              text: "你好",
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        },
+      ],
+      ["complete", { lastSequence: 0 }],
+      ["heartbeat", {}],
+    ]) {
+      expect(
+        (
+          await injectAs(app, adult, {
+            method: "POST",
+            url: `/api/conversations/${conversationId}/${path}`,
+            payload,
+          })
+        ).statusCode,
+      ).toBe(400);
+    }
+    expect(fake.appendMessages).not.toHaveBeenCalled();
+    expect(fake.complete).not.toHaveBeenCalled();
+    expect(fake.heartbeatWriter).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("shows authoritative end intent and keeps guardian status read-only", async () => {
+    const fake = repository();
+    const aggregate = conversationAggregate();
+    aggregate.conversation.userId = childId;
+    vi.mocked(fake.readLifecycle).mockResolvedValue({
+      aggregate,
+      control: controlFixture(),
+      operation: null,
+      characterAvailable: true,
+      summary: { status: "waiting_configuration", content: null },
+      memory: { status: "failed", activeCount: 1, suggestedCount: 2 },
+    });
+    vi.mocked(fake.findReadable).mockResolvedValue({
+      ...aggregate,
+      messages: [],
+    });
+    const app = await testApp(fake);
+    const response = await injectAs(app, admin, {
+      method: "GET",
+      url: `/api/conversations/${conversationId}/status?clientId=${writer.clientId}`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      isOwner: false,
+      canResume: false,
+      canFinish: false,
+      writerClientId: null,
+      endRequestId: null,
+      summary: { state: "not_configured" },
+      memory: { state: "failed", activeCount: 1, suggestedCount: 2 },
+    });
+    vi.mocked(fake.findReadable).mockResolvedValue(null);
+    expect(
+      (
+        await injectAs(app, adult, {
+          method: "GET",
+          url: `/api/conversations/${conversationId}/status`,
+        })
+      ).statusCode,
+    ).toBe(404);
+    await app.close();
+  });
+
+  it("exposes only the current owner's overview and filters a racing deleted record", async () => {
+    const fake = repository();
+    vi.mocked(fake.overview).mockResolvedValue({
+      pending: [conversationId, endRequestId],
+      recent: [],
+    });
+    vi.mocked(fake.readLifecycle).mockImplementation(async (id) =>
+      id === conversationId
+        ? {
+            aggregate: conversationAggregate(),
+            control: null,
+            operation: null,
+            characterAvailable: true,
+            summary: { status: null, content: null },
+            memory: { status: null, activeCount: 0, suggestedCount: 0 },
+          }
+        : null,
+    );
+    const app = await testApp(fake);
+    const response = await injectAs(app, adult, {
+      method: "GET",
+      url: `/api/conversations/overview?characterId=${characterId}&clientId=${writer.clientId}`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().pendingCount).toBe(1);
+    expect(fake.overview).toHaveBeenCalledWith(adult.id, characterId);
+    expect(
+      (
+        await injectAs(app, adult, {
+          method: "GET",
+          url: `/api/conversations/overview?userId=${childId}`,
+        })
+      ).statusCode,
+    ).toBe(400);
+    await app.close();
+  });
+
+  it("recovers with the stored model metadata and never exposes the prompt or reopens the greeting", async () => {
+    const fake = repository();
+    vi.mocked(fake.prepare).mockResolvedValue({
+      kind: "prepared",
+      writer,
+      hasConnected: true,
+      runtimeSnapshot,
+    });
+    const app = await testApp(fake);
+    const response = await injectAs(app, adult, {
+      method: "POST",
+      url: `/api/conversations/${conversationId}/prepare`,
+      payload: {
+        clientId: writer.clientId,
+        requestId: endRequestId,
+        intent: "connect",
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      writer,
+      launch: "resume",
+      realtime: {
+        model: runtimeSnapshot.model,
+        voice: runtimeSnapshot.voice,
+        firstSpeaker: "user",
+        openingLine: null,
+      },
+    });
+    expect(response.body).not.toContain(runtimeSnapshot.instructions);
+    expect(response.json().realtime).not.toHaveProperty("instructions");
+    await app.close();
+  });
+
+  it("does not promise background work for an empty failed startup that was closed", async () => {
+    const fake = repository();
+    const aggregate = conversationAggregate();
+    aggregate.conversation.status = "completed";
+    aggregate.conversation.endedAt = new Date();
+    vi.mocked(fake.readLifecycle).mockResolvedValue({
+      aggregate,
+      control: null,
+      operation: null,
+      characterAvailable: true,
+      summary: { status: null, content: null },
+      memory: { status: null, activeCount: 0, suggestedCount: 0 },
+    });
+    const app = await testApp(fake);
+    const response = await injectAs(app, adult, {
+      method: "GET",
+      url: `/api/conversations/${conversationId}/status`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      connectionState: "completed",
+      summary: { state: "not_applicable" },
+      memory: { state: "not_applicable" },
+    });
+    await app.close();
+  });
+
+  it("returns explicit conflicts for occupied, stale and missing-message operations", async () => {
+    const fake = repository();
+    vi.mocked(fake.prepare)
+      .mockResolvedValueOnce({ kind: "in_use" })
+      .mockResolvedValueOnce({ kind: "writer_stale" });
+    vi.mocked(fake.complete).mockResolvedValue({ kind: "messages_missing" });
+    const app = await testApp(fake);
+    for (const code of ["CONVERSATION_IN_USE", "CONVERSATION_WRITER_STALE"]) {
+      const response = await injectAs(app, adult, {
+        method: "POST",
+        url: `/api/conversations/${conversationId}/prepare`,
+        payload: {
+          clientId: writer.clientId,
+          requestId: endRequestId,
+          intent: "finish",
+        },
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json().code).toBe(code);
+    }
+    const result = await injectAs(app, adult, {
+      method: "POST",
+      url: `/api/conversations/${conversationId}/complete`,
+      payload: { writer, requestId: endRequestId, lastSequence: 2 },
+    });
+    expect(result.statusCode).toBe(409);
+    expect(result.json().code).toBe("CONVERSATION_MESSAGES_MISSING");
+    await app.close();
+  });
+
+  it("queries the original logical end request while distinguishing text saving from analysis", async () => {
+    const fake = repository();
+    const aggregate = conversationAggregate();
+    aggregate.conversation.status = "completed";
+    aggregate.conversation.endedAt = new Date();
+    const control = {
+      ...controlFixture(),
+      endRequestId,
+      endTargetSequence: 2,
+      finalizedAt: new Date(),
+    };
+    vi.mocked(fake.readLifecycle).mockResolvedValue({
+      aggregate,
+      control,
+      operation: {
+        conversationId,
+        requestId: endRequestId,
+        kind: "finish",
+        clientId: writer.clientId,
+        writerEpoch: 1,
+        intent: "finish",
+        targetSequence: 2,
+        completedAt: new Date(),
+        createdAt: new Date(),
+      },
+      characterAvailable: true,
+      summary: { status: "queued", content: null },
+      memory: { status: "completed", activeCount: 0, suggestedCount: 0 },
+    });
+    const app = await testApp(fake);
+    const response = await injectAs(app, adult, {
+      method: "GET",
+      url: `/api/conversations/${conversationId}/status?requestId=${endRequestId}`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      connectionState: "completed",
+      endRequestId,
+      endTargetSequence: 2,
+      canResume: false,
+      summary: { state: "processing" },
+      memory: { state: "completed", activeCount: 0 },
+    });
+    expect(fake.readLifecycle).toHaveBeenCalledWith(
+      conversationId,
+      endRequestId,
+    );
+    await app.close();
+  });
+});
+
+it.skipIf(!process.env.DATABASE_CONTINUITY_TEST_URL)(
+  "runs the public lifecycle contract against isolated PostgreSQL without a model",
+  async () => {
+    const testUrl = new URL(process.env.DATABASE_CONTINUITY_TEST_URL!);
+    if (
+      !["127.0.0.1", "localhost", "[::1]"].includes(testUrl.hostname) ||
+      !testUrl.pathname.endsWith("_test")
+    )
+      throw new Error("Only an explicit local *_test database is allowed.");
+    const dbClient = createDatabaseClient({
+      connectionString: testUrl.toString(),
+    });
+    const actor = { ...adult, id: randomUUID() };
+    const localCharacterId = randomUUID();
+    const localConversationId = randomUUID();
+    let app: Awaited<ReturnType<typeof buildApp>> | undefined;
+    try {
+      await dbClient.db.insert(accountTable).values({
+        id: actor.id,
+        username: `test-${actor.id}`,
+        usernameCanonical: `test-${actor.id}`,
+        displayName: "隔离接口验收",
+        accountType: "adult",
+        guardianHistoryAccess: null,
+      });
+      const [preset] = await dbClient.db.select().from(characterTable).limit(1);
+      if (!preset) throw new Error("Migrate the isolated database first.");
+      await dbClient.db.insert(characterTable).values({
+        ...preset,
+        id: localCharacterId,
+        systemKey: null,
+        systemVersion: null,
+        ownerUserId: actor.id,
+        visibility: "family",
+      });
+      const auth = authRepository();
+      auth.findUserBySessionTokenHash = async (tokenHash) =>
+        tokenHash === hashSessionToken(adult.username) ? actor : null;
+      app = await buildApp({
+        config,
+        authRepository: auth,
+        conversationRepository: new PostgresConversationRepository(dbClient.db),
+        logger: false,
+      });
+      const created = await injectAs(app, adult, {
+        method: "POST",
+        url: "/api/conversations",
+        payload: {
+          id: localConversationId,
+          characterId: localCharacterId,
+          mode: "normal",
+        },
+      });
+      expect(created.statusCode).toBe(201);
+      const prepared = await injectAs(app, adult, {
+        method: "POST",
+        url: `/api/conversations/${localConversationId}/prepare`,
+        payload: {
+          clientId: writer.clientId,
+          requestId: randomUUID(),
+          intent: "connect",
+        },
+      });
+      expect(prepared.statusCode).toBe(200);
+      const launch = prepareConversationResponseSchema.parse(prepared.json());
+      const heartbeat = await injectAs(app, adult, {
+        method: "POST",
+        url: `/api/conversations/${localConversationId}/heartbeat`,
+        payload: { writer: launch.writer },
+      });
+      expect(heartbeat.statusCode).toBe(200);
+      expect(
+        conversationContinuityStatusSchema.parse(heartbeat.json()).writerEpoch,
+      ).toBe(launch.writer.epoch);
+      const appended = await injectAs(app, adult, {
+        method: "POST",
+        url: `/api/conversations/${localConversationId}/messages`,
+        payload: {
+          writer: launch.writer,
+          messages: [
+            {
+              id: randomUUID(),
+              sequence: 1,
+              role: "user",
+              text: "隔离验收已确认内容",
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        },
+      });
+      expect(appended.statusCode).toBe(200);
+      const requestId = randomUUID();
+      const body = { writer: launch.writer, requestId, lastSequence: 1 };
+      const completed = await injectAs(app, adult, {
+        method: "POST",
+        url: `/api/conversations/${localConversationId}/complete`,
+        payload: body,
+      });
+      expect(completed.statusCode).toBe(200);
+      expect(
+        completeConversationResponseSchema.parse(completed.json()).status
+          .connectionState,
+      ).toBe("completed");
+      const repeated = await injectAs(app, adult, {
+        method: "POST",
+        url: `/api/conversations/${localConversationId}/complete`,
+        payload: body,
+      });
+      expect(repeated.statusCode).toBe(200);
+      const queried = await injectAs(app, adult, {
+        method: "GET",
+        url: `/api/conversations/${localConversationId}/status?requestId=${requestId}`,
+      });
+      expect(queried.statusCode).toBe(200);
+      expect(
+        conversationContinuityStatusSchema.parse(queried.json()),
+      ).toMatchObject({
+        endRequestId: requestId,
+        endTargetSequence: 1,
+        canResume: false,
+        connectionState: "completed",
+      });
+    } finally {
+      await app?.close();
+      await dbClient.db
+        .delete(conversationTable)
+        .where(eq(conversationTable.id, localConversationId));
+      await dbClient.db
+        .delete(characterTable)
+        .where(eq(characterTable.id, localCharacterId));
+      await dbClient.db
+        .delete(accountTable)
+        .where(eq(accountTable.id, actor.id));
+      await dbClient.close();
+    }
+  },
+);
+
+function controlFixture(): ConversationControlRecord {
+  return {
+    conversationId,
+    writerClientId: writer.clientId,
+    writerEpoch: writer.epoch,
+    leaseExpiresAt: new Date(0),
+    connectionId: null,
+    connectionExpiresAt: null,
+    connectionStartedAt: null,
+    lastHeartbeatAt: null,
+    hasConnected: true,
+    lastActivityAt: new Date("2026-08-10T05:00:00.000Z"),
+    lastSavedAt: new Date("2026-08-10T05:00:01.000Z"),
+    connectedDurationMs: 10_000,
+    finalizedAt: null,
+    endRequestId: null,
+    endTargetSequence: null,
+  };
+}
+
 function repository(): ConversationRepository {
   const aggregate = conversationAggregate();
   return {
+    ...conversationLifecycleRepositoryFixture(aggregate),
     create: vi.fn(async (_actor, input) => ({
       kind: "created" as const,
       conversation: {

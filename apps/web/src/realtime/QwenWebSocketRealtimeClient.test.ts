@@ -1329,3 +1329,34 @@ async function settleAsyncWork(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
 }
+
+describe("cold call recovery", () => {
+  it("carries the writer epoch, waits for activation, and does not repeat the opening", async () => {
+    const harness = createHarness();
+    const writer = {
+      clientId: "f819d072-2f86-4584-9701-04037a9c46c3",
+      epoch: 7,
+    };
+    await harness.client.start({
+      characterId: "character-one",
+      conversationId: "9172f06d-c71a-47b3-94fe-35e1204b5b55",
+      writer,
+      voice: "longanqian",
+      instructions: "原角色设定",
+      inputMode: "hands_free",
+      assistantStarts: true,
+      resumed: true,
+      openingText: "不要重复的开场",
+    });
+    expect(harness.microphones[0]?.enabled).toBe(false);
+    const url = new URL(harness.socketUrls[0]!);
+    expect(url.searchParams.get("clientId")).toBe(writer.clientId);
+    expect(url.searchParams.get("epoch")).toBe("7");
+    activateSocket(harness.sockets[0]);
+    expect(sentTypes(harness.sockets[0])).not.toContain("response.create");
+    expect(harness.snapshots.at(-1)?.detail).toBe("已接上，可以继续说");
+    const close = harness.client.close();
+    expect(harness.microphones[0]?.stopped).toBe(true);
+    await close;
+  });
+});

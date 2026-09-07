@@ -7,7 +7,34 @@ import {
   parseCharacterRuntime,
   previewVoice,
   uploadCharacterAvatar,
+  listFavoriteCharacterIds,
+  setCharacterFavorite,
 } from "./character-api.js";
+
+describe("personal character favorites", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("reads and writes favorites through authenticated APIs without changing role visibility", async () => {
+    const characterId = "00000000-0000-4000-8000-000000000001";
+    const fetchMock = vi.fn(async (_url, init) =>
+      Response.json(
+        init?.method === "PUT"
+          ? { characterId, favorite: true }
+          : { characterIds: [characterId] },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await listFavoriteCharacterIds()).toEqual([characterId]);
+    expect(await setCharacterFavorite(characterId, true)).toBe(true);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      `/api/characters/${characterId}/favorite`,
+      expect.objectContaining({
+        method: "PUT",
+        credentials: "same-origin",
+        body: JSON.stringify({ favorite: true }),
+      }),
+    );
+  });
+});
 
 const ids = {
   character: "00000000-0000-4000-8000-000000000001",

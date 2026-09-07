@@ -28,6 +28,8 @@ export type InputMode = "hands_free" | "push_to_talk";
 export type RealtimeClientOptions = {
   characterId: string;
   conversationId: string;
+  writer?: { clientId: string; epoch: number };
+  resumed?: boolean;
   voice: string;
   instructions: string;
   inputMode: InputMode;
@@ -213,7 +215,11 @@ export class QwenRealtimeClient {
       }
 
       const response = await fetch(
-        getCharacterRealtimeSessionUrl(options.characterId),
+        getCharacterRealtimeSessionUrl(
+          options.characterId,
+          options.conversationId,
+          options.writer,
+        ),
         {
           method: "POST",
           headers: {
@@ -607,7 +613,11 @@ export class QwenRealtimeClient {
           : "已连接，可以开始说话",
       );
 
-      if (this.options?.assistantStarts && !this.initialResponseRequested) {
+      if (
+        this.options?.assistantStarts &&
+        !this.options.resumed &&
+        !this.initialResponseRequested
+      ) {
         this.initialResponseRequested = true;
         this.sendClientEvent(
           qwenUserTextItemCreateEventSchema.parse({
@@ -1111,8 +1121,19 @@ export class QwenRealtimeClient {
   }
 }
 
-export function getCharacterRealtimeSessionUrl(characterId: string): string {
-  return `/api/characters/${encodeURIComponent(characterId)}/realtime/sessions`;
+export function getCharacterRealtimeSessionUrl(
+  characterId: string,
+  conversationId?: string,
+  writer?: { clientId: string; epoch: number },
+): string {
+  const path = `/api/characters/${encodeURIComponent(characterId)}/realtime/sessions`;
+  if (!conversationId) return path;
+  const query = new URLSearchParams({ conversationId });
+  if (writer) {
+    query.set("clientId", writer.clientId);
+    query.set("epoch", String(writer.epoch));
+  }
+  return `${path}?${query}`;
 }
 
 class ClientError extends Error {

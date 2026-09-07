@@ -532,3 +532,46 @@ function sentEvents(socket: FakeSocket): Record<string, unknown>[] {
     (payload) => JSON.parse(payload) as Record<string, unknown>,
   );
 }
+
+describe("call continuity boundaries", () => {
+  it("passes the writer and suppresses the greeting on a cold recovery", async () => {
+    const harness = createHarness();
+    const writer = {
+      clientId: "f819d072-2f86-4584-9701-04037a9c46c3",
+      epoch: 4,
+    };
+    await harness.client.start({
+      characterId: "character-one",
+      conversationId: "9172f06d-c71a-47b3-94fe-35e1204b5b55",
+      writer,
+      voice: "zh_female_vv_jupiter_bigtts",
+      instructions: "保持原设定",
+      inputMode: "hands_free",
+      assistantStarts: true,
+      resumed: true,
+      openingText: "不要重播",
+    });
+    expect(harness.microphones[0]?.enabled).toBe(false);
+    activateReplacement(harness.socket);
+    expect(new URL(harness.socketUrls[0]!).searchParams.get("epoch")).toBe("4");
+    expect(
+      sentEvents(harness.socket).some(
+        (event) => event.type === "speech_text_buffer.commit",
+      ),
+    ).toBe(false);
+    expect(harness.snapshots.at(-1)?.detail).toBe("已接上，可以继续说");
+  });
+  it("stops recording and physical playback before waiting for close acknowledgement", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness();
+    await startHarness(harness);
+    const microphoneStop = vi.spyOn(harness.microphones[0]!, "stop");
+    const playbackStop = vi.spyOn(harness.playback, "stop");
+    const closing = harness.client.close();
+    expect(harness.microphones[0]?.enabled).toBe(false);
+    expect(microphoneStop).toHaveBeenCalled();
+    expect(playbackStop).toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_500);
+    await closing;
+  });
+});

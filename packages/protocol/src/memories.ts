@@ -29,6 +29,8 @@ export const memoryListQuerySchema = z
   .object({
     userId: z.uuid().optional(),
     status: z.enum(["active", "suggested"]).optional(),
+    characterId: z.uuid().optional(),
+    sourceConversationId: z.uuid().optional(),
     limit: z.coerce.number().int().min(1).max(200).default(100),
   })
   .strict();

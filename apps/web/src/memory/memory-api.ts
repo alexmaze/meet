@@ -22,12 +22,20 @@ export class MemoryApiError extends Error {
 
 export async function listMemories(
   signal?: AbortSignal,
+  filter: { characterId?: string; sourceConversationId?: string } = {},
 ): Promise<CharacterMemory[]> {
-  const response = await fetch("/api/memories", {
-    credentials: "include",
-    headers: { Accept: "application/json" },
-    signal,
-  });
+  const query = new URLSearchParams();
+  if (filter.characterId) query.set("characterId", filter.characterId);
+  if (filter.sourceConversationId)
+    query.set("sourceConversationId", filter.sourceConversationId);
+  const response = await fetch(
+    `/api/memories${query.size ? `?${query}` : ""}`,
+    {
+      credentials: "include",
+      headers: { Accept: "application/json" },
+      signal,
+    },
+  );
   const body = await readBody(response);
   if (!response.ok) throw apiError(response, body);
   return memoryListResponseSchema.parse(body).memories;

@@ -2,6 +2,9 @@ import type {
   AppendConversationMessagesRequest,
   ConversationMode,
   ConversationRuntimeSnapshot,
+  ConversationWriter,
+  PrepareConversationRequest,
+  CompleteConversationRequest,
 } from "@meet/protocol";
 import type {
   AppendConversationMessagesResult,
@@ -10,6 +13,11 @@ import type {
   ConversationDetailAggregate,
   ConversationRealtimeContext,
   CreateConversationResult,
+  ConversationLifecycleAggregate,
+  prepareConversation,
+  heartbeatConversationWriter,
+  attachConversationConnection,
+  heartbeatConversationConnection,
 } from "@meet/database";
 
 export interface ConversationRepository {
@@ -41,12 +49,55 @@ export interface ConversationRepository {
     conversationId: string,
     messages: AppendConversationMessagesRequest["messages"],
     updatedAt: Date,
+    writer: ConversationWriter,
   ): Promise<AppendConversationMessagesResult>;
   complete(
     actorUserId: string,
     conversationId: string,
-    lastSequence: number,
+    input: CompleteConversationRequest,
     endedAt: Date,
   ): Promise<CompleteConversationResult>;
+  prepare(
+    actorUserId: string,
+    conversationId: string,
+    input: PrepareConversationRequest,
+    now: Date,
+  ): ReturnType<typeof prepareConversation>;
+  readLifecycle(
+    conversationId: string,
+    requestId?: string,
+  ): Promise<ConversationLifecycleAggregate | null>;
+  overview(
+    actorUserId: string,
+    characterId?: string,
+  ): Promise<{ pending: string[]; recent: string[] }>;
+  heartbeatWriter(
+    actorUserId: string,
+    conversationId: string,
+    writer: ConversationWriter,
+    now: Date,
+  ): ReturnType<typeof heartbeatConversationWriter>;
+  attachConnection(
+    actorUserId: string,
+    conversationId: string,
+    writer: ConversationWriter,
+    connectionId: string,
+    now: Date,
+  ): ReturnType<typeof attachConversationConnection>;
+  heartbeatConnection(
+    actorUserId: string,
+    conversationId: string,
+    writer: ConversationWriter,
+    connectionId: string,
+    now: Date,
+    options?: { active?: boolean; activity?: boolean },
+  ): ReturnType<typeof heartbeatConversationConnection>;
+  detachConnection(
+    actorUserId: string,
+    conversationId: string,
+    writer: ConversationWriter,
+    connectionId: string,
+    now: Date,
+  ): Promise<void>;
   delete(actorUserId: string, conversationId: string): Promise<boolean>;
 }

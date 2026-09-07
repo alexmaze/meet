@@ -4,6 +4,7 @@ import {
   appendConversationMessages,
   createConversation,
   listConversations,
+  requestJson,
 } from "./conversation-api.js";
 
 const conversation = {
@@ -65,6 +66,7 @@ describe("conversation API client", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
     const acknowledged = await appendConversationMessages(conversation.id, {
+      writer: { clientId: "f819d072-2f86-4584-9701-04037a9c46c3", epoch: 3 },
       messages: [
         {
           id: "9bb6162e-e85c-4e5d-a3ff-000000000007",
@@ -99,4 +101,30 @@ describe("conversation API client", () => {
       code: "INVALID_CONVERSATION_RESPONSE",
     });
   });
+});
+
+it("bounds a slow response body as well as the initial connection", async () => {
+  vi.useFakeTimers();
+  try {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => ({
+        status: 200,
+        ok: true,
+        json: () =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () =>
+              reject(new DOMException("aborted", "AbortError")),
+            );
+          }),
+      })),
+    );
+    const outcome = expect(
+      requestJson("/api/conversations"),
+    ).rejects.toMatchObject({ code: "CONVERSATION_REQUEST_FAILED" });
+    await vi.advanceTimersByTimeAsync(12_000);
+    await outcome;
+  } finally {
+    vi.useRealTimers();
+  }
 });

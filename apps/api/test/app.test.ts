@@ -1,3 +1,4 @@
+import { conversationLifecycleRepositoryFixture } from "./conversation-lifecycle-fixture.js";
 import { describe, expect, it, vi } from "vitest";
 import { once } from "node:events";
 import WebSocket, { WebSocketServer } from "ws";
@@ -74,6 +75,12 @@ const authHeaders = { cookie: `meet_session=${sessionToken}` };
 const testConversationId = "9172f06d-c71a-47b3-94fe-35e1204b5b55";
 const testCharacter = aggregateFromPreset();
 const characterRepository = {
+  async listFavoriteIds() {
+    return [];
+  },
+  async setFavorite() {
+    return true;
+  },
   async listVisible() {
     return [testCharacter];
   },
@@ -106,6 +113,7 @@ const characterRepository = {
   },
 } satisfies CharacterRepository;
 const conversationRepository = {
+  ...conversationLifecycleRepositoryFixture(),
   create: vi.fn(async () => {
     throw new Error("unused");
   }),
@@ -126,7 +134,7 @@ const conversationRepository = {
   delete: vi.fn(async () => false),
 } satisfies ConversationRepository;
 const characterSessionUrl = `/api/characters/${testCharacter.character.id}/realtime/sessions`;
-const characterWebSocketUrl = `/api/characters/${testCharacter.character.id}/realtime/websocket?conversationId=${testConversationId}`;
+const characterWebSocketUrl = `/api/characters/${testCharacter.character.id}/realtime/websocket?conversationId=${testConversationId}&clientId=83e63c3c-7d2c-410b-9052-9f74c6195041&epoch=1`;
 const voicePreviewUrl = `/api/characters/voices/${testCharacter.voiceProfile.id}/preview`;
 
 describe("Meet API", () => {

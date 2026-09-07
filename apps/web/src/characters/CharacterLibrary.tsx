@@ -1,5 +1,15 @@
-import type { CharacterSummary, UserAccount } from "@meet/protocol";
-import type { CSSProperties } from "react";
+import type {
+  CharacterSummary,
+  ConversationContinuityStatus,
+  UserAccount,
+} from "@meet/protocol";
+import { useState, type CSSProperties } from "react";
+
+import {
+  conversationActions,
+  conversationStateLabel,
+  formatConversationDate,
+} from "../history/continuity-presentation.js";
 
 import { canCreateCharacter } from "./character-logic.js";
 
@@ -13,6 +23,17 @@ type CharacterLibraryProps = {
   onOpen: (characterId: string) => void;
   onCall: (characterId: string) => void;
   onCreate: () => void;
+  pending: ConversationContinuityStatus[];
+  recent: ConversationContinuityStatus[];
+  overviewLoading: boolean;
+  overviewError: string;
+  favoriteIds: string[];
+  favoriteBusyId: string | null;
+  onToggleFavorite: (characterId: string) => void;
+  onResume: (status: ConversationContinuityStatus) => void;
+  onFinish: (status: ConversationContinuityStatus) => void;
+  onViewHistory: (conversationId: string) => void;
+  onRefreshOverview: () => void;
 };
 
 export default function CharacterLibrary({
@@ -25,7 +46,52 @@ export default function CharacterLibrary({
   onOpen,
   onCall,
   onCreate,
+  pending,
+  recent,
+  overviewLoading,
+  overviewError,
+  favoriteIds,
+  favoriteBusyId,
+  onToggleFavorite,
+  onResume,
+  onFinish,
+  onViewHistory,
+  onRefreshOverview,
 }: CharacterLibraryProps) {
+  const [showAllPending, setShowAllPending] = useState(false);
+  const favorites = characters.filter((character) =>
+    favoriteIds.includes(character.id),
+  );
+  const visibleRecent = recent
+    .filter(
+      (status) =>
+        status.conversation.mode === "normal" &&
+        status.connectionState === "completed",
+    )
+    .flatMap((status) => {
+      const character = characters.find(
+        (item) => item.id === status.conversation.character.id,
+      );
+      return character ? [{ character, status }] : [];
+    });
+  const renderCharacter = (
+    character: CharacterSummary,
+    lastChat?: string,
+    compact = false,
+  ) => (
+    <CharacterCard
+      key={character.id}
+      character={character}
+      callPending={busyCharacterId === character.id}
+      favorite={favoriteIds.includes(character.id)}
+      favoritePending={favoriteBusyId === character.id}
+      onToggleFavorite={() => onToggleFavorite(character.id)}
+      lastChat={lastChat}
+      compact={compact}
+      onOpen={() => onOpen(character.id)}
+      onCall={() => onCall(character.id)}
+    />
+  );
   return (
     <div className="character-library page-frame">
       <header className="library-heading">
@@ -46,6 +112,90 @@ export default function CharacterLibrary({
         )}
       </header>
 
+      {overviewLoading && (
+        <p className="continuity-loading" role="status">
+          正在确认最近的通话…
+        </p>
+      )}
+      {overviewError && (
+        <div className="product-notice error" role="alert">
+          {overviewError}
+          <button type="button" onClick={onRefreshOverview}>
+            重新确认
+          </button>
+        </div>
+      )}
+      {pending.length > 0 && (
+        <section
+          className="continuity-pending-section"
+          aria-labelledby="pending-conversations-title"
+        >
+          <div className="section-title-row">
+            <h2 id="pending-conversations-title">需要处理的通话</h2>
+            <button type="button" onClick={onRefreshOverview}>
+              刷新状态
+            </button>
+          </div>
+          {(showAllPending ? pending : pending.slice(0, 1)).map((status) => (
+            <PendingConversationCard
+              key={status.conversation.id}
+              status={status}
+              busy={busyCharacterId === status.conversation.id}
+              onResume={() => onResume(status)}
+              onFinish={() => onFinish(status)}
+              onView={() => onViewHistory(status.conversation.id)}
+            />
+          ))}
+          {pending.length > 1 && (
+            <button
+              className="continuity-more-pending"
+              type="button"
+              onClick={() => setShowAllPending((current) => !current)}
+            >
+              {showAllPending
+                ? "收起其他通话"
+                : `还有 ${pending.length - 1} 次待处理`}
+            </button>
+          )}
+        </section>
+      )}
+      {visibleRecent.length > 0 && (
+        <section
+          className="library-section"
+          aria-labelledby="recent-characters-title"
+        >
+          <div className="section-title-row">
+            <h2 id="recent-characters-title">最近聊过</h2>
+          </div>
+          <div className="continuity-compact-grid">
+            {visibleRecent.map(({ character, status }) =>
+              renderCharacter(
+                character,
+                status.lastActivityAt ??
+                  status.conversation.endedAt ??
+                  status.conversation.updatedAt,
+                true,
+              ),
+            )}
+          </div>
+        </section>
+      )}
+      {favorites.length > 0 && (
+        <section
+          className="library-section"
+          aria-labelledby="favorite-characters-title"
+        >
+          <div className="section-title-row">
+            <h2 id="favorite-characters-title">收藏</h2>
+          </div>
+          <div className="continuity-compact-grid">
+            {favorites.map((character) =>
+              renderCharacter(character, undefined, true),
+            )}
+          </div>
+        </section>
+      )}
+
       <section
         className="library-section"
         aria-labelledby="character-list-title"
@@ -53,7 +203,7 @@ export default function CharacterLibrary({
         <div className="section-title-row">
           <div>
             <p className="product-eyebrow">YOUR CAST</p>
-            <h2 id="character-list-title">角色</h2>
+            <h2 id="character-list-title">全部角色</h2>
           </div>
           {!loading && !error && (
             <span className="section-count">{characters.length} 位角色</span>
@@ -102,15 +252,7 @@ export default function CharacterLibrary({
 
         {!loading && !error && characters.length > 0 && (
           <div className="character-grid">
-            {characters.map((character) => (
-              <CharacterCard
-                key={character.id}
-                character={character}
-                callPending={busyCharacterId === character.id}
-                onOpen={() => onOpen(character.id)}
-                onCall={() => onCall(character.id)}
-              />
-            ))}
+            {characters.map((character) => renderCharacter(character))}
           </div>
         )}
       </section>
@@ -123,6 +265,11 @@ type CharacterCardProps = {
   callPending: boolean;
   onOpen: () => void;
   onCall: () => void;
+  favorite: boolean;
+  favoritePending: boolean;
+  onToggleFavorite: () => void;
+  lastChat?: string;
+  compact?: boolean;
 };
 
 function CharacterCard({
@@ -130,10 +277,15 @@ function CharacterCard({
   callPending,
   onOpen,
   onCall,
+  favorite,
+  favoritePending,
+  onToggleFavorite,
+  lastChat,
+  compact = false,
 }: CharacterCardProps) {
   return (
     <article
-      className={`character-card character-bg-${character.visualProfile.background}`}
+      className={`character-card character-bg-${character.visualProfile.background}${compact ? " continuity-compact-card" : ""}`}
       style={
         {
           "--character-accent": character.visualProfile.accentColor,
@@ -150,14 +302,24 @@ function CharacterCard({
           <img src={character.visualProfile.avatarUrl} alt="" />
         </span>
         <span className="character-card-copy">
-          <span className="character-card-meta">
-            <VisibilityBadge visibility={character.visibility} />
-            {character.systemKey && <span className="preset-badge">预置</span>}
-          </span>
+          {!compact && (
+            <span className="character-card-meta">
+              <VisibilityBadge visibility={character.visibility} />
+              {character.systemKey && (
+                <span className="preset-badge">预置</span>
+              )}
+            </span>
+          )}
           <strong>{character.name}</strong>
-          <span className="character-description">{character.description}</span>
+          {!compact && (
+            <span className="character-description">
+              {character.description}
+            </span>
+          )}
           <span className="character-voice">
-            声音 · {character.voiceProfile.displayName}
+            {lastChat
+              ? `上次聊天：${formatConversationDate(lastChat)}`
+              : `声音 · ${character.voiceProfile.displayName}`}
           </span>
         </span>
       </button>
@@ -165,9 +327,13 @@ function CharacterCard({
         <button
           className="character-detail-link"
           type="button"
-          onClick={onOpen}
+          onClick={onToggleFavorite}
+          disabled={favoritePending}
+          aria-pressed={favorite}
+          aria-label={`${favorite ? "取消收藏" : "收藏"}${character.name}`}
         >
-          了解角色 <span aria-hidden="true">→</span>
+          <span aria-hidden="true">{favorite ? "★" : "☆"}</span>{" "}
+          {favorite ? "已收藏" : "收藏"}
         </button>
         <button
           className="character-call-button"
@@ -182,7 +348,81 @@ function CharacterCard({
             ? "准备中"
             : character.realtimeAvailability?.available === false
               ? "模型不可用"
-              : "通话"}
+              : lastChat
+                ? "再次聊天"
+                : "通话"}
+        </button>
+      </div>
+    </article>
+  );
+}
+
+export function PendingConversationCard({
+  status,
+  busy,
+  onResume,
+  onFinish,
+  onView,
+}: {
+  status: ConversationContinuityStatus;
+  busy: boolean;
+  onResume: () => void;
+  onFinish: () => void;
+  onView: () => void;
+}) {
+  const actions = conversationActions(status);
+  const conversation = status.conversation;
+  return (
+    <article className="continuity-pending-card">
+      <button
+        type="button"
+        className="continuity-pending-main"
+        onClick={onView}
+      >
+        <img src={conversation.character.visualProfile.avatarUrl} alt="" />
+        <span>
+          <strong>{conversation.character.name}</strong>
+          <span>
+            {conversation.mode === "temporary" ? "临时对话" : "普通通话"} ·{" "}
+            {conversationStateLabel(status)}
+          </span>
+          <small>
+            最后活动：
+            {formatConversationDate(
+              status.lastActivityAt ?? conversation.startedAt,
+            )}
+          </small>
+          <small>
+            {status.lastSavedAt
+              ? `最后已保存：${formatConversationDate(status.lastSavedAt)}`
+              : "尚无已保存文字"}
+          </small>
+        </span>
+      </button>
+      {status.unavailableReason === "in_use" && (
+        <p>正在另一台设备或页面通话，请回到原页面继续。</p>
+      )}
+      {status.unavailableReason === "character_unavailable" && (
+        <p>原角色或配置已不可用；仍可查看和结束已有记录。</p>
+      )}
+      <div className="continuity-actions">
+        {actions.resume && (
+          <button
+            type="button"
+            className="product-primary-button"
+            disabled={busy}
+            onClick={onResume}
+          >
+            {busy ? "正在准备…" : actions.resume}
+          </button>
+        )}
+        {actions.finish && (
+          <button type="button" disabled={busy} onClick={onFinish}>
+            {busy ? "正在确认…" : "结束并保存"}
+          </button>
+        )}
+        <button type="button" onClick={onView}>
+          查看记录
         </button>
       </div>
     </article>

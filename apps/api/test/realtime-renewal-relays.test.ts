@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { relayQwenWebSocket } from "../src/qwen-websocket.js";
+import type { RelayConnectionLifecycle } from "../src/conversation-connection-lease.js";
 import { relayDoubaoWebSocket } from "../src/doubao-websocket.js";
 import {
   REALTIME_RENEWAL_WARNING_MS,
@@ -35,13 +36,22 @@ class FakeSocket extends EventEmitter {
   }
 }
 
-function createRelay(provider: "qwen" | "doubao") {
+function createRelay(
+  provider: "qwen" | "doubao",
+  options: {
+    lifecycle?: RelayConnectionLifecycle;
+    clientInstructions?: string;
+    clientVoice?: string;
+    beforeOpen?: (client: FakeSocket, upstream: FakeSocket) => void;
+  } = {},
+) {
   vi.useFakeTimers();
   vi.setSystemTime(0);
   const client = new FakeSocket();
   const upstream = new FakeSocket();
   if (provider === "qwen") {
     relayQwenWebSocket({
+      lifecycle: options.lifecycle,
       client: client.socket(),
       config: {
         enabled: true,
@@ -57,14 +67,15 @@ function createRelay(provider: "qwen" | "doubao") {
       runtime: { voice: "longanqian", instructions: "自然陪聊" },
       webSocketFactory: () => upstream.socket(),
     });
+    options.beforeOpen?.(client, upstream);
     upstream.emit("open");
     client.receive({
       type: "session.update",
       event_id: "configuration",
       session: {
         modalities: ["text", "audio"],
-        voice: "longanqian",
-        instructions: "自然陪聊",
+        voice: options.clientVoice ?? "longanqian",
+        instructions: options.clientInstructions ?? "自然陪聊",
         input_audio_format: "pcm",
         output_audio_format: "pcm",
         max_history_turns: 50,
@@ -74,6 +85,7 @@ function createRelay(provider: "qwen" | "doubao") {
     upstream.receive({ type: "session.updated", event_id: "configured" });
   } else {
     relayDoubaoWebSocket({
+      lifecycle: options.lifecycle,
       client: client.socket(),
       config: {
         enabled: true,
@@ -88,6 +100,7 @@ function createRelay(provider: "qwen" | "doubao") {
       },
       webSocketFactory: () => upstream.socket(),
     });
+    options.beforeOpen?.(client, upstream);
     upstream.emit("open");
     upstream.receive({
       type: "session.created",
@@ -224,3 +237,121 @@ describe.each(["qwen", "doubao"] as const)(
     });
   },
 );
+
+describe.each(["qwen", "doubao"] as const)("%s writer fencing", (provider) => {
+  it("does not forward configuration when the upstream opens after lease expiry", () => {
+    let current = true;
+    const lifecycle = {
+      isCurrent: () => current,
+      onReady: vi.fn(),
+      onActivity: vi.fn(),
+    };
+    const { client, upstream } = createRelay(provider, {
+      lifecycle,
+      beforeOpen: (browser) => {
+        if (provider === "qwen")
+          browser.receive({
+            type: "session.update",
+            event_id: "queued-config",
+            session: {
+              modalities: ["text", "audio"],
+              voice: "longanqian",
+              instructions: "自然陪聊",
+              input_audio_format: "pcm",
+              output_audio_format: "pcm",
+              max_history_turns: 50,
+              turn_detection: { type: "smart_turn" },
+            },
+          });
+        current = false;
+      },
+    });
+    expect(upstream.sent).toEqual([]);
+    expect(upstream.closed).toHaveLength(1);
+    expect(client.closed).toHaveLength(1);
+    expect(lifecycle.onReady).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("does not emit scheduled renewal controls after the writer expires", () => {
+    let current = true;
+    const { client } = createRelay(provider, {
+      lifecycle: {
+        isCurrent: () => current,
+        onReady: () => undefined,
+        onActivity: () => undefined,
+      },
+    });
+    current = false;
+    const count = client.sent.length;
+    vi.advanceTimersByTime(REALTIME_RENEWAL_WARNING_MS);
+    expect(client.sent).toHaveLength(count);
+    client.close(1000);
+  });
+});
+
+describe("Qwen server snapshot configuration", () => {
+  it("replaces a cold-recovery placeholder with the original persona and voice", () => {
+    const { upstream, client } = createRelay("qwen", {
+      clientInstructions: "恢复原通话",
+      clientVoice: "different-client-voice",
+    });
+    expect(upstream.sent[0]).toMatchObject({
+      event_id: "configuration",
+      session: {
+        voice: "longanqian",
+        instructions: "自然陪聊",
+        max_history_turns: 50,
+      },
+    });
+    expect(JSON.stringify(upstream.sent)).not.toContain("恢复原通话");
+    expect(JSON.stringify(upstream.sent)).not.toContain(
+      "different-client-voice",
+    );
+    expect(client.sent).toContainEqual({
+      type: "session.updated",
+      event_id: "configured",
+    });
+    expect(client.closed).toEqual([]);
+    client.close(1000);
+  });
+  it("rejects forbidden configuration fields rather than hiding them through normalization", () => {
+    const { client, upstream } = createRelay("qwen", {
+      beforeOpen: (browser) => {
+        browser.receive({
+          type: "session.update",
+          event_id: "forged-config",
+          session: {
+            modalities: ["text", "audio"],
+            voice: "longanqian",
+            instructions: "恢复原通话",
+            model: "forged-model",
+            input_audio_format: "pcm",
+            output_audio_format: "pcm",
+            max_history_turns: 50,
+            turn_detection: { type: "smart_turn" },
+          },
+        });
+      },
+    });
+    expect(client.closed[0]?.code).toBe(1008);
+    expect(upstream.sent).toEqual([]);
+  });
+});
+
+it("tracks Doubao assistant audio as effective activity", () => {
+  const activity = vi.fn();
+  const { client, upstream } = createRelay("doubao", {
+    lifecycle: {
+      isCurrent: () => true,
+      onReady: () => undefined,
+      onActivity: activity,
+    },
+  });
+  upstream.receive({
+    type: "response.output_audio.delta",
+    response_id: "reply",
+    delta: "AAA=",
+  });
+  expect(activity).toHaveBeenCalledOnce();
+  client.close(1000);
+});

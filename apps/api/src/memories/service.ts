@@ -51,6 +51,8 @@ export class MemoryService {
     input: {
       userId?: string;
       status?: "active" | "suggested";
+      characterId?: string;
+      sourceConversationId?: string;
       limit: number;
     },
   ): Promise<CharacterMemory[]> {
@@ -63,7 +65,10 @@ export class MemoryService {
       if (!readable) throw notFound();
     }
     const memories = await this.call((repository) =>
-      repository.list(target, input.status, input.limit),
+      repository.list(target, input.status, input.limit, {
+        characterId: input.characterId,
+        sourceConversationId: input.sourceConversationId,
+      }),
     );
     return memories.map(toPublicMemory);
   }

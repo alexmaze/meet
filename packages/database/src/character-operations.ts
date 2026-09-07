@@ -585,7 +585,7 @@ export async function deleteCharacter(
   });
 }
 
-function visibleCharacterWhere(actorUserId: string) {
+export function visibleCharacterWhere(actorUserId: string) {
   return and(
     isNull(characters.deletedAt),
     or(

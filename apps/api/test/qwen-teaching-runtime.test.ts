@@ -695,6 +695,9 @@ describe("Qwen teaching WebSocket relay", () => {
             type === "relay.teaching.audio_gate" && open === true,
         ).length === 1,
     );
+    await waitUntil(() =>
+      received.some(({ type }) => type === "session.updated"),
+    );
     const initialGateIndex = received.findIndex(
       ({ type, open }) => type === "relay.teaching.audio_gate" && open === true,
     );

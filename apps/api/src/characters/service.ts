@@ -98,6 +98,24 @@ export class CharacterService {
     return characters.map((character) => toSummary(character, actor));
   }
 
+  async favorites(actor: UserAccount): Promise<string[]> {
+    return this.callRepository((repository) =>
+      repository.listFavoriteIds(actor.id),
+    );
+  }
+
+  async setFavorite(
+    actor: UserAccount,
+    characterId: string,
+    favorite: boolean,
+  ) {
+    const visible = await this.callRepository((repository) =>
+      repository.setFavorite(actor.id, characterId, favorite, this.now()),
+    );
+    if (!visible) throw notFound();
+    return { characterId, favorite };
+  }
+
   async find(actor: UserAccount, characterId: string): Promise<Character> {
     const character = await this.findAggregate(actor, characterId);
     return toCharacter(character, actor);

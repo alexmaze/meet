@@ -2,8 +2,8 @@ import {
   apiErrorSchema,
   appendConversationMessagesRequestSchema,
   appendConversationMessagesResponseSchema,
-  completeConversationRequestSchema,
   conversationDetailResponseSchema,
+  conversationContinuityDetailResponseSchema,
   conversationListResponseSchema,
   conversationResponseSchema,
   createConversationRequestSchema,
@@ -11,6 +11,7 @@ import {
   type AppendConversationMessagesRequest,
   type ConversationMessage,
   type ConversationSummary,
+  type ConversationContinuityStatus,
   type CreateConversationRequest,
 } from "@meet/protocol";
 
@@ -53,9 +54,13 @@ export async function getConversation(
 ): Promise<{
   conversation: ConversationSummary;
   messages: ConversationMessage[];
+  continuity?: ConversationContinuityStatus;
 }> {
   const body = await requestJson(conversationUrl(conversationId), { signal });
-  return parseWith(conversationDetailResponseSchema, body);
+  const continuity = conversationContinuityDetailResponseSchema.safeParse(body);
+  return continuity.success
+    ? continuity.data
+    : parseWith(conversationDetailResponseSchema, body);
 }
 
 export async function appendConversationMessages(
@@ -76,23 +81,6 @@ export async function appendConversationMessages(
     .acknowledgedSequence;
 }
 
-export async function completeConversation(
-  conversationId: string,
-  lastSequence: number,
-): Promise<ConversationSummary> {
-  const body = await requestJson(
-    `${conversationUrl(conversationId)}/complete`,
-    {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify(
-        completeConversationRequestSchema.parse({ lastSequence }),
-      ),
-    },
-  );
-  return parseWith(conversationResponseSchema, body).conversation;
-}
-
 export async function deleteConversation(
   conversationId: string,
 ): Promise<void> {
@@ -103,41 +91,50 @@ export async function deleteConversation(
   parseWith(deleteConversationResponseSchema, body);
 }
 
-function conversationUrl(conversationId: string): string {
+export function conversationUrl(conversationId: string): string {
   return `/api/conversations/${encodeURIComponent(conversationId)}`;
 }
 
-async function requestJson(
+export async function requestJson(
   input: RequestInfo | URL,
   init: RequestInit = {},
 ): Promise<unknown> {
-  let response: Response;
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), 12_000);
+  const cancel = () => controller.abort();
+  init.signal?.addEventListener("abort", cancel, { once: true });
+  if (init.signal?.aborted) controller.abort();
+  let status: number | null = null;
   try {
-    response = await fetch(input, {
+    const response = await fetch(input, {
       credentials: "same-origin",
       cache: init.method ? undefined : "no-store",
       ...init,
+      signal: controller.signal,
     });
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw error;
+    status = response.status;
+    const body: unknown = await response.json();
+    if (!response.ok) {
+      const parsed = apiErrorSchema.safeParse(body);
+      throw new ConversationApiError(
+        response.status,
+        parsed.success ? parsed.data.code : undefined,
+      );
     }
-    throw new ConversationApiError(null);
+    return body;
+  } catch (error) {
+    if (error instanceof ConversationApiError) throw error;
+    if (
+      init.signal?.aborted &&
+      error instanceof DOMException &&
+      error.name === "AbortError"
+    )
+      throw error;
+    throw new ConversationApiError(status);
+  } finally {
+    globalThis.clearTimeout(timeout);
+    init.signal?.removeEventListener("abort", cancel);
   }
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    throw new ConversationApiError(response.status);
-  }
-  if (!response.ok) {
-    const parsed = apiErrorSchema.safeParse(body);
-    throw new ConversationApiError(
-      response.status,
-      parsed.success ? parsed.data.code : undefined,
-    );
-  }
-  return body;
 }
 
 type SafeParseSchema<T> = {
@@ -146,7 +143,7 @@ type SafeParseSchema<T> = {
   ) => { success: true; data: T } | { success: false; error: unknown };
 };
 
-function parseWith<T>(schema: SafeParseSchema<T>, input: unknown): T {
+export function parseWith<T>(schema: SafeParseSchema<T>, input: unknown): T {
   const parsed = schema.safeParse(input);
   if (!parsed.success) {
     throw new ConversationApiError(null, "INVALID_CONVERSATION_RESPONSE");

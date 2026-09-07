@@ -10,6 +10,7 @@ export interface MemoryRepository {
     targetUserId: string,
     status: "active" | "suggested" | undefined,
     limit: number,
+    filters?: { characterId?: string; sourceConversationId?: string },
   ): Promise<CharacterMemoryAggregate[]>;
   isGuardianReadableTarget(targetUserId: string): Promise<boolean>;
   listIndexDiagnostics?(

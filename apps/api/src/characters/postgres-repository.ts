@@ -5,6 +5,8 @@ import {
   findVisibleCharacter,
   listCharacterCatalog,
   listVisibleCharacters,
+  listFavoriteCharacterIds,
+  setCharacterFavorite,
   restoreBuiltinCharacter,
   updateCharacter,
   updateCharacterVisibility,
@@ -15,6 +17,24 @@ import type { CharacterRepository } from "./repository.js";
 
 export class PostgresCharacterRepository implements CharacterRepository {
   constructor(private readonly db: Database) {}
+
+  listFavoriteIds(actorUserId: string) {
+    return listFavoriteCharacterIds(this.db, actorUserId);
+  }
+
+  setFavorite(
+    actorUserId: string,
+    characterId: string,
+    favorite: boolean,
+    createdAt: Date,
+  ) {
+    return setCharacterFavorite(this.db, {
+      actorUserId,
+      characterId,
+      favorite,
+      createdAt,
+    });
+  }
 
   listVisible(actorUserId: string) {
     return listVisibleCharacters(this.db, actorUserId);

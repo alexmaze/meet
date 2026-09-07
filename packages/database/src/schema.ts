@@ -12,6 +12,7 @@ import type {
 import {
   check,
   boolean,
+  bigint,
   foreignKey,
   index,
   integer,
@@ -1188,6 +1189,105 @@ export const conversationRuntimeSnapshots = pgTable(
       .defaultNow(),
   },
 );
+
+export const characterFavorites = pgTable(
+  "character_favorites",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "cascade" }),
+    characterId: uuid("character_id")
+      .notNull()
+      .references(() => characters.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.characterId] })],
+);
+
+export const conversationControls = pgTable(
+  "conversation_controls",
+  {
+    conversationId: uuid("conversation_id")
+      .primaryKey()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    writerClientId: uuid("writer_client_id"),
+    writerEpoch: integer("writer_epoch").notNull().default(0),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    connectionId: uuid("connection_id"),
+    connectionExpiresAt: timestamp("connection_expires_at", {
+      withTimezone: true,
+    }),
+    connectionStartedAt: timestamp("connection_started_at", {
+      withTimezone: true,
+    }),
+    lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
+    hasConnected: boolean("has_connected").notNull().default(false),
+    lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
+    lastSavedAt: timestamp("last_saved_at", { withTimezone: true }),
+    connectedDurationMs: bigint("connected_duration_ms", { mode: "number" })
+      .notNull()
+      .default(0),
+    finalizedAt: timestamp("finalized_at", { withTimezone: true }),
+    endRequestId: uuid("end_request_id"),
+    endTargetSequence: integer("end_target_sequence"),
+  },
+  (table) => [
+    check(
+      "conversation_controls_nonnegative",
+      sql`${table.writerEpoch} >= 0 AND ${table.connectedDurationMs} >= 0 AND (${table.endTargetSequence} IS NULL OR ${table.endTargetSequence} >= 0)`,
+    ),
+    check(
+      "conversation_controls_writer_fields",
+      sql`(${table.writerClientId} IS NULL AND ${table.leaseExpiresAt} IS NULL) OR (${table.writerClientId} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL AND ${table.writerEpoch} > 0)`,
+    ),
+    check(
+      "conversation_controls_connection_fields",
+      sql`(${table.connectionId} IS NULL AND ${table.connectionExpiresAt} IS NULL AND ${table.connectionStartedAt} IS NULL) OR (${table.connectionId} IS NOT NULL AND ${table.connectionExpiresAt} IS NOT NULL)`,
+    ),
+  ],
+);
+
+export const conversationOperations = pgTable(
+  "conversation_operations",
+  {
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    requestId: uuid("request_id").notNull(),
+    kind: varchar("kind", { length: 12 })
+      .$type<"prepare" | "finish">()
+      .notNull(),
+    clientId: uuid("client_id").notNull(),
+    writerEpoch: integer("writer_epoch").notNull(),
+    intent: varchar("intent", { length: 12 })
+      .$type<"connect" | "finish">()
+      .notNull(),
+    targetSequence: integer("target_sequence"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.conversationId, table.requestId] }),
+    check(
+      "conversation_operations_kind",
+      sql`${table.kind} IN ('prepare', 'finish') AND ${table.intent} IN ('connect', 'finish') AND ${table.writerEpoch} > 0`,
+    ),
+    check(
+      "conversation_operations_target",
+      sql`(${table.kind} = 'prepare' AND ${table.targetSequence} IS NULL) OR (${table.kind} = 'finish' AND ${table.targetSequence} >= 0)`,
+    ),
+  ],
+);
+
+export type CharacterFavoriteRecord = typeof characterFavorites.$inferSelect;
+export type ConversationControlRecord =
+  typeof conversationControls.$inferSelect;
+export type ConversationOperationRecord =
+  typeof conversationOperations.$inferSelect;
 
 export const conversationTeachingStates = pgTable(
   "conversation_teaching_states",

@@ -82,6 +82,8 @@ export async function listCharacterMemories(
   input: {
     targetUserId: string;
     status?: "active" | "suggested";
+    characterId?: string;
+    sourceConversationId?: string;
     limit: number;
   },
 ): Promise<CharacterMemoryAggregate[]> {
@@ -92,6 +94,15 @@ export async function listCharacterMemories(
     .where(
       and(
         eq(characterMemories.userId, input.targetUserId),
+        input.characterId
+          ? eq(characterMemories.characterId, input.characterId)
+          : undefined,
+        input.sourceConversationId
+          ? eq(
+              characterMemories.sourceConversationId,
+              input.sourceConversationId,
+            )
+          : undefined,
         input.status
           ? eq(characterMemories.status, input.status)
           : inArray(characterMemories.status, ["active", "suggested"]),

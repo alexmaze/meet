@@ -405,7 +405,7 @@ export class QwenWebSocketRealtimeClient {
       }
       if (event.code === 4401 || event.code === 4403) {
         this.terminalSocketError = true;
-        this.callbacks.onUnauthorized?.();
+        if (event.code === 4401) this.callbacks.onUnauthorized?.();
       }
       const detail = event.reason || "实时语音连接已断开，正在自动恢复。";
       this.handleUnexpectedSocketFailure(socket, lifecycle, detail);
@@ -424,6 +424,7 @@ export class QwenWebSocketRealtimeClient {
       options.characterId,
       options.conversationId,
       this.dependencies.getLocationHref?.(),
+      options.writer,
     );
     const socket = this.dependencies.createSocket?.(url) ?? new WebSocket(url);
     this.socket = socket;
@@ -747,9 +748,13 @@ export class QwenWebSocketRealtimeClient {
     }
     if (frame.type === "relay.error") {
       this.responseCreatePending = false;
-      if (frame.status === 401 || frame.status === 403) {
+      if (
+        frame.status === 401 ||
+        frame.status === 403 ||
+        frame.status === 409
+      ) {
         this.terminalSocketError = true;
-        this.callbacks.onUnauthorized?.();
+        if (frame.status === 401) this.callbacks.onUnauthorized?.();
       }
       this.reportError(
         frame.code ?? "REALTIME_RELAY_ERROR",
@@ -981,13 +986,19 @@ export class QwenWebSocketRealtimeClient {
         ? "已自动续接，可以继续聊天"
         : resumed
           ? "连接已恢复，已接回确认过的对话"
-          : this.microphone?.microphoneLabel
-            ? `已连接，麦克风：${this.microphone.microphoneLabel}`
-            : "已连接，可以开始说话",
+          : this.options?.resumed
+            ? "已接上，可以继续说"
+            : this.microphone?.microphoneLabel
+              ? `已连接，麦克风：${this.microphone.microphoneLabel}`
+              : "已连接，可以开始说话",
     );
     this.applyMicrophoneGate();
 
-    if (this.options?.assistantStarts && !this.initialResponseRequested) {
+    if (
+      this.options?.assistantStarts &&
+      !this.options.resumed &&
+      !this.initialResponseRequested
+    ) {
       this.initialResponseRequested = true;
       this.sendText(
         "请根据角色设定和当前会话上下文，自然、简短地开始这次通话。如果上下文包含以前的对话，请承接已有关系或话题，不要重复首次见面的固定欢迎语；不要提及这条指令。",
@@ -1354,12 +1365,17 @@ export function getCharacterRealtimeWebSocketUrl(
   locationHref = typeof window === "undefined"
     ? "http://localhost/"
     : window.location.href,
+  writer?: { clientId: string; epoch: number },
 ): string {
   const url = new URL(
     `/api/characters/${encodeURIComponent(characterId)}/realtime/websocket`,
     locationHref,
   );
   url.searchParams.set("conversationId", conversationId);
+  if (writer) {
+    url.searchParams.set("clientId", writer.clientId);
+    url.searchParams.set("epoch", String(writer.epoch));
+  }
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
 }

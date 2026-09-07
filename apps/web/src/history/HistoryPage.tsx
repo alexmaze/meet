@@ -1,4 +1,9 @@
-import type { ConversationMessage, ConversationSummary } from "@meet/protocol";
+import type {
+  ConversationContinuityStatus,
+  ConversationMessage,
+  ConversationMode,
+  ConversationSummary,
+} from "@meet/protocol";
 import { useEffect, useState, type CSSProperties } from "react";
 
 import {
@@ -7,109 +12,225 @@ import {
   getConversation,
   listConversations,
 } from "./conversation-api.js";
+import {
+  clearPendingEndOperation,
+  getPendingEndOperation,
+  getStatus,
+  listOverview,
+} from "./continuity-api.js";
+import {
+  applyPendingEndOperation,
+  conversationActions,
+  conversationStateLabel,
+  formatConnectedDuration,
+  formatConversationDate,
+} from "./continuity-presentation.js";
+import ConversationReview, {
+  type MemoryLocation,
+} from "./ConversationReview.js";
 
-type DetailState =
-  | { status: "closed" }
-  | { status: "loading"; id: string }
-  | {
-      status: "ready";
-      conversation: ConversationSummary;
-      messages: ConversationMessage[];
-    }
-  | { status: "error"; id: string; message: string };
+type HistoryPageProps = {
+  currentUserId: string;
+  initialConversationId?: string;
+  readOnly?: boolean;
+  onCall: (characterId: string, mode: ConversationMode) => void;
+  onResume: (status: ConversationContinuityStatus) => void;
+  onFinish: (status: ConversationContinuityStatus) => Promise<void>;
+  onViewMemories?: (location: MemoryLocation) => void;
+  onUnauthorized: () => void;
+};
+type Detail = {
+  status: ConversationContinuityStatus;
+  messages: ConversationMessage[];
+};
 
 export default function HistoryPage({
+  currentUserId,
+  initialConversationId,
+  readOnly = false,
   onCall,
+  onResume,
+  onFinish,
+  onViewMemories,
   onUnauthorized,
-}: {
-  onCall: (characterId: string) => void;
-  onUnauthorized: () => void;
-}) {
+}: HistoryPageProps) {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [states, setStates] = useState<
+    Map<string, ConversationContinuityStatus>
+  >(new Map());
+  const [selectedId, setSelectedId] = useState(initialConversationId);
+  const [detail, setDetail] = useState<Detail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [reload, setReload] = useState(0);
-  const [detail, setDetail] = useState<DetailState>({ status: "closed" });
-  const [deleting, setDeleting] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
     setError("");
-    void listConversations(controller.signal)
-      .then((items) => {
-        setConversations(items);
-        setLoading(false);
-      })
-      .catch((cause: unknown) => {
+    const load = async () => {
+      try {
+        if (selectedId) {
+          const [record, status] = await Promise.all([
+            getConversation(selectedId, controller.signal),
+            getStatus(
+              selectedId,
+              getPendingEndOperation(selectedId, currentUserId)?.requestId,
+              controller.signal,
+            ),
+          ]);
+          if (controller.signal.aborted) return;
+          const marker = status.isOwner
+            ? getPendingEndOperation(selectedId, currentUserId)
+            : null;
+          if (status.isOwner && status.connectionState === "completed")
+            clearPendingEndOperation(selectedId, currentUserId);
+          setDetail({
+            messages: record.messages,
+            status: applyPendingEndOperation(status, marker),
+          });
+        } else {
+          const [items, overview] = await Promise.all([
+            listConversations(controller.signal),
+            listOverview(undefined, controller.signal),
+          ]);
+          if (controller.signal.aborted) return;
+          setConversations(items);
+          setStates(
+            new Map(
+              [...overview.pending, ...overview.recent].map((status) => [
+                status.conversation.id,
+                applyPendingEndOperation(
+                  status,
+                  getPendingEndOperation(status.conversation.id, currentUserId),
+                ),
+              ]),
+            ),
+          );
+        }
+      } catch (cause) {
         if (controller.signal.aborted) return;
         if (isUnauthorized(cause)) {
           onUnauthorized();
           return;
         }
-        setError("暂时无法读取通话历史，请稍后重试。");
-        setLoading(false);
-      });
+        setError("暂时无法读取通话记录，请稍后重试。");
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    };
+    void load();
     return () => controller.abort();
-  }, [onUnauthorized, reload]);
+  }, [selectedId, currentUserId, reload, onUnauthorized]);
 
   useEffect(() => {
-    if (detail.status !== "loading") return;
-    const controller = new AbortController();
-    const id = detail.id;
-    void getConversation(id, controller.signal)
-      .then((value) => setDetail({ status: "ready", ...value }))
-      .catch((cause: unknown) => {
-        if (controller.signal.aborted) return;
-        if (isUnauthorized(cause)) {
-          onUnauthorized();
-          return;
-        }
-        setDetail({
-          status: "error",
-          id,
-          message: "暂时无法读取这次通话，请稍后重试。",
-        });
-      });
-    return () => controller.abort();
-  }, [detail, onUnauthorized]);
+    if (!selectedId || !detail) return;
+    const needsRefresh =
+      detail.status.connectionState !== "completed" ||
+      [detail.status.summary.state, detail.status.memory.state].some(
+        (state) => state === "processing" || state === "not_started",
+      );
+    if (!needsRefresh) return;
+    const timer = window.setTimeout(() => {
+      if (document.visibilityState === "visible")
+        setReload((current) => current + 1);
+    }, 15_000);
+    return () => window.clearTimeout(timer);
+  }, [selectedId, detail]);
 
   const remove = async () => {
-    if (detail.status !== "ready" || deleting) return;
+    if (
+      !detail ||
+      busy ||
+      readOnly ||
+      !detail.status.isOwner ||
+      detail.status.conversation.userId !== currentUserId ||
+      detail.status.connectionState !== "completed"
+    )
+      return;
     if (!window.confirm("确定删除这次通话和全部文字记录吗？")) return;
-    setDeleting(true);
+    setBusy(true);
     try {
-      await deleteConversation(detail.conversation.id);
-      setDetail({ status: "closed" });
+      await deleteConversation(detail.status.conversation.id);
+      clearPendingEndOperation(detail.status.conversation.id, currentUserId);
+      setSelectedId(undefined);
+      setDetail(null);
       setReload((current) => current + 1);
     } catch (cause) {
       if (isUnauthorized(cause)) {
         onUnauthorized();
         return;
       }
-      setDetail({
-        ...detail,
-        status: "error",
-        id: detail.conversation.id,
-        message: "删除失败，请稍后重试。",
-      });
+      setError("删除失败，请稍后重试。");
     } finally {
-      setDeleting(false);
+      setBusy(false);
+    }
+  };
+  const finish = async () => {
+    if (
+      !detail ||
+      busy ||
+      readOnly ||
+      !detail.status.isOwner ||
+      detail.status.conversation.userId !== currentUserId
+    )
+      return;
+    setBusy(true);
+    try {
+      await onFinish(detail.status);
+    } finally {
+      setBusy(false);
+      setReload((current) => current + 1);
     }
   };
 
-  if (detail.status !== "closed") {
+  if (selectedId)
     return (
-      <HistoryDetail
-        state={detail}
-        deleting={deleting}
-        onBack={() => setDetail({ status: "closed" })}
-        onRetry={(id) => setDetail({ status: "loading", id })}
-        onCall={onCall}
-        onDelete={() => void remove()}
-      />
+      <div className="history-detail page-frame">
+        <button
+          type="button"
+          className="detail-back"
+          onClick={() => {
+            setSelectedId(undefined);
+            setDetail(null);
+          }}
+        >
+          ← 返回历史
+        </button>
+        {error && (
+          <div className="product-notice error" role="alert">
+            {error}
+            <button
+              type="button"
+              onClick={() => setReload((current) => current + 1)}
+            >
+              重试
+            </button>
+          </div>
+        )}
+        {loading && !detail ? (
+          <div className="history-empty" role="status">
+            正在读取这次通话…
+          </div>
+        ) : (
+          detail && (
+            <HistoryDetailView
+              status={detail.status}
+              messages={detail.messages}
+              currentUserId={currentUserId}
+              readOnly={readOnly}
+              busy={busy}
+              onCall={onCall}
+              onResume={onResume}
+              onFinish={() => void finish()}
+              onDelete={() => void remove()}
+              onViewMemories={onViewMemories}
+            />
+          )
+        )}
+      </div>
     );
-  }
 
   return (
     <div className="history-page page-frame">
@@ -117,15 +238,14 @@ export default function HistoryPage({
         <div>
           <p className="product-eyebrow">CONVERSATIONS</p>
           <h1>通话历史</h1>
-          <p>每个账号只保存和读取自己的私人通话；临时对话也会保留文字记录。</p>
+          <p>这里是当前账号的通话记录；临时对话也会保留文字。</p>
         </div>
         <button
           type="button"
-          className="secondary-button"
           disabled={loading}
           onClick={() => setReload((current) => current + 1)}
         >
-          刷新
+          {loading ? "刷新中…" : "刷新"}
         </button>
       </header>
       {error && (
@@ -133,7 +253,7 @@ export default function HistoryPage({
           {error}
         </div>
       )}
-      {loading ? (
+      {loading && conversations.length === 0 ? (
         <div className="history-empty" role="status">
           正在读取通话记录…
         </div>
@@ -145,118 +265,183 @@ export default function HistoryPage({
         </div>
       ) : (
         <div className="history-list">
-          {conversations.map((conversation) => (
-            <button
-              type="button"
-              className="history-card"
-              key={conversation.id}
-              onClick={() =>
-                setDetail({ status: "loading", id: conversation.id })
-              }
-              style={
-                {
-                  "--history-accent":
-                    conversation.character.visualProfile.accentColor,
-                } as CSSProperties
-              }
-            >
-              <img
-                src={conversation.character.visualProfile.avatarUrl}
-                alt=""
-              />
-              <span className="history-card-copy">
-                <span>
-                  <strong>{conversation.character.name}</strong>
-                  {conversation.mode === "temporary" && <em>临时对话</em>}
-                  {conversation.status === "active" && <em>未正常结束</em>}
+          {conversations.map((conversation) => {
+            const status = states.get(conversation.id);
+            return (
+              <button
+                type="button"
+                className="history-card"
+                key={conversation.id}
+                onClick={() => {
+                  setSelectedId(conversation.id);
+                  setDetail(null);
+                }}
+                style={
+                  {
+                    "--history-accent":
+                      conversation.character.visualProfile.accentColor,
+                  } as CSSProperties
+                }
+              >
+                <img
+                  src={conversation.character.visualProfile.avatarUrl}
+                  alt=""
+                />
+                <span className="history-card-copy">
+                  <span>
+                    <strong>{conversation.character.name}</strong>
+                    <em>
+                      {conversation.mode === "temporary"
+                        ? "临时对话"
+                        : "普通通话"}
+                    </em>
+                    <em>
+                      {status
+                        ? conversationStateLabel(status)
+                        : conversation.status === "completed"
+                          ? "已结束"
+                          : "正在确认通话状态"}
+                    </em>
+                  </span>
+                  <small>
+                    {formatConversationDate(
+                      status?.lastActivityAt ?? conversation.startedAt,
+                    )}
+                  </small>
+                  <span>{conversation.messageCount} 条文字记录</span>
                 </span>
-                <small>{formatDate(conversation.startedAt)}</small>
-                <span>{conversation.messageCount} 条文字记录</span>
-              </span>
-              <span aria-hidden="true">›</span>
-            </button>
-          ))}
+                <span aria-hidden="true">›</span>
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
-function HistoryDetail({
-  state,
-  deleting,
-  onBack,
-  onRetry,
+export function HistoryDetailView({
+  status,
+  messages,
+  currentUserId,
+  readOnly = false,
+  busy,
   onCall,
+  onResume,
+  onFinish,
   onDelete,
+  onViewMemories,
 }: {
-  state: Exclude<DetailState, { status: "closed" }>;
-  deleting: boolean;
-  onBack: () => void;
-  onRetry: (id: string) => void;
-  onCall: (characterId: string) => void;
+  status: ConversationContinuityStatus;
+  messages: ConversationMessage[];
+  currentUserId: string;
+  readOnly?: boolean;
+  busy: boolean;
+  onCall: HistoryPageProps["onCall"];
+  onResume: HistoryPageProps["onResume"];
+  onFinish: () => void;
   onDelete: () => void;
+  onViewMemories?: HistoryPageProps["onViewMemories"];
 }) {
-  if (state.status === "loading") {
-    return (
-      <div className="history-detail page-frame">
-        <button type="button" className="detail-back" onClick={onBack}>
-          ← 返回历史
-        </button>
-        <div className="history-empty" role="status">
-          正在读取通话内容…
-        </div>
-      </div>
-    );
-  }
-  if (state.status === "error") {
-    return (
-      <div className="history-detail page-frame">
-        <button type="button" className="detail-back" onClick={onBack}>
-          ← 返回历史
-        </button>
-        <div className="history-empty" role="alert">
-          <strong>{state.message}</strong>
-          <button type="button" onClick={() => onRetry(state.id)}>
-            重试
-          </button>
-        </div>
-      </div>
-    );
-  }
-  const { conversation, messages } = state;
+  const conversation = status.conversation;
+  const viewingOther = conversation.userId !== currentUserId || !status.isOwner;
+  const actions = conversationActions(status, readOnly || viewingOther);
+  const temporary = conversation.mode === "temporary";
   return (
-    <div className="history-detail page-frame">
-      <button type="button" className="detail-back" onClick={onBack}>
-        ← 返回历史
-      </button>
+    <>
       <header>
         <img src={conversation.character.visualProfile.avatarUrl} alt="" />
         <div>
           <p className="product-eyebrow">
-            {formatDate(conversation.startedAt)}
+            {formatConversationDate(conversation.startedAt)}
           </p>
           <h1>与{conversation.character.name}的通话</h1>
           <p>
-            {conversation.mode === "temporary"
+            {temporary
               ? "临时对话 · 不写入长期记忆"
-              : "普通对话 · 后续可用于关系延续"}
-            {conversation.status === "active" ? " · 通话未正常结束" : ""}
+              : "普通通话 · 后续可用于关系延续"}{" "}
+            · {conversationStateLabel(status)}
           </p>
+          <p className="continuity-muted">
+            通话 {formatConnectedDuration(status.connectedDurationMs)}
+            {status.lastActivityAt
+              ? ` · 最后活动 ${formatConversationDate(status.lastActivityAt)}`
+              : ""}
+          </p>
+          {status.lastSavedAt && (
+            <p className="continuity-muted">
+              最后已保存：{formatConversationDate(status.lastSavedAt)}
+            </p>
+          )}
         </div>
         <div className="history-detail-actions">
-          <button
-            type="button"
-            className="product-primary-button"
-            onClick={() => onCall(conversation.character.id)}
-          >
-            再次通话
-          </button>
-          <button type="button" disabled={deleting} onClick={onDelete}>
-            {deleting ? "删除中…" : "删除记录"}
-          </button>
+          {actions.resume && (
+            <button
+              className="product-primary-button"
+              type="button"
+              disabled={busy}
+              onClick={() => onResume(status)}
+            >
+              {actions.resume}
+            </button>
+          )}
+          {actions.start && (
+            <button
+              className="product-primary-button"
+              type="button"
+              disabled={busy}
+              onClick={() =>
+                onCall(conversation.character.id, conversation.mode)
+              }
+            >
+              {actions.start}
+            </button>
+          )}
+          {actions.finish && (
+            <button type="button" disabled={busy} onClick={onFinish}>
+              {busy ? "正在确认…" : "结束并保存"}
+            </button>
+          )}
+          {actions.remove && (
+            <button type="button" disabled={busy} onClick={onDelete}>
+              {busy ? "正在处理…" : "删除记录"}
+            </button>
+          )}
         </div>
       </header>
+      {viewingOther && (
+        <p className="continuity-filter-note">
+          你正在按账号设置只读查看该成员的历史，不能替该成员继续或修改通话。
+        </p>
+      )}
+      {readOnly && !viewingOther && (
+        <p className="continuity-filter-note">
+          仅查看服务器已保存的记录。关闭后返回原通话，尚未同步的文字仍保留在原页面。
+        </p>
+      )}
+      {status.unavailableReason === "in_use" && (
+        <p className="continuity-filter-note">
+          正在另一台设备或页面通话，请回到原页面继续。
+        </p>
+      )}
+      {status.unavailableReason === "character_unavailable" && (
+        <p className="continuity-filter-note">
+          原角色或配置已不可用，无法恢复；已有记录仍可查看。
+        </p>
+      )}
+      {actions.start && (
+        <p className="continuity-filter-note">
+          {temporary
+            ? "新的临时对话不会带入以前的关系或这次已经结束的内容。"
+            : "再次聊天会开启一次新通话并延续既有关系，不一定从这份记录的最后一句开始。"}
+        </p>
+      )}
+      {status.connectionState === "completed" && (
+        <ConversationReview
+          status={status}
+          onViewMemories={viewingOther || readOnly ? undefined : onViewMemories}
+        />
+      )}
       <section className="history-transcript" aria-label="通话文字记录">
         {messages.length === 0 ? (
           <div className="history-empty">这次通话没有已确认的字幕。</div>
@@ -267,7 +452,11 @@ function HistoryDetail({
               className={`history-message ${message.role}`}
             >
               <strong>
-                {message.role === "user" ? "你" : conversation.character.name}
+                {message.role === "user"
+                  ? viewingOther
+                    ? "该成员"
+                    : "你"
+                  : conversation.character.name}
               </strong>
               <div>
                 <p>{message.text}</p>
@@ -280,23 +469,13 @@ function HistoryDetail({
           ))
         )}
       </section>
-    </div>
+    </>
   );
 }
 
 function isUnauthorized(error: unknown): boolean {
   return error instanceof ConversationApiError && error.status === 401;
 }
-
-function formatDate(value: string): string {
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "long",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
-}
-
 function formatTime(value: string): string {
   return new Intl.DateTimeFormat("zh-CN", {
     hour: "2-digit",

@@ -19,8 +19,14 @@ export class PostgresMemoryRepository implements MemoryRepository {
     targetUserId: string,
     status: "active" | "suggested" | undefined,
     limit: number,
+    filters?: { characterId?: string; sourceConversationId?: string },
   ) {
-    return listCharacterMemories(this.db, { targetUserId, status, limit });
+    return listCharacterMemories(this.db, {
+      targetUserId,
+      status,
+      limit,
+      ...filters,
+    });
   }
 
   isGuardianReadableTarget(targetUserId: string) {

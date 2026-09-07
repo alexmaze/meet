@@ -42,7 +42,10 @@ export type DoubaoWebSocketFactory = (
   options: ClientOptions,
 ) => WebSocket;
 
+import type { RelayConnectionLifecycle } from "./conversation-connection-lease.js";
+
 export type DoubaoWebSocketRelayOptions = {
+  lifecycle?: RelayConnectionLifecycle;
   client: WebSocket;
   config: NonNullable<AppConfig["doubao"]>;
   model: DoubaoRealtimeModel;
@@ -56,6 +59,7 @@ export type DoubaoWebSocketRelayOptions = {
 };
 
 export function relayDoubaoWebSocket({
+  lifecycle,
   client,
   config,
   model,
@@ -102,9 +106,15 @@ export function relayDoubaoWebSocket({
   const pendingClientMessages: Buffer[] = [];
   const renewal = new RealtimeRenewalController({
     provider: "doubao",
-    sendClientFrame: (frame) => sendJson(client, frame),
+    sendClientFrame: (frame) => {
+      return (!lifecycle || lifecycle.isCurrent()) && sendJson(client, frame);
+    },
     isSafeToRenew: () =>
-      !stopped && upstreamReady && sessionCreated && !gracefulCloseRequested,
+      (!lifecycle || lifecycle.isCurrent()) &&
+      !stopped &&
+      upstreamReady &&
+      sessionCreated &&
+      !gracefulCloseRequested,
   });
 
   const stop = (
@@ -124,6 +134,7 @@ export function relayDoubaoWebSocket({
   };
 
   client.on("message", (data, isBinary) => {
+    if (lifecycle && !lifecycle.isCurrent()) return;
     if (stopped) return;
     if (isBinary) {
       sendRelayError(
@@ -212,6 +223,10 @@ export function relayDoubaoWebSocket({
   );
 
   upstream.on("open", () => {
+    if (lifecycle && !lifecycle.isCurrent()) {
+      stop("relay", CLOSE_POLICY_VIOLATION, "Conversation lease expired");
+      return;
+    }
     if (stopped) return closeOrTerminate(upstream);
     upstreamReady = true;
     if (
@@ -233,6 +248,7 @@ export function relayDoubaoWebSocket({
   });
 
   upstream.on("message", (data, isBinary) => {
+    if (lifecycle && !lifecycle.isCurrent()) return;
     if (stopped) return;
     if (isBinary) {
       sendRelayError(
@@ -254,10 +270,17 @@ export function relayDoubaoWebSocket({
       return;
     }
     const type = readJsonEventType(message);
+    if (
+      type === "input_audio_buffer.speech_started" ||
+      type === "conversation.item.input_audio_transcription.completed" ||
+      type === "response.output_audio.delta"
+    )
+      lifecycle?.onActivity();
     renewal.observeProviderEvent(parseJsonMessage(message));
     if (type === "session.created" && !sessionCreated) {
       sessionCreated = true;
       renewal.markSessionReady();
+      lifecycle?.onReady();
       sendJson(client, { type: "relay.ready" });
       for (const pending of pendingClientMessages) {
         if (!sendWithBackpressure(upstream, pending, false)) {

@@ -46,7 +46,10 @@ export type QwenWebSocketFactory = (
   options: ClientOptions,
 ) => WebSocket;
 
+import type { RelayConnectionLifecycle } from "./conversation-connection-lease.js";
+
 export type QwenWebSocketRelayOptions = {
+  lifecycle?: RelayConnectionLifecycle;
   client: WebSocket;
   config: AppConfig["qwen"];
   model: QwenRealtimeModel;
@@ -126,6 +129,7 @@ export function buildQwenRealtimeWebSocketUrl(
  * In particular, base64 audio payloads are never decoded or logged by the API.
  */
 export function relayQwenWebSocket({
+  lifecycle,
   client,
   config,
   model,
@@ -171,8 +175,11 @@ export function relayQwenWebSocket({
   let teachingController: QwenTeachingSessionController | null = null;
   const renewal = new RealtimeRenewalController({
     provider: "qwen",
-    sendClientFrame: (frame) => sendJson(client, frame),
+    sendClientFrame: (frame) => {
+      return (!lifecycle || lifecycle.isCurrent()) && sendJson(client, frame);
+    },
     isSafeToRenew: () =>
+      (!lifecycle || lifecycle.isCurrent()) &&
       !stopped &&
       upstreamReady &&
       historyInjected &&
@@ -205,8 +212,14 @@ export function relayQwenWebSocket({
       now: teaching.now,
       timeouts: teaching.timeouts,
       transport: {
-        sendClientFrame: (frame) => sendJson(client, frame),
+        sendClientFrame: (frame) => {
+          return (
+            (!lifecycle || lifecycle.isCurrent()) && sendJson(client, frame)
+          );
+        },
         sendUpstreamEvent: (event) =>
+          (!lifecycle || lifecycle.isCurrent()) &&
+          !stopped &&
           sendWithBackpressure(
             upstream,
             Buffer.from(JSON.stringify(event)),
@@ -246,6 +259,7 @@ export function relayQwenWebSocket({
   };
 
   client.on("message", (data, isBinary) => {
+    if (lifecycle && !lifecycle.isCurrent()) return;
     if (stopped) return;
     if (isBinary) {
       sendRelayError(
@@ -257,7 +271,7 @@ export function relayQwenWebSocket({
       return;
     }
 
-    const message = rawDataToBuffer(data);
+    let message = rawDataToBuffer(data);
     if (
       message.byteLength === 0 ||
       message.byteLength > QWEN_RELAY_CLIENT_MAX_MESSAGE_BYTES
@@ -270,7 +284,32 @@ export function relayQwenWebSocket({
       stop("relay", CLOSE_POLICY_VIOLATION, "Invalid client event");
       return;
     }
-    const parsedJson = parseJsonMessage(message);
+    let parsedJson = parseJsonMessage(message);
+    if (readUnknownEventType(parsedJson) === "session.update") {
+      const parsed = qwenSessionUpdateEventSchema
+        .strict()
+        .safeParse(parsedJson);
+      if (!parsed.success) {
+        sendRelayError(
+          client,
+          "INVALID_CLIENT_EVENT",
+          "实时事件格式或大小无效。",
+        );
+        stop("relay", CLOSE_POLICY_VIOLATION, "Invalid client event");
+        return;
+      }
+      // Browser configuration may be a cold-recovery placeholder. The immutable
+      // server snapshot owns persona and voice for both initial and resumed calls.
+      parsedJson = {
+        ...parsed.data,
+        session: {
+          ...parsed.data.session,
+          voice: runtime.voice,
+          instructions: runtime.instructions,
+        },
+      };
+      message = Buffer.from(JSON.stringify(parsedJson));
+    }
     const teachingFrame =
       realtimeTeachingClientControlFrameSchema.safeParse(parsedJson);
     const renewalFrame = realtimeRenewalClientFrameSchema.safeParse(parsedJson);
@@ -390,6 +429,10 @@ export function relayQwenWebSocket({
   );
 
   upstream.on("open", () => {
+    if (lifecycle && !lifecycle.isCurrent()) {
+      stop("relay", CLOSE_POLICY_VIOLATION, "Conversation lease expired");
+      return;
+    }
     if (stopped) {
       closeOrTerminateUpstream(upstream);
       return;
@@ -416,6 +459,7 @@ export function relayQwenWebSocket({
   });
 
   upstream.on("message", (data, isBinary) => {
+    if (lifecycle && !lifecycle.isCurrent()) return;
     if (stopped) return;
     const message = rawDataToBuffer(data);
     if (message.byteLength > QWEN_RELAY_UPSTREAM_MAX_MESSAGE_BYTES) {
@@ -429,6 +473,14 @@ export function relayQwenWebSocket({
     }
     const renewalProviderEvent = isBinary ? null : parseJsonMessage(message);
     renewal.observeProviderEvent(renewalProviderEvent);
+    const activityType = readUnknownEventType(renewalProviderEvent);
+    if (
+      activityType === "input_audio_buffer.speech_started" ||
+      activityType ===
+        "conversation.item.input_audio_transcription.completed" ||
+      activityType === "response.audio.delta"
+    )
+      lifecycle?.onActivity();
     if (teachingController) {
       if (isBinary) {
         sendRelayError(
@@ -491,6 +543,7 @@ export function relayQwenWebSocket({
           session.eventId,
         );
         renewal.markSessionReady();
+        lifecycle?.onReady();
         if (!sendWithBackpressure(client, message, false)) {
           stop("relay", CLOSE_TRY_AGAIN_LATER, "Relay backpressure");
           return;
@@ -509,6 +562,7 @@ export function relayQwenWebSocket({
     ) {
       if (!injectContinuity()) return;
       renewal.markSessionReady();
+      lifecycle?.onReady();
     }
     if (!sendWithBackpressure(client, message, isBinary)) {
       stop("relay", CLOSE_TRY_AGAIN_LATER, "Relay backpressure");

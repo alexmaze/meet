@@ -2,6 +2,8 @@ import {
   characterAvatarUploadResponseSchema,
   apiErrorSchema,
   characterCatalogResponseSchema,
+  characterFavoritesResponseSchema,
+  characterFavoriteResponseSchema,
   characterListResponseSchema,
   characterResponseSchema,
   characterRuntimeResponseSchema,
@@ -47,6 +49,25 @@ export async function listCharacters(
 ): Promise<CharacterSummary[]> {
   const body = await requestJson("/api/characters", { signal });
   return parseCharacterList(body);
+}
+
+export async function listFavoriteCharacterIds(
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const body = await requestJson("/api/characters/favorites", { signal });
+  return parseWith(characterFavoritesResponseSchema, body).characterIds;
+}
+
+export async function setCharacterFavorite(
+  characterId: string,
+  favorite: boolean,
+): Promise<boolean> {
+  const body = await requestJson(`${characterUrl(characterId)}/favorite`, {
+    method: "PUT",
+    headers: jsonHeaders,
+    body: JSON.stringify({ favorite }),
+  });
+  return parseWith(characterFavoriteResponseSchema, body).favorite;
 }
 
 export async function getCharacterCatalog(

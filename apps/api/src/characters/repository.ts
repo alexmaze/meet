@@ -10,6 +10,13 @@ import type {
 } from "@meet/database";
 
 export interface CharacterRepository {
+  listFavoriteIds(actorUserId: string): Promise<string[]>;
+  setFavorite(
+    actorUserId: string,
+    characterId: string,
+    favorite: boolean,
+    createdAt: Date,
+  ): Promise<boolean>;
   listVisible(actorUserId: string): Promise<CharacterAggregate[]>;
   findVisible(
     actorUserId: string,

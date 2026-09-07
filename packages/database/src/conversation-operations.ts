@@ -3,11 +3,20 @@ import type {
   ConversationMode,
   ConversationRuntimeSnapshot,
   ConversationStatus,
+  ConversationWriter,
+  CompleteConversationRequest,
 } from "@meet/protocol";
 import { conversationRuntimeSnapshotSchema } from "@meet/protocol";
 import { and, asc, desc, eq, gt, inArray, isNull, or } from "drizzle-orm";
 
 import type { Database } from "./client.js";
+import {
+  acceptsConversationWriter,
+  clearConnection,
+  ensureConversationControl,
+  findConversationOperation,
+  type ConversationControlFailure,
+} from "./conversation-lifecycle-operations.js";
 import {
   characters,
   characterMemories,
@@ -16,6 +25,8 @@ import {
   conversationSummaryCheckpoints,
   conversationSummaries,
   conversations,
+  conversationControls,
+  conversationOperations,
   providerProfiles,
   userAccounts,
   voiceProfiles,
@@ -70,12 +81,16 @@ export type AppendConversationMessagesResult =
   | { kind: "appended" | "unchanged"; acknowledgedSequence: number }
   | { kind: "not_found" }
   | { kind: "completed" }
-  | { kind: "sequence_conflict" };
+  | { kind: "sequence_conflict" }
+  | { kind: "messages_missing" }
+  | { kind: ConversationControlFailure };
 
 export type CompleteConversationResult =
   | { kind: "completed" | "unchanged"; conversation: ConversationAggregate }
   | { kind: "not_found" }
-  | { kind: "sequence_conflict" };
+  | { kind: "sequence_conflict" }
+  | { kind: "messages_missing" }
+  | { kind: ConversationControlFailure };
 
 const aggregateSelection = {
   conversation: conversations,
@@ -425,80 +440,103 @@ export async function appendConversationMessages(
     actorUserId: string;
     conversationId: string;
     messages: AppendConversationMessagesRequest["messages"];
+    writer: ConversationWriter;
     updatedAt?: Date;
     onCheckpoint?: ConversationCheckpointHook;
   },
 ): Promise<AppendConversationMessagesResult> {
   const updatedAt = input.updatedAt ?? new Date();
-  return db.transaction(async (tx) => {
-    const conversation = await lockOwnedConversation(
-      tx,
-      input.actorUserId,
-      input.conversationId,
-    );
-    if (!conversation) return { kind: "not_found" };
-    if (conversation.status === "completed") return { kind: "completed" };
-
-    const existing = await tx
-      .select()
-      .from(conversationMessages)
-      .where(
-        and(
-          eq(conversationMessages.conversationId, input.conversationId),
-          inArray(
-            conversationMessages.sequence,
-            input.messages.map(({ sequence }) => sequence),
-          ),
-        ),
-      );
-    const plan = planConversationMessageAppend(
-      conversation.lastSequence,
-      existing,
-      input.messages,
-    );
-    if (plan.kind === "sequence_conflict") return plan;
-    const { additions, acknowledgedSequence } = plan;
-
-    if (additions.length === 0) {
-      return {
-        kind: "unchanged",
-        acknowledgedSequence: conversation.lastSequence,
-      };
-    }
-    const inserted = await tx
-      .insert(conversationMessages)
-      .values(
-        additions.map((message) => ({
-          ...message,
-          conversationId: input.conversationId,
-          userId: input.actorUserId,
-          createdAt: new Date(message.createdAt),
-        })),
-      )
-      .onConflictDoNothing()
-      .returning({ id: conversationMessages.id });
-    if (inserted.length !== additions.length) {
-      return { kind: "sequence_conflict" };
-    }
-
-    await tx
-      .update(conversations)
-      .set({
-        lastSequence: acknowledgedSequence,
-        messageCount: conversation.messageCount + additions.length,
-        updatedAt,
-      })
-      .where(eq(conversations.id, input.conversationId));
-    if (input.onCheckpoint) {
-      const aggregate = await findConversationAggregate(
+  return db
+    .transaction<AppendConversationMessagesResult>(async (tx) => {
+      const conversation = await lockOwnedConversation(
         tx,
+        input.actorUserId,
         input.conversationId,
       );
-      if (!aggregate) throw new Error("Updated conversation was not readable.");
-      await input.onCheckpoint(tx, aggregate);
-    }
-    return { kind: "appended", acknowledgedSequence };
-  });
+      if (!conversation) return { kind: "not_found" };
+      if (conversation.status === "completed") return { kind: "completed" };
+      const control = await ensureConversationControl(tx, input.conversationId);
+      if (!acceptsConversationWriter(control, input.writer, updatedAt))
+        return { kind: "writer_stale" };
+
+      const existing = await tx
+        .select()
+        .from(conversationMessages)
+        .where(
+          and(
+            eq(conversationMessages.conversationId, input.conversationId),
+            inArray(
+              conversationMessages.sequence,
+              input.messages.map(({ sequence }) => sequence),
+            ),
+          ),
+        );
+      const plan = planConversationMessageAppend(
+        conversation.lastSequence,
+        existing,
+        input.messages,
+      );
+      if (plan.kind === "sequence_conflict") return plan;
+      const { additions, acknowledgedSequence } = plan;
+
+      if (additions.length === 0) {
+        return {
+          kind: "unchanged",
+          acknowledgedSequence: conversation.lastSequence,
+        };
+      }
+      const inserted = await tx
+        .insert(conversationMessages)
+        .values(
+          additions.map((message) => ({
+            ...message,
+            conversationId: input.conversationId,
+            userId: input.actorUserId,
+            createdAt: new Date(message.createdAt),
+          })),
+        )
+        .onConflictDoNothing()
+        .returning({ id: conversationMessages.id });
+      if (inserted.length !== additions.length) {
+        throw new ConversationAppendConflict();
+      }
+
+      await tx
+        .update(conversations)
+        .set({
+          lastSequence: acknowledgedSequence,
+          messageCount: conversation.messageCount + additions.length,
+          updatedAt,
+        })
+        .where(eq(conversations.id, input.conversationId));
+      const activityAt = additions.reduce(
+        (latest, message) =>
+          Math.max(
+            latest,
+            Math.min(updatedAt.getTime(), Date.parse(message.createdAt)),
+          ),
+        control.lastActivityAt?.getTime() ?? conversation.startedAt.getTime(),
+      );
+      await tx
+        .update(conversationControls)
+        .set({ lastSavedAt: updatedAt, lastActivityAt: new Date(activityAt) })
+        .where(eq(conversationControls.conversationId, input.conversationId));
+      if (input.onCheckpoint) {
+        const aggregate = await findConversationAggregate(
+          tx,
+          input.conversationId,
+        );
+        if (!aggregate)
+          throw new Error("Updated conversation was not readable.");
+        await input.onCheckpoint(tx, aggregate);
+      }
+      return { kind: "appended", acknowledgedSequence };
+    })
+    .catch((error: unknown) => {
+      if (error instanceof ConversationAppendConflict)
+        return { kind: "sequence_conflict" as const };
+      throw error;
+    });
 }
 
 export function planConversationMessageAppend(
@@ -548,15 +586,14 @@ export function planConversationMessageAppend(
 
 export async function completeConversation(
   db: Database,
-  input: {
+  input: CompleteConversationRequest & {
     actorUserId: string;
     conversationId: string;
-    lastSequence: number;
     endedAt?: Date;
     onCompleted?: ConversationCompletionHook;
   },
 ): Promise<CompleteConversationResult> {
-  const endedAt = input.endedAt ?? new Date();
+  const now = input.endedAt ?? new Date();
   return db.transaction(async (tx) => {
     const conversation = await lockOwnedConversation(
       tx,
@@ -564,10 +601,21 @@ export async function completeConversation(
       input.conversationId,
     );
     if (!conversation) return { kind: "not_found" };
-    if (conversation.lastSequence !== input.lastSequence) {
-      return { kind: "sequence_conflict" };
-    }
+    const control = await ensureConversationControl(tx, input.conversationId);
+    const operation = await findConversationOperation(
+      tx,
+      input.conversationId,
+      input.requestId,
+    );
+    if (
+      operation &&
+      (operation.kind !== "finish" ||
+        operation.targetSequence !== input.lastSequence)
+    )
+      return { kind: "request_conflict" };
     if (conversation.status === "completed") {
+      // Only the exact committed operation may replay without a current lease.
+      if (!operation?.completedAt) return { kind: "already_completed" };
       const aggregate = await findConversationAggregate(
         tx,
         input.conversationId,
@@ -575,10 +623,73 @@ export async function completeConversation(
       if (!aggregate) return { kind: "not_found" };
       return { kind: "unchanged", conversation: aggregate };
     }
+    if (!acceptsConversationWriter(control, input.writer, now))
+      return { kind: "writer_stale" };
+    if (!operation)
+      await tx.insert(conversationOperations).values({
+        conversationId: input.conversationId,
+        requestId: input.requestId,
+        kind: "finish",
+        clientId: input.writer.clientId,
+        writerEpoch: input.writer.epoch,
+        intent: "finish",
+        targetSequence: input.lastSequence,
+        createdAt: now,
+      });
+    else
+      await tx
+        .update(conversationOperations)
+        .set({
+          clientId: input.writer.clientId,
+          writerEpoch: input.writer.epoch,
+        })
+        .where(
+          and(
+            eq(conversationOperations.conversationId, input.conversationId),
+            eq(conversationOperations.requestId, input.requestId),
+          ),
+        );
+    await tx
+      .update(conversationControls)
+      .set({
+        endRequestId: input.requestId,
+        endTargetSequence: input.lastSequence,
+      })
+      .where(eq(conversationControls.conversationId, input.conversationId));
+    if (conversation.lastSequence < input.lastSequence && !input.discardMissing)
+      return { kind: "messages_missing" };
+    if (conversation.lastSequence > input.lastSequence)
+      return { kind: "sequence_conflict" };
+    const endedAt = new Date(
+      Math.max(
+        conversation.startedAt.getTime(),
+        control.lastActivityAt?.getTime() ??
+          conversation.endedAt?.getTime() ??
+          conversation.startedAt.getTime(),
+      ),
+    );
     await tx
       .update(conversations)
-      .set({ status: "completed", endedAt, updatedAt: endedAt })
+      .set({ status: "completed", endedAt, updatedAt: now })
       .where(eq(conversations.id, input.conversationId));
+    await tx
+      .update(conversationControls)
+      .set({
+        ...clearConnection(control, now),
+        finalizedAt: now,
+        endRequestId: input.requestId,
+        endTargetSequence: input.lastSequence,
+      })
+      .where(eq(conversationControls.conversationId, input.conversationId));
+    await tx
+      .update(conversationOperations)
+      .set({ completedAt: now })
+      .where(
+        and(
+          eq(conversationOperations.conversationId, input.conversationId),
+          eq(conversationOperations.requestId, input.requestId),
+        ),
+      );
     const aggregate = await findConversationAggregate(tx, input.conversationId);
     if (!aggregate) throw new Error("Completed conversation was not readable.");
     await input.onCompleted?.(tx, aggregate);
@@ -619,7 +730,7 @@ export type ConversationCheckpointHook = (
 
 type Transaction = DatabaseTransaction;
 
-async function findConversationAggregate(
+export async function findConversationAggregate(
   db: Database | Transaction,
   conversationId: string,
 ): Promise<ConversationAggregate | null> {
@@ -632,7 +743,7 @@ async function findConversationAggregate(
   return aggregate ?? null;
 }
 
-async function lockOwnedConversation(
+export async function lockOwnedConversation(
   tx: Transaction,
   actorUserId: string,
   conversationId: string,
@@ -664,3 +775,5 @@ function sameMessage(
     stored.createdAt.toISOString() === input.createdAt
   );
 }
+
+class ConversationAppendConflict extends Error {}

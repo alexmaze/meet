@@ -210,6 +210,11 @@ export class DoubaoRealtimeClient implements RealtimeClient {
   async close(): Promise<void> {
     const lifecycle = this.lifecycle;
     this.manuallyClosing = true;
+    // Stop capture and physical playback before waiting for transport closure.
+    this.microphone?.setEnabled(false);
+    void this.microphone?.stop();
+    void this.playback?.stop();
+    this.clearLegacyRemoteAudio();
     this.renewal.reset();
     this.clearReconnectState();
     const socket = this.socket;
@@ -319,6 +324,7 @@ export class DoubaoRealtimeClient implements RealtimeClient {
           this.options.characterId,
           this.options.conversationId,
           this.dependencies.getLocationHref?.(),
+          this.options.writer,
         ),
       ) ??
       new WebSocket(
@@ -326,6 +332,7 @@ export class DoubaoRealtimeClient implements RealtimeClient {
           this.options.characterId,
           this.options.conversationId,
           this.dependencies.getLocationHref?.(),
+          this.options.writer,
         ),
       );
     this.socket = socket;
@@ -419,9 +426,11 @@ export class DoubaoRealtimeClient implements RealtimeClient {
     if (
       frame.status === 401 ||
       frame.status === 403 ||
+      frame.status === 409 ||
       frame.code === "DOUBAO_AUTHORIZATION_FAILED"
     ) {
       this.terminalSocketError = true;
+      if (frame.status === 401) this.callbacks.onUnauthorized?.();
     }
     this.reportError(
       frame.code ?? "REALTIME_RELAY_ERROR",
@@ -675,13 +684,19 @@ export class DoubaoRealtimeClient implements RealtimeClient {
         ? "通话已自动续接，可以继续聊天"
         : resumed
           ? "连接已恢复，已接回确认过的对话"
-          : this.microphone?.microphoneLabel
-            ? `已连接，麦克风：${this.microphone.microphoneLabel}`
-            : "已连接，可以开始说话",
+          : this.options?.resumed
+            ? "已接上，可以继续说"
+            : this.microphone?.microphoneLabel
+              ? `已连接，麦克风：${this.microphone.microphoneLabel}`
+              : "已连接，可以开始说话",
     );
     this.snapshot = { ...this.snapshot, activity: "listening" };
     this.applyMicrophoneGate();
-    if (this.options?.assistantStarts && !this.initialGreetingRequested) {
+    if (
+      this.options?.assistantStarts &&
+      !this.options.resumed &&
+      !this.initialGreetingRequested
+    ) {
       this.initialGreetingRequested = true;
       const greeting = this.options.openingText?.trim();
       if (greeting) {

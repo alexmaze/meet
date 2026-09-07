@@ -4,6 +4,10 @@ import {
   conversationIdParamsSchema,
   conversationListQuerySchema,
   createConversationRequestSchema,
+  prepareConversationRequestSchema,
+  conversationStatusQuerySchema,
+  conversationOverviewQuerySchema,
+  conversationHeartbeatRequestSchema,
   type UserAccount,
 } from "@meet/protocol";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -60,6 +64,89 @@ export async function registerConversationRoutes(
     }
   });
 
+  app.get("/api/conversations/overview", async (request, reply) => {
+    noStore(reply);
+    const actor = await authenticateActor(request, reply, config, auth);
+    if (!actor) return;
+    const query = conversationOverviewQuerySchema.safeParse(request.query);
+    if (!query.success) return invalidRequest(reply);
+    try {
+      return await conversations.overview(
+        actor,
+        query.data.clientId,
+        query.data.characterId,
+      );
+    } catch (error) {
+      return sendConversationError(reply, error);
+    }
+  });
+  app.get(
+    "/api/conversations/:conversationId/status",
+    async (request, reply) => {
+      noStore(reply);
+      const actor = await authenticateActor(request, reply, config, auth);
+      if (!actor) return;
+      const params = conversationIdParamsSchema.safeParse(request.params);
+      const query = conversationStatusQuerySchema.safeParse(request.query);
+      if (!params.success || !query.success) return invalidRequest(reply);
+      try {
+        return await conversations.status(
+          actor,
+          params.data.conversationId,
+          query.data.clientId,
+          query.data.requestId,
+        );
+      } catch (error) {
+        return sendConversationError(reply, error);
+      }
+    },
+  );
+  app.post(
+    "/api/conversations/:conversationId/prepare",
+    async (request, reply) => {
+      noStore(reply);
+      const actor = await authenticateActor(request, reply, config, auth);
+      if (!actor) return;
+      const params = conversationIdParamsSchema.safeParse(request.params);
+      const input = prepareConversationRequestSchema.safeParse(request.body);
+      if (!params.success || !input.success) return invalidRequest(reply);
+      try {
+        return await conversations.prepare(
+          actor,
+          params.data.conversationId,
+          input.data,
+        );
+      } catch (error) {
+        return sendConversationError(reply, error);
+      }
+    },
+  );
+  app.post(
+    "/api/conversations/:conversationId/heartbeat",
+    async (request, reply) => {
+      noStore(reply);
+      const actor = await authenticateActor(request, reply, config, auth);
+      if (!actor) return;
+      const params = conversationIdParamsSchema.safeParse(request.params);
+      const input = conversationHeartbeatRequestSchema.safeParse(request.body);
+      if (!params.success || !input.success) return invalidRequest(reply);
+      try {
+        await conversations.heartbeatWriter(
+          actor,
+          params.data.conversationId,
+          input.data.writer,
+        );
+        return await conversations.status(
+          actor,
+          params.data.conversationId,
+          input.data.writer.clientId,
+        );
+      } catch (error) {
+        return sendConversationError(reply, error);
+      }
+    },
+  );
+
   app.get("/api/conversations/:conversationId", async (request, reply) => {
     noStore(reply);
     const actor = await authenticateActor(request, reply, config, auth);
@@ -108,11 +195,18 @@ export async function registerConversationRoutes(
       const input = completeConversationRequestSchema.safeParse(request.body);
       if (!params.success || !input.success) return invalidRequest(reply);
       try {
+        const conversation = await conversations.complete(
+          actor,
+          params.data.conversationId,
+          input.data,
+        );
         return {
-          conversation: await conversations.complete(
+          conversation,
+          status: await conversations.status(
             actor,
             params.data.conversationId,
-            input.data.lastSequence,
+            input.data.writer.clientId,
+            input.data.requestId,
           ),
         };
       } catch (error) {

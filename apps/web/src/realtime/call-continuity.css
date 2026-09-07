@@ -1,0 +1,144 @@
+.call-continuity {
+  min-height: 100dvh;
+  padding: max(32px, env(safe-area-inset-top)) 20px
+    max(32px, env(safe-area-inset-bottom));
+  display: grid;
+  place-items: center;
+  background: #f4f2ee;
+  color: #263731;
+}
+.call-finish-card {
+  width: min(100%, 600px);
+  padding: clamp(24px, 5vw, 44px);
+  border: 1px solid #deded5;
+  border-radius: 28px;
+  background: #fffefa;
+  box-shadow: 0 14px 50px #2637310a;
+}
+.call-finish-avatar {
+  width: 80px;
+  height: 80px;
+  object-fit: cover;
+  border-radius: 24px;
+}
+.call-finish-kicker {
+  margin: 20px 0 8px;
+  color: var(--character-accent, #466457);
+  font-size: 14px;
+}
+.call-finish-card h1 {
+  margin: 0 0 14px;
+  font-size: clamp(24px, 5vw, 32px);
+  line-height: 1.4;
+}
+.call-finish-card p {
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.call-finish-status {
+  display: grid;
+  gap: 8px;
+  padding: 18px;
+  margin-top: 26px;
+  background: #f0f5ed;
+  border-radius: 16px;
+}
+.call-finish-status small,
+.call-finish-note {
+  color: #56665c;
+}
+.call-finish-error {
+  color: #8c3a2d;
+}
+.call-finish-results {
+  display: grid;
+  gap: 20px;
+  margin: 24px 0;
+}
+.call-finish-results dt {
+  font-weight: 650;
+  margin-bottom: 6px;
+}
+.call-finish-results dd {
+  margin: 0;
+  color: #56665c;
+  line-height: 1.65;
+}
+.call-finish-results details {
+  margin-top: 10px;
+}
+.call-finish-results summary {
+  cursor: pointer;
+}
+.call-finish-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 24px;
+}
+.call-continuity button {
+  min-height: 44px;
+  padding: 10px 16px;
+  border: 1px solid #cbd4c8;
+  border-radius: 12px;
+  background: #fffefa;
+  color: #263731;
+  cursor: pointer;
+  font: inherit;
+}
+.call-continuity button.primary-button {
+  background: #344e42;
+  color: #fff;
+  border-color: #344e42;
+}
+.call-continuity button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+.call-continuity button:focus-visible {
+  outline: 3px solid var(--character-accent, #466457);
+  outline-offset: 3px;
+}
+.call-leave-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: #10231c80;
+}
+.call-leave-dialog {
+  width: min(100%, 460px);
+  padding: 28px;
+  border-radius: 22px;
+  background: #fffefa;
+  box-shadow: 0 20px 70px #0003;
+}
+.call-leave-dialog h2 {
+  margin: 0;
+}
+.call-leave-dialog button {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+}
+.call-reauth {
+  margin-top: 20px;
+  padding: 18px;
+  border: 1px solid #deded5;
+  border-radius: 14px;
+}
+.call-reauth label,
+.call-reauth input {
+  display: block;
+  width: 100%;
+  margin: 8px 0;
+}
+.call-reauth input {
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid #cbd4c8;
+  border-radius: 10px;
+  font: inherit;
+}
