@@ -673,6 +673,13 @@ function ProfilePage({ session }: { session: AuthenticatedAppSession }) {
           </span>
           <span aria-hidden="true">→</span>
         </button>
+        <button type="button" onClick={session.openCompanionDevices}>
+          <span>
+            <strong>陪伴设备</strong>
+            <small>用配对码绑定音箱或终端到当前账号</small>
+          </span>
+          <span aria-hidden="true">→</span>
+        </button>
         {user.accountType === "admin" && (
           <button type="button" onClick={session.openFamilyMembers}>
             <span>

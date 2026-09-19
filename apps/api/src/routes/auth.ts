@@ -11,13 +11,16 @@ import {
   setSessionCookie,
 } from "../auth/http.js";
 import { LoginRateLimiter } from "../auth/login-rate-limit.js";
+import { authenticateRequestActor } from "../auth/request-actor.js";
 import { AuthError, type AuthService } from "../auth/service.js";
 import type { AppConfig } from "../config.js";
+import type { DeviceService } from "../devices/service.js";
 
 export async function registerAuthRoutes(
   app: FastifyInstance,
   config: AppConfig,
   auth: AuthService,
+  devices: DeviceService,
 ): Promise<void> {
   const loginRateLimiter = new LoginRateLimiter(
     config.auth.loginMaxAttempts,
@@ -57,15 +60,15 @@ export async function registerAuthRoutes(
 
   app.get("/api/auth/me", async (request, reply) => {
     reply.header("Cache-Control", "no-store");
-    try {
-      const user = await auth.authenticate(getSessionToken(request, config));
-      return { user };
-    } catch (error) {
-      if (error instanceof AuthError && error.statusCode === 401) {
-        clearSessionCookie(reply, config);
-      }
-      return sendAuthError(reply, error);
-    }
+    const actor = await authenticateRequestActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+    );
+    if (!actor) return;
+    return { user: actor.user };
   });
 
   app.post("/api/auth/logout", async (request, reply) => {

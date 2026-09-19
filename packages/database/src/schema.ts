@@ -1810,12 +1810,128 @@ export const relationshipTransferConversationOrigins = pgTable(
   ],
 );
 
+export const companionDevices = pgTable(
+  "companion_devices",
+  {
+    id: uuid("id").primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => userAccounts.id, { onDelete: "cascade" }),
+    displayName: varchar("display_name", { length: 80 }).notNull(),
+    selectedCharacterId: uuid("selected_character_id").references(
+      () => characters.id,
+      { onDelete: "set null" },
+    ),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("companion_devices_user_id_idx").on(table.userId),
+    check(
+      "companion_devices_display_name_not_blank",
+      sql`length(btrim(${table.displayName})) > 0`,
+    ),
+  ],
+);
+
+export const devicePairingSessions = pgTable(
+  "device_pairing_sessions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    codeHash: varchar("code_hash", { length: 64 }).notNull(),
+    devicePublicId: uuid("device_public_id").notNull(),
+    displayName: varchar("display_name", { length: 80 }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    claimedByUserId: uuid("claimed_by_user_id").references(
+      () => userAccounts.id,
+      { onDelete: "set null" },
+    ),
+    pendingDeviceCredential: text("pending_device_credential"),
+    credentialDeliveredAt: timestamp("credential_delivered_at", {
+      withTimezone: true,
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("device_pairing_sessions_code_hash_unique").on(table.codeHash),
+    uniqueIndex("device_pairing_sessions_device_public_id_unique").on(
+      table.devicePublicId,
+    ),
+    index("device_pairing_sessions_expires_at_idx").on(table.expiresAt),
+    check(
+      "device_pairing_sessions_display_name_not_blank",
+      sql`length(btrim(${table.displayName})) > 0`,
+    ),
+    check(
+      "device_pairing_sessions_expiry_after_creation",
+      sql`${table.expiresAt} > ${table.createdAt}`,
+    ),
+    check(
+      "device_pairing_sessions_claim_fields_match",
+      sql`(
+        (${table.claimedAt} IS NULL AND ${table.claimedByUserId} IS NULL AND ${table.pendingDeviceCredential} IS NULL)
+        OR
+        (${table.claimedAt} IS NOT NULL AND ${table.claimedByUserId} IS NOT NULL)
+      )`,
+    ),
+  ],
+);
+
+export const deviceCredentials = pgTable(
+  "device_credentials",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => companionDevices.id, { onDelete: "cascade" }),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("device_credentials_token_hash_unique").on(table.tokenHash),
+    index("device_credentials_device_id_idx").on(table.deviceId),
+    index("device_credentials_active_device_expires_idx")
+      .on(table.deviceId, table.expiresAt)
+      .where(sql`${table.revokedAt} IS NULL`),
+    check(
+      "device_credentials_expiry_after_creation",
+      sql`${table.expiresAt} > ${table.createdAt}`,
+    ),
+    check(
+      "device_credentials_revocation_after_creation",
+      sql`${table.revokedAt} IS NULL OR ${table.revokedAt} >= ${table.createdAt}`,
+    ),
+  ],
+);
+
 export type UserAccount = typeof userAccounts.$inferSelect;
 export type NewUserAccount = typeof userAccounts.$inferInsert;
 export type PasswordCredential = typeof passwordCredentials.$inferSelect;
 export type NewPasswordCredential = typeof passwordCredentials.$inferInsert;
 export type LoginSession = typeof loginSessions.$inferSelect;
 export type NewLoginSession = typeof loginSessions.$inferInsert;
+export type CompanionDeviceRecord = typeof companionDevices.$inferSelect;
+export type NewCompanionDeviceRecord = typeof companionDevices.$inferInsert;
+export type DevicePairingSessionRecord =
+  typeof devicePairingSessions.$inferSelect;
+export type NewDevicePairingSessionRecord =
+  typeof devicePairingSessions.$inferInsert;
+export type DeviceCredentialRecord = typeof deviceCredentials.$inferSelect;
+export type NewDeviceCredentialRecord = typeof deviceCredentials.$inferInsert;
 export type AccountSecurityAuditEvent =
   typeof accountSecurityAuditEvents.$inferSelect;
 export type NewAccountSecurityAuditEvent =

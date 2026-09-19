@@ -14,13 +14,13 @@ import {
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import {
-  clearSessionCookie,
   getSafeErrorLogContext,
-  getSessionToken,
   sendAuthError,
 } from "../auth/http.js";
 import { AuthError, type AuthService } from "../auth/service.js";
+import { authenticateRequestActor } from "../auth/request-actor.js";
 import type { AppConfig } from "../config.js";
+import type { DeviceService } from "../devices/service.js";
 import {
   TeachingServiceError,
   type TeachingService,
@@ -31,10 +31,17 @@ export async function registerTeachingRoutes(
   config: AppConfig,
   auth: AuthService,
   teaching: TeachingService,
+  devices: DeviceService,
 ): Promise<void> {
   app.get("/api/teaching/targets", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+    );
     if (!actor) return;
     if (!authorizePlanManager(reply, teaching, actor)) return;
     try {
@@ -46,7 +53,13 @@ export async function registerTeachingRoutes(
 
   app.get("/api/teaching/plans", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+    );
     if (!actor) return;
     if (!authorizePlanManager(reply, teaching, actor)) return;
     const query = learningPlanListQuerySchema.safeParse(request.query);
@@ -64,7 +77,13 @@ export async function registerTeachingRoutes(
     "/api/teaching/plans/:childUserId/:characterId",
     async (request, reply) => {
       noStore(reply);
-      const actor = await authenticateActor(request, reply, config, auth);
+      const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+    );
       if (!actor) return;
       if (!authorizePlanManager(reply, teaching, actor)) return;
       const params = learningPlanParamsSchema.safeParse(request.params);
@@ -89,7 +108,13 @@ export async function registerTeachingRoutes(
     "/api/teaching/plans/:childUserId/:characterId/generations",
     async (request, reply) => {
       noStore(reply);
-      const actor = await authenticateActor(request, reply, config, auth);
+      const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+    );
       if (!actor) return;
       if (!authorizePlanManager(reply, teaching, actor)) return;
       const params = learningPlanParamsSchema.safeParse(request.params);
@@ -112,7 +137,13 @@ export async function registerTeachingRoutes(
     "/api/teaching/plans/:childUserId/:characterId/generations/:generationId",
     async (request, reply) => {
       noStore(reply);
-      const actor = await authenticateActor(request, reply, config, auth);
+      const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+    );
       if (!actor) return;
       if (!authorizePlanManager(reply, teaching, actor)) return;
       const params = learningPlanGenerationParamsSchema.safeParse(
@@ -136,7 +167,13 @@ export async function registerTeachingRoutes(
     "/api/teaching/plans/:childUserId/:characterId/content",
     async (request, reply) => {
       noStore(reply);
-      const actor = await authenticateActor(request, reply, config, auth);
+      const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+    );
       if (!actor) return;
       if (!authorizePlanManager(reply, teaching, actor)) return;
       const params = learningPlanParamsSchema.safeParse(request.params);
@@ -157,7 +194,13 @@ export async function registerTeachingRoutes(
     "/api/teaching/plans/:childUserId/:characterId/content/publish",
     async (request, reply) => {
       noStore(reply);
-      const actor = await authenticateActor(request, reply, config, auth);
+      const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+    );
       if (!actor) return;
       if (!authorizePlanManager(reply, teaching, actor)) return;
       const params = learningPlanParamsSchema.safeParse(request.params);
@@ -180,7 +223,13 @@ export async function registerTeachingRoutes(
 
   app.get("/api/teaching/availability/:characterId", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+    );
     if (!actor) return;
     if (!authorizeChild(reply, teaching, actor)) return;
     const params = childTeachingAvailabilityParamsSchema.safeParse(
@@ -200,20 +249,32 @@ export async function registerTeachingRoutes(
     "/api/conversations/:conversationId/teaching/prepare",
     async (request, reply) => {
       noStore(reply);
-      const actor = await authenticateActor(request, reply, config, auth);
-      if (!actor) return;
+      const requestActor = await authenticateRequestActor(
+        request,
+        reply,
+        config,
+        auth,
+        devices,
+        { onError: (error) => sendTeachingError(reply, error) },
+      );
+      if (!requestActor) return;
+      const actor = requestActor.user;
       if (!authorizeChild(reply, teaching, actor)) return;
       const params = teachingConversationParamsSchema.safeParse(request.params);
       const input = prepareConversationTeachingRequestSchema.safeParse(
         request.body,
       );
       if (!params.success || !input.success) return invalidRequest(reply);
+      const prepareInput =
+        requestActor.authKind === "device" && actor.accountType === "child"
+          ? ({ choice: "chat_only" } as const)
+          : input.data;
       try {
         return {
           teaching: await teaching.prepareConversation(
             actor,
             params.data.conversationId,
-            input.data,
+            prepareInput,
           ),
         };
       } catch (error) {
@@ -226,7 +287,13 @@ export async function registerTeachingRoutes(
     "/api/conversations/:conversationId/teaching/mute",
     async (request, reply) => {
       noStore(reply);
-      const actor = await authenticateActor(request, reply, config, auth);
+      const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+    );
       if (!actor) return;
       if (!authorizeChild(reply, teaching, actor)) return;
       const params = teachingConversationParamsSchema.safeParse(request.params);
@@ -253,16 +320,17 @@ async function authenticateActor(
   reply: FastifyReply,
   config: AppConfig,
   auth: AuthService,
+  devices: DeviceService,
 ): Promise<UserAccount | null> {
-  try {
-    return await auth.authenticate(getSessionToken(request, config));
-  } catch (error) {
-    if (error instanceof AuthError && error.statusCode === 401) {
-      clearSessionCookie(reply, config);
-    }
-    sendTeachingError(reply, error);
-    return null;
-  }
+  const actor = await authenticateRequestActor(
+    request,
+    reply,
+    config,
+    auth,
+    devices,
+    { onError: (error) => sendTeachingError(reply, error) },
+  );
+  return actor?.user ?? null;
 }
 
 function authorizePlanManager(

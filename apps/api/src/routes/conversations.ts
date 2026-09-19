@@ -9,27 +9,34 @@ import {
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import {
-  clearSessionCookie,
   getSafeErrorLogContext,
-  getSessionToken,
   sendAuthError,
 } from "../auth/http.js";
 import { AuthError, type AuthService } from "../auth/service.js";
+import { authenticateRequestActor } from "../auth/request-actor.js";
 import {
   ConversationServiceError,
   type ConversationService,
 } from "../conversations/service.js";
 import type { AppConfig } from "../config.js";
+import type { DeviceService } from "../devices/service.js";
 
 export async function registerConversationRoutes(
   app: FastifyInstance,
   config: AppConfig,
   auth: AuthService,
   conversations: ConversationService,
+  devices: DeviceService,
 ): Promise<void> {
   app.post("/api/conversations", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+    );
     if (!actor) return;
     const input = createConversationRequestSchema.safeParse(request.body);
     if (!input.success) return invalidRequest(reply);
@@ -43,7 +50,13 @@ export async function registerConversationRoutes(
 
   app.get("/api/conversations", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+    );
     if (!actor) return;
     const query = conversationListQuerySchema.safeParse(request.query);
     if (!query.success) return invalidRequest(reply);
@@ -62,7 +75,13 @@ export async function registerConversationRoutes(
 
   app.get("/api/conversations/:conversationId", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+    );
     if (!actor) return;
     const params = conversationIdParamsSchema.safeParse(request.params);
     if (!params.success) return invalidRequest(reply);
@@ -77,7 +96,13 @@ export async function registerConversationRoutes(
     "/api/conversations/:conversationId/messages",
     async (request, reply) => {
       noStore(reply);
-      const actor = await authenticateActor(request, reply, config, auth);
+      const actor = await authenticateActor(
+        request,
+        reply,
+        config,
+        auth,
+        devices,
+      );
       if (!actor) return;
       const params = conversationIdParamsSchema.safeParse(request.params);
       const input = appendConversationMessagesRequestSchema.safeParse(
@@ -102,7 +127,13 @@ export async function registerConversationRoutes(
     "/api/conversations/:conversationId/complete",
     async (request, reply) => {
       noStore(reply);
-      const actor = await authenticateActor(request, reply, config, auth);
+      const actor = await authenticateActor(
+        request,
+        reply,
+        config,
+        auth,
+        devices,
+      );
       if (!actor) return;
       const params = conversationIdParamsSchema.safeParse(request.params);
       const input = completeConversationRequestSchema.safeParse(request.body);
@@ -123,7 +154,13 @@ export async function registerConversationRoutes(
 
   app.delete("/api/conversations/:conversationId", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+    );
     if (!actor) return;
     const params = conversationIdParamsSchema.safeParse(request.params);
     if (!params.success) return invalidRequest(reply);
@@ -141,16 +178,17 @@ async function authenticateActor(
   reply: FastifyReply,
   config: AppConfig,
   auth: AuthService,
+  devices: DeviceService,
 ): Promise<UserAccount | null> {
-  try {
-    return await auth.authenticate(getSessionToken(request, config));
-  } catch (error) {
-    if (error instanceof AuthError && error.statusCode === 401) {
-      clearSessionCookie(reply, config);
-    }
-    sendConversationError(reply, error);
-    return null;
-  }
+  const actor = await authenticateRequestActor(
+    request,
+    reply,
+    config,
+    auth,
+    devices,
+    { onError: (error) => sendConversationError(reply, error) },
+  );
+  return actor?.user ?? null;
 }
 
 function sendConversationError(reply: FastifyReply, error: unknown) {

@@ -14,6 +14,7 @@ import {
 
 import FamilyMembersPanel from "../admin/FamilyMembersPanel.js";
 import ModelSettingsPanel from "../admin/ModelSettingsPanel.js";
+import CompanionDevicesPanel from "../devices/CompanionDevicesPanel.js";
 import TeachingPlansPanel from "../teaching/TeachingPlansPanel.js";
 import PasswordChangePanel from "./PasswordChangePanel.js";
 import {
@@ -30,6 +31,7 @@ export type AuthenticatedAppSession = {
   openModelSettings: () => void;
   openTeachingPlans: () => void;
   openPasswordChange: () => void;
+  openCompanionDevices: () => void;
   logout: () => void;
   invalidateSession: () => void;
 };
@@ -66,12 +68,14 @@ export default function AuthGate({ children }: AuthGateProps) {
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
   const [teachingPlansOpen, setTeachingPlansOpen] = useState(false);
   const [passwordChangeOpen, setPasswordChangeOpen] = useState(false);
+  const [companionDevicesOpen, setCompanionDevicesOpen] = useState(false);
 
   const invalidateSession = useCallback(() => {
     setMembersOpen(false);
     setModelSettingsOpen(false);
     setTeachingPlansOpen(false);
     setPasswordChangeOpen(false);
+    setCompanionDevicesOpen(false);
     setLogoutError("");
     setSession({
       status: "signed_out",
@@ -129,6 +133,7 @@ export default function AuthGate({ children }: AuthGateProps) {
     setModelSettingsOpen(false);
     setTeachingPlansOpen(false);
     setPasswordChangeOpen(false);
+    setCompanionDevicesOpen(false);
     setLogoutPending(true);
     setLogoutError("");
 
@@ -184,12 +189,14 @@ export default function AuthGate({ children }: AuthGateProps) {
           setPasswordChangeOpen(false);
           setModelSettingsOpen(false);
           setTeachingPlansOpen(false);
+          setCompanionDevicesOpen(false);
           setMembersOpen(true);
         },
         openModelSettings: () => {
           setPasswordChangeOpen(false);
           setMembersOpen(false);
           setTeachingPlansOpen(false);
+          setCompanionDevicesOpen(false);
           setModelSettingsOpen(true);
         },
         openTeachingPlans: () => {
@@ -197,13 +204,22 @@ export default function AuthGate({ children }: AuthGateProps) {
           setPasswordChangeOpen(false);
           setMembersOpen(false);
           setModelSettingsOpen(false);
+          setCompanionDevicesOpen(false);
           setTeachingPlansOpen(true);
         },
         openPasswordChange: () => {
           setMembersOpen(false);
           setModelSettingsOpen(false);
           setTeachingPlansOpen(false);
+          setCompanionDevicesOpen(false);
           setPasswordChangeOpen(true);
+        },
+        openCompanionDevices: () => {
+          setMembersOpen(false);
+          setModelSettingsOpen(false);
+          setTeachingPlansOpen(false);
+          setPasswordChangeOpen(false);
+          setCompanionDevicesOpen(true);
         },
         logout: () => void handleLogout(),
         invalidateSession,
@@ -232,6 +248,11 @@ export default function AuthGate({ children }: AuthGateProps) {
       <PasswordChangePanel
         open={passwordChangeOpen}
         onClose={() => setPasswordChangeOpen(false)}
+        onSessionInvalid={invalidateSession}
+      />
+      <CompanionDevicesPanel
+        open={companionDevicesOpen}
+        onClose={() => setCompanionDevicesOpen(false)}
         onSessionInvalid={invalidateSession}
       />
     </div>

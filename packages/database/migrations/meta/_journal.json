@@ -169,6 +169,13 @@
       "when": 1788539694486,
       "tag": "0023_living_newton_destine",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1788626400000,
+      "tag": "0024_companion_devices",
+      "breakpoints": true
     }
   ]
 }

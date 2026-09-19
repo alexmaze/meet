@@ -23,13 +23,12 @@ import {
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import {
-  clearSessionCookie,
   getSafeErrorLogContext,
-  getSessionToken,
   sendAuthError,
 } from "../auth/http.js";
 import { AuthError, type AuthService } from "../auth/service.js";
 import { LoginRateLimiter } from "../auth/login-rate-limit.js";
+import { authenticateRequestActor } from "../auth/request-actor.js";
 import {
   CharacterServiceError,
   type CharacterService,
@@ -39,6 +38,8 @@ import {
   type ConversationService,
 } from "../conversations/service.js";
 import type { AppConfig } from "../config.js";
+import type { DeviceService } from "../devices/service.js";
+import { DeviceService as DeviceServiceImpl } from "../devices/service.js";
 import {
   ModelSettingsServiceError,
   type ModelSettingsService,
@@ -84,7 +85,9 @@ export async function registerCharacterRoutes(
   modelSettings?: ModelSettingsService,
   teachingService?: TeachingService,
   dynamicTeachingCapability?: DynamicTeachingCapability,
+  devices: DeviceService = new DeviceServiceImpl(null),
 ): Promise<void> {
+  const deviceService = devices;
   const realtimeHandshakeRateLimiter = new LoginRateLimiter(20, 60_000);
   const voicePreviewRateLimiter = new LoginRateLimiter(10, 60_000);
   const websocketContexts = new WeakMap<
@@ -108,7 +111,13 @@ export async function registerCharacterRoutes(
   >();
   app.get("/api/characters", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      deviceService,
+    );
     if (!actor) return;
     try {
       return { characters: await characterService.list(actor) };
@@ -119,7 +128,13 @@ export async function registerCharacterRoutes(
 
   app.get("/api/characters/catalog", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      deviceService,
+    );
     if (!actor) return;
     try {
       return await characterService.catalog();
@@ -132,7 +147,13 @@ export async function registerCharacterRoutes(
     "/api/characters/voices/:voiceProfileId/preview",
     async (request, reply) => {
       noStore(reply);
-      const actor = await authenticateActor(request, reply, config, auth);
+      const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      deviceService,
+    );
       if (!actor) return;
       try {
         const params = voiceProfileIdParamsSchema.safeParse(request.params);
@@ -234,7 +255,13 @@ export async function registerCharacterRoutes(
 
   app.post("/api/characters", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      deviceService,
+    );
     if (!actor) return;
     try {
       // 权限先于 body 校验，确保儿童对任何角色写请求都稳定得到 403。
@@ -250,7 +277,13 @@ export async function registerCharacterRoutes(
 
   app.get("/api/characters/:characterId", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      deviceService,
+    );
     if (!actor) return;
     const params = characterIdParamsSchema.safeParse(request.params);
     if (!params.success) return invalidCharacterRequest(reply);
@@ -265,7 +298,13 @@ export async function registerCharacterRoutes(
 
   app.patch("/api/characters/:characterId", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      deviceService,
+    );
     if (!actor) return;
     try {
       characterService.assertWriter(actor);
@@ -290,7 +329,13 @@ export async function registerCharacterRoutes(
     "/api/characters/:characterId/visibility",
     async (request, reply) => {
       noStore(reply);
-      const actor = await authenticateActor(request, reply, config, auth);
+      const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      deviceService,
+    );
       if (!actor) return;
       try {
         characterService.assertVisibilityWriter(actor);
@@ -317,7 +362,13 @@ export async function registerCharacterRoutes(
 
   app.post("/api/characters/:characterId/copy", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      deviceService,
+    );
     if (!actor) return;
     try {
       characterService.assertWriter(actor);
@@ -338,7 +389,13 @@ export async function registerCharacterRoutes(
 
   app.post("/api/characters/:characterId/restore", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      deviceService,
+    );
     if (!actor) return;
     try {
       characterService.assertRestorer(actor);
@@ -360,7 +417,13 @@ export async function registerCharacterRoutes(
 
   app.delete("/api/characters/:characterId", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      deviceService,
+    );
     if (!actor) return;
     try {
       characterService.assertWriter(actor);
@@ -382,7 +445,13 @@ export async function registerCharacterRoutes(
 
   app.get("/api/characters/:characterId/runtime", async (request, reply) => {
     noStore(reply);
-    const actor = await authenticateActor(request, reply, config, auth);
+    const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      deviceService,
+    );
     if (!actor) return;
     const params = characterIdParamsSchema.safeParse(request.params);
     if (!params.success) return invalidCharacterRequest(reply);
@@ -397,7 +466,13 @@ export async function registerCharacterRoutes(
     "/api/characters/:characterId/realtime/sessions",
     async (request, reply) => {
       noStore(reply);
-      const actor = await authenticateActor(request, reply, config, auth);
+      const actor = await authenticateActor(
+      request,
+      reply,
+      config,
+      auth,
+      deviceService,
+    );
       if (!actor) return;
       if (actor.accountType === "child") {
         return reply.code(403).send({
@@ -498,7 +573,17 @@ export async function registerCharacterRoutes(
       websocket: true,
       preValidation: async (request, reply) => {
         noStore(reply);
+        const actor = await authenticateRequestActor(
+          request,
+          reply,
+          config,
+          auth,
+          deviceService,
+          { onError: (error) => sendCharacterError(reply, error) },
+        );
+        if (!actor) return;
         if (
+          actor.authKind !== "device" &&
           !isAllowedWebSocketOrigin({
             origin: request.headers.origin,
             host: request.headers.host,
@@ -512,14 +597,15 @@ export async function registerCharacterRoutes(
           });
         }
 
-        const actor = await authenticateActor(request, reply, config, auth);
-        if (!actor) return;
         const params = characterIdParamsSchema.safeParse(request.params);
         if (!params.success) return invalidCharacterRequest(reply);
 
         try {
           // 角色可见性检查必须早于传输参数检查，避免枚举私人角色。
-          await characterService.assertVisible(actor, params.data.characterId);
+          await characterService.assertVisible(
+            actor.user,
+            params.data.characterId,
+          );
           const query = conversationRealtimeQuerySchema.safeParse(
             request.query,
           );
@@ -527,17 +613,17 @@ export async function registerCharacterRoutes(
             return invalidCharacterRequest(reply);
           }
           let continuity = await conversationService.realtimeContext(
-            actor,
+            actor.user,
             query.data.conversationId,
             params.data.characterId,
           );
           if (!continuity.runtimeSnapshot) {
             const currentRuntime = await characterService.runtime(
-              actor,
+              actor.user,
               params.data.characterId,
             );
             continuity = await conversationService.realtimeContext(
-              actor,
+              actor.user,
               query.data.conversationId,
               params.data.characterId,
               toConversationRuntimeSnapshot(currentRuntime),
@@ -594,11 +680,11 @@ export async function registerCharacterRoutes(
           );
           const teaching =
             teachingService &&
-            actor.accountType === "child" &&
+            actor.user.accountType === "child" &&
             provider === "qwen"
               ? await createQwenTeachingOptions({
                   teachingService,
-                  actor,
+                  actor: actor.user,
                   conversationId: query.data.conversationId,
                   provider,
                   model: runtime.model,
@@ -607,7 +693,7 @@ export async function registerCharacterRoutes(
               : undefined;
 
           const rateLimit = realtimeHandshakeRateLimiter.consume(
-            `${actor.id}:${request.ip}`,
+            `${actor.user.id}:${request.ip}`,
           );
           if (!rateLimit.allowed) {
             reply.header("Retry-After", String(rateLimit.retryAfterSeconds));
@@ -877,16 +963,17 @@ async function authenticateActor(
   reply: FastifyReply,
   config: AppConfig,
   auth: AuthService,
+  devices: DeviceService,
 ): Promise<UserAccount | null> {
-  try {
-    return await auth.authenticate(getSessionToken(request, config));
-  } catch (error) {
-    if (error instanceof AuthError && error.statusCode === 401) {
-      clearSessionCookie(reply, config);
-    }
-    sendCharacterError(reply, error);
-    return null;
-  }
+  const actor = await authenticateRequestActor(
+    request,
+    reply,
+    config,
+    auth,
+    devices,
+    { onError: (error) => sendCharacterError(reply, error) },
+  );
+  return actor?.user ?? null;
 }
 
 function sendCharacterError(reply: FastifyReply, error: unknown) {

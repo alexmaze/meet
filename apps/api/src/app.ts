@@ -40,6 +40,9 @@ import type { ConversationRepository } from "./conversations/repository.js";
 import { ConversationService } from "./conversations/service.js";
 import type { DoubaoWebSocketFactory } from "./doubao-websocket.js";
 import { loadConfig, type AppConfig } from "./config.js";
+import { PostgresDeviceRepository } from "./devices/postgres-repository.js";
+import type { DeviceRepository } from "./devices/repository.js";
+import { DeviceService } from "./devices/service.js";
 import { PostgresMemberRepository } from "./members/postgres-repository.js";
 import type { AdminMemberRepository } from "./members/repository.js";
 import { MemberService } from "./members/service.js";
@@ -66,6 +69,7 @@ import { registerAdminModelSettingsRoutes } from "./routes/admin-model-settings.
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerCharacterRoutes } from "./routes/characters.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
+import { registerDeviceRoutes } from "./routes/devices.js";
 import { registerMemoryRoutes } from "./routes/memories.js";
 import { registerMediaRoutes } from "./routes/media.js";
 import { registerRealtimeRoutes } from "./routes/realtime.js";
@@ -85,6 +89,7 @@ export type BuildAppOptions = {
   relationshipTransferRepository?: RelationshipTransferRepository | null;
   mediaRepository?: MediaRepository | null;
   teachingRepository?: TeachingRepository | null;
+  deviceRepository?: DeviceRepository | null;
   shortPlanGenerator?: ShortPlanGenerator;
   mediaStore?: MediaStore | null;
   databaseClient?: DatabaseClient | null;
@@ -225,6 +230,12 @@ export async function buildApp(
           )
         : null
       : options.teachingRepository;
+  const deviceRepository =
+    options.deviceRepository === undefined
+      ? databaseClient
+        ? new PostgresDeviceRepository(databaseClient.db)
+        : null
+      : options.deviceRepository;
   const mediaStore =
     options.mediaStore === undefined
       ? new LocalMediaStore(config.media?.localDirectory ?? "./data/media")
@@ -274,6 +285,7 @@ export async function buildApp(
     },
   });
   const auth = new AuthService(authRepository, config.auth.sessionTtlMs);
+  const devices = new DeviceService(deviceRepository);
   const members = new MemberService(memberRepository);
   const conversations = new ConversationService(
     conversationRepository,
@@ -376,10 +388,11 @@ export async function buildApp(
     now: new Date().toISOString(),
   }));
 
-  await registerAuthRoutes(app, config, auth);
+  await registerAuthRoutes(app, config, auth, devices);
   await registerAdminMemberRoutes(app, config, auth, members);
   await registerAdminModelSettingsRoutes(app, config, auth, modelSettings);
-  await registerTeachingRoutes(app, config, auth, teaching);
+  await registerTeachingRoutes(app, config, auth, teaching, devices);
+  await registerDeviceRoutes(app, config, auth, devices);
   await registerCharacterRoutes(
     app,
     config,
@@ -392,8 +405,9 @@ export async function buildApp(
     modelSettings,
     teachingRepository ? teaching : undefined,
     config.teaching?.dynamicQwen,
+    devices,
   );
-  await registerConversationRoutes(app, config, auth, conversations);
+  await registerConversationRoutes(app, config, auth, conversations, devices);
   await registerRelationshipTransferRoutes(
     app,
     config,

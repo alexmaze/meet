@@ -31,6 +31,29 @@ export function getSessionToken(
   return request.cookies[config.auth.cookieName];
 }
 
+export function getBearerToken(request: FastifyRequest): string | undefined {
+  const header = request.headers.authorization;
+  if (typeof header !== "string") return undefined;
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  const token = match?.[1]?.trim();
+  return token || undefined;
+}
+
+export function getRequestCredential(
+  request: FastifyRequest,
+  config: AppConfig,
+): { kind: "session" | "device"; token: string } | undefined {
+  const sessionToken = getSessionToken(request, config);
+  if (sessionToken) {
+    return { kind: "session", token: sessionToken };
+  }
+  const bearerToken = getBearerToken(request);
+  if (bearerToken) {
+    return { kind: "device", token: bearerToken };
+  }
+  return undefined;
+}
+
 export function setSessionCookie(
   reply: FastifyReply,
   config: AppConfig,
