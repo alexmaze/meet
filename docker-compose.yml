@@ -1,0 +1,81 @@
+# Meet Docker Compose 示例部署。
+# 用法见 README「Docker Compose 部署」。
+#
+# 默认配合 .env.compose 使用：
+#   docker compose --env-file .env.compose up -d
+#
+# 镜像默认拉取 GHCR；将 MEET_VERSION 换成已发布的 tag（不要带 v 前缀），例如 0.1.1。
+
+name: meet
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: meet
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env.compose 中设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: meet
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - meet-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meet -d meet"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    image: ghcr.io/alexmaze/meet/api:${MEET_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://meet:${POSTGRES_PASSWORD}@postgres:5432/meet
+      API_HOST: 0.0.0.0
+      API_PORT: "8787"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      AUTH_SESSION_TTL_DAYS: ${AUTH_SESSION_TTL_DAYS:-30}
+      AUTH_LOGIN_MAX_ATTEMPTS: ${AUTH_LOGIN_MAX_ATTEMPTS:-10}
+      AUTH_LOGIN_WINDOW_SECONDS: ${AUTH_LOGIN_WINDOW_SECONDS:-300}
+      MEDIA_LOCAL_DIR: /data/media
+      EMBEDDING_LOCAL_CACHE_DIR: /data/embedding-models
+      MEM0_TELEMETRY: ${MEM0_TELEMETRY:-false}
+    volumes:
+      - meet-media:/data/media
+      - meet-embedding:/data/embedding-models
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    image: ghcr.io/alexmaze/meet/worker:${MEET_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://meet:${POSTGRES_PASSWORD}@postgres:5432/meet
+      MEDIA_LOCAL_DIR: /data/media
+      EMBEDDING_LOCAL_CACHE_DIR: /data/embedding-models
+      MEM0_TELEMETRY: ${MEM0_TELEMETRY:-false}
+    volumes:
+      - meet-media:/data/media
+      - meet-embedding:/data/embedding-models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  web:
+    image: ghcr.io/alexmaze/meet/web:${MEET_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "${WEB_PUBLISH_PORT:-8080}:80"
+    volumes:
+      - ./docker/nginx.compose.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+
+volumes:
+  meet-pg:
+  meet-media:
+  meet-embedding:

@@ -8,6 +8,7 @@ data/
 .env
 .env.*
 !.env.example
+!.env.compose.example
 
 *.log
 .DS_Store
