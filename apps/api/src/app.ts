@@ -29,8 +29,12 @@ import {
 import { CHARACTER_AVATAR_MAX_BYTES, type ModelPurpose } from "@meet/protocol";
 import Fastify, { type FastifyInstance } from "fastify";
 
+import { ensureInitialAdminFromConfig } from "./auth/ensure-initial-admin.js";
 import { PostgresAuthRepository } from "./auth/postgres-repository.js";
-import type { AuthRepository } from "./auth/repository.js";
+import type {
+  AdminAccountRepository,
+  AuthRepository,
+} from "./auth/repository.js";
 import { AuthService } from "./auth/service.js";
 import { PostgresCharacterRepository } from "./characters/postgres-repository.js";
 import type { CharacterRepository } from "./characters/repository.js";
@@ -421,5 +425,29 @@ export async function buildApp(
   await registerMemoryRoutes(app, config, auth, memories);
   await registerMediaRoutes(app, config, auth, media);
   await registerRealtimeRoutes(app, config, auth, modelSettings);
+
+  if (config.auth.initialAdmin) {
+    if (!isAdminAccountRepository(authRepository)) {
+      throw new Error(
+        "已配置 INITIAL_ADMIN_*，但当前账号仓库不支持创建首位管理员。",
+      );
+    }
+    await ensureInitialAdminFromConfig({
+      initialAdmin: config.auth.initialAdmin,
+      repository: authRepository,
+      logger: app.log,
+    });
+  }
+
   return app;
+}
+
+function isAdminAccountRepository(
+  repository: AuthRepository | null,
+): repository is AdminAccountRepository {
+  return (
+    repository !== null &&
+    typeof (repository as AdminAccountRepository).createInitialAdmin ===
+      "function"
+  );
 }

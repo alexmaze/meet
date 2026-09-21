@@ -158,7 +158,7 @@ pnpm admin:init --username admin --display-name 家庭管理员
 pnpm dev
 ```
 
-`admin:init` 仅在没有账号时可执行，密码通过终端遮罩输入。`pnpm dev` 同时启动 Web、API 和 Worker；默认从本机浏览器访问 `http://localhost:5173`。
+`admin:init` 仅在没有账号时可执行，密码通过终端遮罩输入。也可在 `.env` 配置 `INITIAL_ADMIN_USERNAME` 与 `INITIAL_ADMIN_PASSWORD`，由 API 在空库首次启动时创建首位管理员。`pnpm dev` 同时启动 Web、API 和 Worker；默认从本机浏览器访问 `http://localhost:5173`。
 
 首次登录后，在“我的 → 模型设置”录入供应商连接、模型和音色，完成测试、启用及实时默认绑定。预置推荐千问 `qwen-audio-3.0-realtime-plus`，也可以显式选用已启用的其他兼容配置。摘要、记忆提取和学习计划生成使用各自用途绑定。模型密钥不从 `.env` 导入。
 
@@ -199,6 +199,8 @@ cp .env.compose.example .env.compose
 | `POSTGRES_PASSWORD` | 数据库密码；勿使用 `@` `#` `:` `/` `?` 等会破坏连接串的字符 |
 | `WEB_PUBLISH_PORT` | 本机访问端口，默认 `8080` |
 | `AUTH_COOKIE_SECURE` | 本机 HTTP 试用为 `false`；前面有 HTTPS 反代时必须为 `true` |
+| `INITIAL_ADMIN_USERNAME` / `INITIAL_ADMIN_PASSWORD` | 可选；空库首次启动 API 时创建首位管理员，须同时设置 |
+| `INITIAL_ADMIN_DISPLAY_NAME` | 可选；默认与用户名相同 |
 
 后续命令均带上 `--env-file .env.compose`。若 GHCR 包尚未设为 Public，需先登录后再拉取：
 
@@ -206,9 +208,9 @@ cp .env.compose.example .env.compose
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
 ```
 
-### 2. 启动数据库并初始化
+### 2. 启动数据库并迁移
 
-先只起 PostgreSQL，再用本机 Node/pnpm 做迁移与管理员初始化（镜像内不自动迁移，也不含交互式 `admin:init`）。Compose 已将数据库映射到本机 `127.0.0.1:5432`：
+先只起 PostgreSQL，再用本机 Node/pnpm 做迁移（镜像内不自动迁移）。Compose 已将数据库映射到本机 `127.0.0.1:5432`：
 
 ```bash
 docker compose --env-file .env.compose up -d postgres
@@ -221,10 +223,9 @@ docker compose --env-file .env.compose up -d postgres
 export DATABASE_URL="postgresql://meet:你的密码@127.0.0.1:5432/meet"
 pnpm install
 pnpm db:migrate
-pnpm admin:init --username admin --display-name 家庭管理员
 ```
 
-`admin:init` 仅在库中尚无账号时可执行，密码在终端遮罩输入。
+首位管理员优先用 `.env.compose` 中的 `INITIAL_ADMIN_*`：API 首次启动且库中尚无账号时自动创建。未配置这些变量时，也可在本机执行交互式 `pnpm admin:init --username admin --display-name 家庭管理员`（见 [ADR-0039](docs/decisions/0039-env-initial-admin.md)）。
 
 ### 3. 启动全部服务
 
@@ -232,7 +233,7 @@ pnpm admin:init --username admin --display-name 家庭管理员
 docker compose --env-file .env.compose up -d
 ```
 
-浏览器访问 `http://localhost:8080`（或你设置的 `WEB_PUBLISH_PORT`）。首次登录后仍需在「我的 → 模型设置」配置供应商；密钥保存在 PostgreSQL，不写在 Compose 环境变量里。
+浏览器访问 `http://localhost:8080`（或你设置的 `WEB_PUBLISH_PORT`），用 `INITIAL_ADMIN_USERNAME` 与对应密码登录。首次成功后建议修改密码，并可从 `.env.compose` 删除 `INITIAL_ADMIN_PASSWORD`（改 env 不会重置已有账号密码）。仍需在「我的 → 模型设置」配置供应商；密钥保存在 PostgreSQL，不写在 Compose 环境变量里。
 
 升级到新版本时：改 `.env.compose` 中的 `MEET_VERSION`，先对同一数据库执行新版本代码的 `pnpm db:migrate`，再：
 

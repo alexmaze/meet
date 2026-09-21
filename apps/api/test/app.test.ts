@@ -962,6 +962,46 @@ describe("Meet API", () => {
     );
   });
 
+  it("parses optional initial admin environment variables as all-or-nothing", () => {
+    expect(loadConfig({}).auth.initialAdmin).toBeUndefined();
+    expect(
+      loadConfig({
+        INITIAL_ADMIN_USERNAME: "admin",
+        INITIAL_ADMIN_PASSWORD: "secret",
+      }).auth.initialAdmin,
+    ).toEqual({
+      username: "admin",
+      displayName: "admin",
+      password: "secret",
+    });
+    expect(
+      loadConfig({
+        INITIAL_ADMIN_USERNAME: "admin",
+        INITIAL_ADMIN_PASSWORD: "secret",
+        INITIAL_ADMIN_DISPLAY_NAME: "家庭管理员",
+      }).auth.initialAdmin,
+    ).toEqual({
+      username: "admin",
+      displayName: "家庭管理员",
+      password: "secret",
+    });
+    expect(() =>
+      loadConfig({
+        INITIAL_ADMIN_USERNAME: "admin",
+      }),
+    ).toThrow(/INITIAL_ADMIN_USERNAME 与 INITIAL_ADMIN_PASSWORD/);
+    expect(() =>
+      loadConfig({
+        INITIAL_ADMIN_PASSWORD: "secret",
+      }),
+    ).toThrow(/INITIAL_ADMIN_USERNAME 与 INITIAL_ADMIN_PASSWORD/);
+    expect(() =>
+      loadConfig({
+        INITIAL_ADMIN_DISPLAY_NAME: "家庭管理员",
+      }),
+    ).toThrow(/INITIAL_ADMIN_USERNAME 与 INITIAL_ADMIN_PASSWORD/);
+  });
+
   it("binds the API to all IPv4 interfaces by default", () => {
     expect(loadConfig({}).server.host).toBe("0.0.0.0");
     expect(loadConfig({ API_HOST: "127.0.0.1" }).server.host).toBe("127.0.0.1");

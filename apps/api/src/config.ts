@@ -1,9 +1,20 @@
-import type { QwenRealtimeModel, QwenRealtimeRegion } from "@meet/protocol";
+import {
+  passwordSchema,
+  usernameSchema,
+  type QwenRealtimeModel,
+  type QwenRealtimeRegion,
+} from "@meet/protocol";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { resolve } from "node:path";
 
 const workspaceRoot = fileURLToPath(new URL("../../../", import.meta.url));
+
+const optionalTrimmedStringSchema = z.preprocess(
+  (value) =>
+    typeof value === "string" && value.trim() === "" ? undefined : value,
+  z.string().optional(),
+);
 
 const optionalDatabaseUrlSchema = z.preprocess(
   (value) =>
@@ -87,6 +98,9 @@ const envSchema = z.object({
     .min(10)
     .max(3_600)
     .default(300),
+  INITIAL_ADMIN_USERNAME: optionalTrimmedStringSchema,
+  INITIAL_ADMIN_PASSWORD: optionalTrimmedStringSchema,
+  INITIAL_ADMIN_DISPLAY_NAME: optionalTrimmedStringSchema,
   MEDIA_LOCAL_DIR: z.string().trim().min(1).default("./data/media"),
   EMBEDDING_LOCAL_CACHE_DIR: z
     .string()
@@ -137,6 +151,11 @@ export type AppConfig = {
     sessionTtlMs: number;
     loginMaxAttempts: number;
     loginWindowMs: number;
+    initialAdmin?: {
+      username: string;
+      displayName: string;
+      password: string;
+    };
   };
   qwen: {
     enabled: boolean;
@@ -185,6 +204,7 @@ export function loadConfig(
 
   const env = result.data;
   const dynamicQwen = resolveDynamicQwenCapability(env);
+  const initialAdmin = resolveInitialAdmin(env);
   return {
     server: {
       host: env.API_HOST,
@@ -200,6 +220,7 @@ export function loadConfig(
       sessionTtlMs: env.AUTH_SESSION_TTL_DAYS * 24 * 60 * 60 * 1_000,
       loginMaxAttempts: env.AUTH_LOGIN_MAX_ATTEMPTS,
       loginWindowMs: env.AUTH_LOGIN_WINDOW_SECONDS * 1_000,
+      ...(initialAdmin ? { initialAdmin } : {}),
     },
     qwen: {
       enabled: false,
@@ -225,6 +246,55 @@ export function loadConfig(
     },
     teaching: dynamicQwen ? { dynamicQwen } : undefined,
     firmware: resolveFirmwareRelease(env),
+  };
+}
+
+function resolveInitialAdmin(
+  env: z.infer<typeof envSchema>,
+): NonNullable<AppConfig["auth"]["initialAdmin"]> | undefined {
+  const usernameRaw = env.INITIAL_ADMIN_USERNAME;
+  const passwordRaw = env.INITIAL_ADMIN_PASSWORD;
+  const displayNameRaw = env.INITIAL_ADMIN_DISPLAY_NAME;
+  const anySet =
+    usernameRaw !== undefined ||
+    passwordRaw !== undefined ||
+    displayNameRaw !== undefined;
+  if (!anySet) {
+    return undefined;
+  }
+  if (usernameRaw === undefined || passwordRaw === undefined) {
+    throw new Error(
+      "环境变量无效：设置首位管理员时必须同时提供 INITIAL_ADMIN_USERNAME 与 INITIAL_ADMIN_PASSWORD。",
+    );
+  }
+  const usernameResult = usernameSchema.safeParse(usernameRaw);
+  if (!usernameResult.success) {
+    throw new Error(
+      `环境变量无效：INITIAL_ADMIN_USERNAME ${z.prettifyError(usernameResult.error)}`,
+    );
+  }
+  const passwordResult = passwordSchema.safeParse(passwordRaw);
+  if (!passwordResult.success) {
+    throw new Error(
+      `环境变量无效：INITIAL_ADMIN_PASSWORD ${z.prettifyError(passwordResult.error)}`,
+    );
+  }
+  const username = usernameResult.data;
+  const displayNameResult = z
+    .string()
+    .trim()
+    .min(1)
+    .max(80)
+    .safeParse(displayNameRaw ?? username);
+  if (!displayNameResult.success) {
+    throw new Error(
+      `环境变量无效：INITIAL_ADMIN_DISPLAY_NAME ${z.prettifyError(displayNameResult.error)}`,
+    );
+  }
+  return {
+    username,
+    displayName: displayNameResult.data,
+    password: passwordResult.data,
   };
 }
 

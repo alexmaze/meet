@@ -19,7 +19,7 @@ pnpm admin:init --username admin --display-name 家庭管理员
 pnpm dev
 ```
 
-`admin:init` 仅能在没有任何账号的数据库中执行。密码在终端中遮罩输入两次，不进入命令历史；不接受空密码，不限制长度或组成。应用没有公开注册入口，其他家庭成员由管理员登录后创建。
+`admin:init` 仅能在没有任何账号的数据库中执行。密码在终端中遮罩输入两次，不进入命令历史；不接受空密码，不限制长度或组成。也可以在 `.env` 设置 `INITIAL_ADMIN_USERNAME` 与 `INITIAL_ADMIN_PASSWORD`（可选 `INITIAL_ADMIN_DISPLAY_NAME`），由 API 在空库首次启动时自动创建首位管理员；已有账号时跳过且不会按环境变量改密（见 [ADR-0039](decisions/0039-env-initial-admin.md)）。应用没有公开注册入口，其他家庭成员由管理员登录后创建。
 
 `pnpm dev` 同时启动 Web、API 和独立 Worker，Web 与 API 的默认端口分别为 `5173` 和 `8787`。也可以分别使用 `pnpm dev:web`、`pnpm dev:api` 和 `pnpm dev:worker`；会话摘要、记忆提取、索引同步与媒体清理需要 Worker 运行。
 
