@@ -20,6 +20,8 @@ export type CompanionDeviceRecord = {
   userId: string;
   displayName: string;
   selectedCharacterId: string | null;
+  serial: string | null;
+  firmwareVersion: string | null;
   lastSeenAt: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -112,7 +114,9 @@ export interface DeviceRepository {
   updateDeviceSelection(input: {
     deviceId: string;
     userId: string;
-    selectedCharacterId: string | null;
+    selectedCharacterId?: string | null;
+    serial?: string;
+    firmwareVersion?: string;
     updatedAt: Date;
   }): Promise<CompanionDeviceRecord | null>;
   findUserByDeviceCredentialTokenHash(
@@ -129,6 +133,8 @@ export function toDeviceSummary(
     id: device.id,
     displayName: device.displayName,
     selectedCharacterId: device.selectedCharacterId,
+    serial: device.serial,
+    firmwareVersion: device.firmwareVersion,
     lastSeenAt: device.lastSeenAt.toISOString(),
     createdAt: device.createdAt.toISOString(),
   };

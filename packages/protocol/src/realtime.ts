@@ -26,6 +26,40 @@ export const realtimeActivitySchema = z.enum([
 
 export type RealtimeActivity = z.infer<typeof realtimeActivitySchema>;
 
+export const meetEmotionNameSchema = z.enum([
+  "neutral",
+  "happy",
+  "laughing",
+  "funny",
+  "sad",
+  "angry",
+  "crying",
+  "loving",
+  "embarrassed",
+  "surprised",
+  "shocked",
+  "thinking",
+  "winking",
+  "cool",
+  "relaxed",
+  "delicious",
+  "kissy",
+  "confident",
+  "sleepy",
+  "confused",
+]);
+
+export type MeetEmotionName = z.infer<typeof meetEmotionNameSchema>;
+
+export const meetEmotionEventSchema = z
+  .object({
+    type: z.literal("meet.emotion"),
+    name: meetEmotionNameSchema,
+  })
+  .strict();
+
+export type MeetEmotionEvent = z.infer<typeof meetEmotionEventSchema>;
+
 export const transcriptSpeakerSchema = z.enum(["user", "assistant"]);
 
 export const transcriptSegmentSchema = z.object({

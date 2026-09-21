@@ -1,10 +1,12 @@
 import type {
   CompanionDeviceSummary,
   CreatePairingSessionResponse,
+  DeviceFirmwareResponse,
   PairingSessionStatusResponse,
   UpdateDeviceMeRequest,
   UserAccount,
 } from "@meet/protocol";
+import type { AppConfig } from "../config.js";
 import { randomInt, randomUUID } from "node:crypto";
 
 import {
@@ -45,6 +47,7 @@ export class DeviceService {
   constructor(
     private readonly repository: DeviceRepository | null,
     private readonly now: () => Date = () => new Date(),
+    private readonly firmware?: AppConfig["firmware"],
   ) {}
 
   async createPairingSession(input?: {
@@ -193,6 +196,8 @@ export class DeviceService {
         deviceId,
         userId: actor.id,
         selectedCharacterId: input.selectedCharacterId,
+        serial: input.serial,
+        firmwareVersion: input.firmwareVersion,
         updatedAt: this.now(),
       }),
     );
@@ -238,6 +243,27 @@ export class DeviceService {
     return {
       user: toPublicUser(result.user),
       deviceId: result.deviceId,
+    };
+  }
+
+  checkFirmware(current: string): DeviceFirmwareResponse {
+    if (!this.firmware?.version || !this.firmware.url) {
+      return {
+        available: false,
+        version: current,
+        url: "",
+        sha256: "",
+        size: 0,
+        force: false,
+      };
+    }
+    return {
+      available: this.firmware.version !== current,
+      version: this.firmware.version,
+      url: this.firmware.url,
+      sha256: this.firmware.sha256,
+      size: this.firmware.size,
+      force: this.firmware.force,
     };
   }
 

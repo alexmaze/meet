@@ -27,4 +27,10 @@
 
 - **P0**：家里能打通一通电话（配网、真麦真喇叭、配对重试、接通态、中文屏）。
 - **P1**：唤醒词、AEC、音量/电量、横竖屏。
-- **P2**：OTA、弱网、字幕与生产烧录。
+- **P2**：HTTPS OTA、`factory` 序列号、多 SSID、弱网提示、通话字幕、`meet.emotion` 表情。不包含拍照。
+
+## P2 设备协议
+
+- `PATCH /api/devices/me` 可上报 `serial`、`firmwareVersion`（字段均可选）。
+- `GET /api/devices/firmware?current=` 返回是否有新固件（`available/version/url/sha256/size/force`）。发布信息来自环境变量 `DEVICE_FIRMWARE_*`。
+- 实时中继在关键供应商事件后下发 `{ "type": "meet.emotion", "name": "happy" }`。设备本地也会按通话状态映射表情。

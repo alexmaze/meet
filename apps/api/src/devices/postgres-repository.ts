@@ -271,15 +271,29 @@ export class PostgresDeviceRepository implements DeviceRepository {
   async updateDeviceSelection(input: {
     deviceId: string;
     userId: string;
-    selectedCharacterId: string | null;
+    selectedCharacterId?: string | null;
+    serial?: string;
+    firmwareVersion?: string;
     updatedAt: Date;
   }): Promise<CompanionDeviceRecord | null> {
+    const patch: {
+      updatedAt: Date;
+      selectedCharacterId?: string | null;
+      serial?: string;
+      firmwareVersion?: string;
+    } = { updatedAt: input.updatedAt };
+    if (input.selectedCharacterId !== undefined) {
+      patch.selectedCharacterId = input.selectedCharacterId;
+    }
+    if (input.serial !== undefined) {
+      patch.serial = input.serial;
+    }
+    if (input.firmwareVersion !== undefined) {
+      patch.firmwareVersion = input.firmwareVersion;
+    }
     const [row] = await this.db
       .update(companionDevices)
-      .set({
-        selectedCharacterId: input.selectedCharacterId,
-        updatedAt: input.updatedAt,
-      })
+      .set(patch)
       .where(
         and(
           eq(companionDevices.id, input.deviceId),
@@ -353,6 +367,8 @@ function toDevice(
     userId: row.userId,
     displayName: row.displayName,
     selectedCharacterId: row.selectedCharacterId,
+    serial: row.serial ?? null,
+    firmwareVersion: row.firmwareVersion ?? null,
     lastSeenAt: row.lastSeenAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,

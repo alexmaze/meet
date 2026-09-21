@@ -7,6 +7,8 @@ import {
   createPairingSessionResponseSchema,
   pairingSessionStatusResponseSchema,
   updateDeviceMeRequestSchema,
+  deviceFirmwareQuerySchema,
+  deviceFirmwareResponseSchema,
 } from "./devices.js";
 
 const deviceId = "4d1c2e31-ad0e-4fa9-9ae8-ae3497069210";
@@ -89,5 +91,30 @@ describe("devices protocol", () => {
     expect(
       updateDeviceMeRequestSchema.parse({ selectedCharacterId: null }),
     ).toEqual({ selectedCharacterId: null });
+    expect(
+      updateDeviceMeRequestSchema.parse({
+        serial: "MEET-AABBCC",
+        firmwareVersion: "0.2.0",
+      }),
+    ).toEqual({ serial: "MEET-AABBCC", firmwareVersion: "0.2.0" });
+  });
+
+  it("parses firmware query and response", () => {
+    expect(
+      deviceFirmwareQuerySchema.parse({
+        current: "0.2.0",
+        serial: "MEET-AABBCC",
+      }),
+    ).toEqual({ current: "0.2.0", serial: "MEET-AABBCC" });
+    expect(
+      deviceFirmwareResponseSchema.parse({
+        available: true,
+        version: "0.2.1",
+        url: "https://example.com/meet.bin",
+        sha256: "aa".repeat(32),
+        size: 1024,
+        force: false,
+      }),
+    ).toMatchObject({ available: true, version: "0.2.1" });
   });
 });

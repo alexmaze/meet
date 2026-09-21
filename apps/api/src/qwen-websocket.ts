@@ -13,6 +13,7 @@ import { isIP } from "node:net";
 import WebSocket, { type ClientOptions, type RawData } from "ws";
 
 import type { AppConfig } from "./config.js";
+import { MeetEmotionEmitter } from "./realtime-emotion.js";
 import { normalizeQwenRealtimeEndpoint } from "./qwen.js";
 import {
   RealtimeRenewalController,
@@ -179,6 +180,12 @@ export function relayQwenWebSocket({
       (teachingController?.isSafeToRenew() ?? true),
   });
   const pendingClientMessages: Buffer[] = [];
+  const emotion = new MeetEmotionEmitter();
+
+  const emitMeetEmotion = (type: string | null | undefined): void => {
+    const name = emotion.next(type);
+    if (name) sendJson(client, { type: "meet.emotion", name });
+  };
 
   const stop = (
     source: "client" | "upstream" | "relay",
@@ -495,6 +502,7 @@ export function relayQwenWebSocket({
           stop("relay", CLOSE_TRY_AGAIN_LATER, "Relay backpressure");
           return;
         }
+        emitMeetEmotion(providerType);
         return;
       }
       if (teachingBaseAcknowledged) {
@@ -512,6 +520,10 @@ export function relayQwenWebSocket({
     }
     if (!sendWithBackpressure(client, message, isBinary)) {
       stop("relay", CLOSE_TRY_AGAIN_LATER, "Relay backpressure");
+      return;
+    }
+    if (!isBinary) {
+      emitMeetEmotion(readJsonEventType(message));
     }
   });
 

@@ -1,6 +1,7 @@
 import {
   bindDeviceRequestSchema,
   createPairingSessionRequestSchema,
+  deviceFirmwareQuerySchema,
   deviceIdParamsSchema,
   pairingSessionIdParamsSchema,
   updateDeviceMeRequestSchema,
@@ -132,6 +133,25 @@ export async function registerDeviceRoutes(
     } catch (error) {
       return sendDeviceError(reply, error);
     }
+  });
+
+  app.get("/api/devices/firmware", async (request, reply) => {
+    noStore(reply);
+    const actor = await authenticateRequestActor(
+      request,
+      reply,
+      config,
+      auth,
+      devices,
+      {
+        requiredKind: "device",
+        onError: (error) => sendDeviceError(reply, error),
+      },
+    );
+    if (!actor || !actor.deviceId) return;
+    const query = deviceFirmwareQuerySchema.safeParse(request.query);
+    if (!query.success) return invalidRequest(reply);
+    return devices.checkFirmware(query.data.current);
   });
 
   app.patch("/api/devices/me", async (request, reply) => {

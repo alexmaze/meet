@@ -10,6 +10,7 @@ import {
 import WebSocket, { type ClientOptions, type RawData } from "ws";
 
 import type { AppConfig } from "./config.js";
+import { MeetEmotionEmitter } from "./realtime-emotion.js";
 import { buildDoubaoSessionConfig } from "./doubao-session.js";
 import type { QwenContinuityMessage } from "./qwen-websocket.js";
 import {
@@ -91,6 +92,7 @@ export function relayDoubaoWebSocket({
   }
 
   let stopped = false;
+  const emotion = new MeetEmotionEmitter();
   let upstreamReady = false;
   let sessionCreated = false;
   let gracefulCloseRequested = false;
@@ -276,6 +278,10 @@ export function relayDoubaoWebSocket({
     if (!sendWithBackpressure(client, message, false)) {
       stop("relay", CLOSE_TRY_AGAIN_LATER, "Client backpressure");
       return;
+    }
+    const emotionName = emotion.next(type);
+    if (emotionName) {
+      sendJson(client, { type: "meet.emotion", name: emotionName });
     }
     if (type === "session.closed") {
       stop("upstream", CLOSE_NORMAL, "Doubao session closed");

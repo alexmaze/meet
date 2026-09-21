@@ -104,6 +104,18 @@ const envSchema = z.object({
   // Each additional model stays bound to its reviewed profile and connection revisions.
   TEACHING_QWEN_DYNAMIC_ADDITIONAL_BINDINGS:
     optionalDynamicQwenTeachingBindingsSchema,
+  DEVICE_FIRMWARE_VERSION: z.string().trim().max(32).optional(),
+  DEVICE_FIRMWARE_URL: z.string().trim().max(512).optional(),
+  DEVICE_FIRMWARE_SHA256: z.string().trim().max(64).optional(),
+  DEVICE_FIRMWARE_SIZE: z.preprocess(
+    (value) =>
+      typeof value === "string" && value.trim() === "" ? undefined : value,
+    z.coerce.number().int().nonnegative().optional(),
+  ),
+  DEVICE_FIRMWARE_FORCE: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((value) => value === "true"),
 });
 
 export type DynamicQwenTeachingBinding = z.infer<
@@ -152,6 +164,13 @@ export type AppConfig = {
     dynamicQwen?: {
       bindings: DynamicQwenTeachingBinding[];
     };
+  };
+  firmware?: {
+    version: string;
+    url: string;
+    sha256: string;
+    size: number;
+    force: boolean;
   };
 };
 
@@ -205,6 +224,24 @@ export function loadConfig(
       ),
     },
     teaching: dynamicQwen ? { dynamicQwen } : undefined,
+    firmware: resolveFirmwareRelease(env),
+  };
+}
+
+function resolveFirmwareRelease(
+  env: z.infer<typeof envSchema>,
+): AppConfig["firmware"] {
+  const version = env.DEVICE_FIRMWARE_VERSION?.trim() ?? "";
+  const url = env.DEVICE_FIRMWARE_URL?.trim() ?? "";
+  if (!version || !url) {
+    return undefined;
+  }
+  return {
+    version,
+    url,
+    sha256: env.DEVICE_FIRMWARE_SHA256?.trim() ?? "",
+    size: env.DEVICE_FIRMWARE_SIZE ?? 0,
+    force: Boolean(env.DEVICE_FIRMWARE_FORCE),
   };
 }
 

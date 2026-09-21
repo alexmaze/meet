@@ -193,6 +193,73 @@ describe("companion device routes", () => {
 
     await app.close();
   });
+
+  it("accepts device identity heartbeat and firmware check", async () => {
+    const authRepository = new MemoryAuthRepository([
+      { user: adult, passwordHash },
+    ]);
+    const deviceRepository = new MemoryDeviceRepository();
+    const app = await buildApp({
+      config: {
+        ...config,
+        firmware: {
+          version: "0.2.1",
+          url: "https://example.com/meet.bin",
+          sha256: "aa".repeat(32),
+          size: 1024,
+          force: false,
+        },
+      },
+      authRepository,
+      deviceRepository,
+      logger: false,
+    });
+
+    const create = await app.inject({
+      method: "POST",
+      url: "/api/devices/pairing-sessions",
+      payload: { displayName: "客厅音箱" },
+    });
+    const created = create.json<{ pairingSessionId: string; code: string }>();
+    const cookie = await login(app, "adult", "correct-password");
+    await app.inject({
+      method: "POST",
+      url: "/api/devices/bindings",
+      headers: { cookie },
+      payload: { code: created.code },
+    });
+    const claimed = await app.inject({
+      method: "GET",
+      url: `/api/devices/pairing-sessions/${created.pairingSessionId}`,
+    });
+    const claimedBody = claimed.json<{ deviceCredential: string }>();
+
+    const patch = await app.inject({
+      method: "PATCH",
+      url: "/api/devices/me",
+      headers: { authorization: `Bearer ${claimedBody.deviceCredential}` },
+      payload: { serial: "MEET-AABBCC", firmwareVersion: "0.2.0" },
+    });
+    expect(patch.statusCode).toBe(200);
+    expect(patch.json()).toMatchObject({
+      device: { serial: "MEET-AABBCC", firmwareVersion: "0.2.0" },
+    });
+
+    const firmware = await app.inject({
+      method: "GET",
+      url: "/api/devices/firmware?current=0.2.0",
+      headers: { authorization: `Bearer ${claimedBody.deviceCredential}` },
+    });
+    expect(firmware.statusCode).toBe(200);
+    expect(firmware.json()).toMatchObject({
+      available: true,
+      version: "0.2.1",
+      url: "https://example.com/meet.bin",
+      force: false,
+    });
+
+    await app.close();
+  });
 });
 
 async function login(
@@ -342,6 +409,8 @@ class MemoryDeviceRepository implements DeviceRepository {
         userId: input.userId,
         displayName: session.displayName,
         selectedCharacterId: null,
+        serial: null,
+        firmwareVersion: null,
         lastSeenAt: input.claimedAt,
         createdAt: input.claimedAt,
         updatedAt: input.claimedAt,
@@ -434,12 +503,22 @@ class MemoryDeviceRepository implements DeviceRepository {
   async updateDeviceSelection(input: {
     deviceId: string;
     userId: string;
-    selectedCharacterId: string | null;
+    selectedCharacterId?: string | null;
+    serial?: string;
+    firmwareVersion?: string;
     updatedAt: Date;
   }): Promise<CompanionDeviceRecord | null> {
     const device = this.devices.get(input.deviceId);
     if (!device || device.userId !== input.userId) return null;
-    device.selectedCharacterId = input.selectedCharacterId;
+    if (input.selectedCharacterId !== undefined) {
+      device.selectedCharacterId = input.selectedCharacterId;
+    }
+    if (input.serial !== undefined) {
+      device.serial = input.serial;
+    }
+    if (input.firmwareVersion !== undefined) {
+      device.firmwareVersion = input.firmwareVersion;
+    }
     device.updatedAt = input.updatedAt;
     return device;
   }

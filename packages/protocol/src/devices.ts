@@ -69,6 +69,8 @@ export const companionDeviceSummarySchema = z
     id: z.uuid(),
     displayName: z.string().trim().min(1).max(80),
     selectedCharacterId: z.uuid().nullable(),
+    serial: z.string().trim().min(1).max(64).nullable().optional(),
+    firmwareVersion: z.string().trim().min(1).max(32).nullable().optional(),
     lastSeenAt: z.iso.datetime(),
     createdAt: z.iso.datetime(),
   })
@@ -98,7 +100,9 @@ export type BindDeviceResponse = z.infer<typeof bindDeviceResponseSchema>;
 
 export const updateDeviceMeRequestSchema = z
   .object({
-    selectedCharacterId: z.uuid().nullable(),
+    selectedCharacterId: z.uuid().nullable().optional(),
+    serial: z.string().trim().min(1).max(64).optional(),
+    firmwareVersion: z.string().trim().min(1).max(32).optional(),
   })
   .strict();
 
@@ -131,3 +135,25 @@ export const revokeDeviceResponseSchema = z
     ok: z.literal(true),
   })
   .strict();
+
+export const deviceFirmwareQuerySchema = z
+  .object({
+    current: z.string().trim().min(1).max(32),
+    serial: z.string().trim().min(1).max(64).optional(),
+  })
+  .strict();
+
+export type DeviceFirmwareQuery = z.infer<typeof deviceFirmwareQuerySchema>;
+
+export const deviceFirmwareResponseSchema = z
+  .object({
+    available: z.boolean(),
+    version: z.string().trim().min(1).max(32),
+    url: z.string().trim().max(512),
+    sha256: z.string().trim().max(64),
+    size: z.number().int().nonnegative(),
+    force: z.boolean(),
+  })
+  .strict();
+
+export type DeviceFirmwareResponse = z.infer<typeof deviceFirmwareResponseSchema>;

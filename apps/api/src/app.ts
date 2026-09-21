@@ -285,7 +285,11 @@ export async function buildApp(
     },
   });
   const auth = new AuthService(authRepository, config.auth.sessionTtlMs);
-  const devices = new DeviceService(deviceRepository);
+  const devices = new DeviceService(
+    deviceRepository,
+    undefined,
+    config.firmware,
+  );
   const members = new MemberService(memberRepository);
   const conversations = new ConversationService(
     conversationRepository,

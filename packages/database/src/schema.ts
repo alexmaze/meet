@@ -1822,6 +1822,8 @@ export const companionDevices = pgTable(
       () => characters.id,
       { onDelete: "set null" },
     ),
+    serial: varchar("serial", { length: 64 }),
+    firmwareVersion: varchar("firmware_version", { length: 32 }),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
