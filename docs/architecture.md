@@ -64,7 +64,7 @@ API 负责在业务事务成功时入队；Worker 执行长耗时和可重试任
 - Fastify 请求生命周期负责认证、授权、运行时校验、错误映射和请求日志；
 - `@fastify/websocket` 只用于确实需要 API 中继的长连接，并复用 Fastify 认证钩子；
 - 浏览器能够安全直连供应商 WebRTC 时，媒体不经过 Fastify；
-- Drizzle 管理 schema 和版本化迁移，复杂且性能敏感的查询允许使用参数化 SQL；
+- Drizzle 管理 schema 和版本化迁移，复杂且性能敏感的查询允许使用参数化 SQL；API 在监听前自动应用迁移，Worker 不执行迁移（见 [ADR-0040](decisions/0040-api-startup-migrations.md)）；
 - Zod schema 是 HTTP DTO、实时事件和任务 payload 的运行时事实来源；TypeScript 类型从 schema 推导，避免手写两份结构；
 - `pg-boss` 负责摘要、记忆提取、临时媒体清理和其他可重试后台任务；
 - MediaStore 隔离本地目录与 S3 兼容对象存储差异，业务代码只保存不透明对象 key 与元数据。
@@ -462,6 +462,7 @@ type CharacterMemory = {
 - 单实例、家庭多账号的第一版可以使用轻量关系型数据库，具体实现待技术栈确定后选择；
 - 服务端负责登录验证和会话管理，不允许仅依靠浏览器传入的 `userId` 访问数据；
 - 不提供公开注册、邀请注册或家庭邀请码注册接口；成员账号只能通过管理员接口创建；
+- API 启动时自动应用数据库迁移；Compose 部署不要求宿主机安装 Node/pnpm（见 [ADR-0040](decisions/0040-api-startup-migrations.md)）；
 - 首位管理员可通过服务器命令 `admin:init`，或可选环境变量 `INITIAL_ADMIN_*` 在空库首次启动时创建；环境变量仅用于空库，已有账号时跳过且不改密（见 [ADR-0039](decisions/0039-env-initial-admin.md)）；
 - 所有账号使用用户名和服务端验证的密码登录，数据库只保存密码哈希；
 - 已认证账号修改自己的密码时必须再次验证当前密码；密码更新、审计记录与其他有效登录会话撤销在同一事务中完成，发起请求的当前会话继续有效；

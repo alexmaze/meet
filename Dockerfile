@@ -45,6 +45,7 @@ RUN mkdir -p /data/media /data/embedding-models \
 # 保留 monorepo 目录与 pnpm symlink，避免 ../../../ 路径解析失败
 COPY --from=build --chown=node:node /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
+# packages 含 @meet/database/migrations；运行时删除 src，保留 SQL 供 API 启动迁移
 COPY --from=build --chown=node:node /app/packages ./packages
 COPY --from=build --chown=node:node /app/apps ./apps
 COPY --chown=node:node docker/entrypoint.sh /app/docker/entrypoint.sh

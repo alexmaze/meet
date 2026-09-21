@@ -19,7 +19,7 @@ pnpm admin:init --username admin --display-name 家庭管理员
 pnpm dev
 ```
 
-`admin:init` 仅能在没有任何账号的数据库中执行。密码在终端中遮罩输入两次，不进入命令历史；不接受空密码，不限制长度或组成。也可以在 `.env` 设置 `INITIAL_ADMIN_USERNAME` 与 `INITIAL_ADMIN_PASSWORD`（可选 `INITIAL_ADMIN_DISPLAY_NAME`），由 API 在空库首次启动时自动创建首位管理员；已有账号时跳过且不会按环境变量改密（见 [ADR-0039](decisions/0039-env-initial-admin.md)）。应用没有公开注册入口，其他家庭成员由管理员登录后创建。
+`admin:init` 需要先有表结构，因此在它之前执行 `pnpm db:migrate`。API 启动时也会自动应用迁移（见 [ADR-0040](decisions/0040-api-startup-migrations.md)）。`admin:init` 仅能在没有任何账号的数据库中执行。密码在终端中遮罩输入两次，不进入命令历史；不接受空密码，不限制长度或组成。也可以在 `.env` 设置 `INITIAL_ADMIN_USERNAME` 与 `INITIAL_ADMIN_PASSWORD`（可选 `INITIAL_ADMIN_DISPLAY_NAME`），跳过 `admin:init`，由 API 在空库首次启动时自动创建首位管理员；已有账号时跳过且不会按环境变量改密（见 [ADR-0039](decisions/0039-env-initial-admin.md)）。应用没有公开注册入口，其他家庭成员由管理员登录后创建。
 
 `pnpm dev` 同时启动 Web、API 和独立 Worker，Web 与 API 的默认端口分别为 `5173` 和 `8787`。也可以分别使用 `pnpm dev:web`、`pnpm dev:api` 和 `pnpm dev:worker`；会话摘要、记忆提取、索引同步与媒体清理需要 Worker 运行。
 
@@ -148,7 +148,7 @@ PostgreSQL 的 `character_memories` 始终是权威来源，只有已确认的 `
 
 ## 7. 升级现有部署
 
-升级前由项目所有者按现有运维方式为数据库和媒体做快照。更新依赖后执行 `pnpm db:migrate`，检查 `.env.example` 的基础配置变化，再启动 API、Web 和 Worker；不要重新执行只适用于空库的 `admin:init`。
+升级前由项目所有者按现有运维方式为数据库和媒体做快照。检查 `.env.example` 的基础配置变化后启动新版本 API、Web 和 Worker；API 启动时会自动应用迁移。Compose 部署只需拉取新镜像并重启，不必在宿主机安装 pnpm。不要重新执行只适用于空库的 `admin:init`。
 
 从旧环境变量模型配置升级到管理员模型设置时，迁移会保留角色、模型与音色 ID，但将原模型置为未配置草稿。管理员以相同供应商和模型 ID 创建配置会重新挂接原记录；完成测试、启用、实时默认与摘要/记忆用途绑定后，原角色恢复通话，等待分析的会话自动补发。
 

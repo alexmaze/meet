@@ -1,5 +1,6 @@
 # Meet Docker Compose 示例部署。
 # 用法见 README「Docker Compose 部署」。
+# API 启动时自动迁移数据库；Worker 等待 API 健康后再启动。
 #
 # 默认配合 .env.compose 使用：
 #   docker compose --env-file .env.compose up -d
@@ -50,6 +51,18 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
 
   worker:
     image: ghcr.io/alexmaze/meet/worker:${MEET_VERSION:-latest}
@@ -66,7 +79,7 @@ services:
       postgres:
         condition: service_healthy
       api:
-        condition: service_started
+        condition: service_healthy
 
   web:
     image: ghcr.io/alexmaze/meet/web:${MEET_VERSION:-latest}

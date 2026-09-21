@@ -158,7 +158,7 @@ pnpm admin:init --username admin --display-name 家庭管理员
 pnpm dev
 ```
 
-`admin:init` 仅在没有账号时可执行，密码通过终端遮罩输入。也可在 `.env` 配置 `INITIAL_ADMIN_USERNAME` 与 `INITIAL_ADMIN_PASSWORD`，由 API 在空库首次启动时创建首位管理员。`pnpm dev` 同时启动 Web、API 和 Worker；默认从本机浏览器访问 `http://localhost:5173`。
+`admin:init` 需要先有表结构，因此在它之前执行 `pnpm db:migrate`。之后 API 启动时也会自动应用迁移。也可在 `.env` 配置 `INITIAL_ADMIN_USERNAME` 与 `INITIAL_ADMIN_PASSWORD`，跳过 `admin:init`，由 API 在空库首次启动时创建首位管理员。`pnpm dev` 同时启动 Web、API 和 Worker；默认从本机浏览器访问 `http://localhost:5173`。
 
 首次登录后，在“我的 → 模型设置”录入供应商连接、模型和音色，完成测试、启用及实时默认绑定。预置推荐千问 `qwen-audio-3.0-realtime-plus`，也可以显式选用已启用的其他兼容配置。摘要、记忆提取和学习计划生成使用各自用途绑定。模型密钥不从 `.env` 导入。
 
@@ -168,7 +168,7 @@ pnpm dev
 | --------------------------------------------------- | -------------------------------------------- |
 | `pnpm dev`                                          | 同时启动 Web、API 与 Worker                  |
 | `pnpm dev:web` / `pnpm dev:api` / `pnpm dev:worker` | 单独启动对应进程                             |
-| `pnpm db:migrate`                                   | 应用数据库迁移                               |
+| `pnpm db:migrate`                                   | 显式应用数据库迁移（API 启动时也会自动执行） |
 | `pnpm check`                                        | 格式、Lint、类型、自动测试和生产构建完整检查 |
 | `pnpm admin:reset-password --username admin`        | 在服务器终端重置管理员密码并撤销旧会话       |
 | `pnpm release` / `pnpm release 0.2.0`               | 升 patch 或指定版本，打 `vX.Y.Z` tag 并推送  |
@@ -208,26 +208,9 @@ cp .env.compose.example .env.compose
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
 ```
 
-### 2. 启动数据库并迁移
+### 2. 启动服务
 
-先只起 PostgreSQL，再用本机 Node/pnpm 做迁移（镜像内不自动迁移）。Compose 已将数据库映射到本机 `127.0.0.1:5432`：
-
-```bash
-docker compose --env-file .env.compose up -d postgres
-```
-
-在已 clone 的本仓库中：
-
-```bash
-# 与 .env.compose 中 POSTGRES_PASSWORD 一致
-export DATABASE_URL="postgresql://meet:你的密码@127.0.0.1:5432/meet"
-pnpm install
-pnpm db:migrate
-```
-
-首位管理员优先用 `.env.compose` 中的 `INITIAL_ADMIN_*`：API 首次启动且库中尚无账号时自动创建。未配置这些变量时，也可在本机执行交互式 `pnpm admin:init --username admin --display-name 家庭管理员`（见 [ADR-0039](docs/decisions/0039-env-initial-admin.md)）。
-
-### 3. 启动全部服务
+部署机只需 Docker，不需要 Node/pnpm。API 容器启动时自动应用数据库迁移（见 [ADR-0040](docs/decisions/0040-api-startup-migrations.md)）；空库且配置了 `INITIAL_ADMIN_*` 时会创建首位管理员。
 
 ```bash
 docker compose --env-file .env.compose up -d
@@ -235,12 +218,18 @@ docker compose --env-file .env.compose up -d
 
 浏览器访问 `http://localhost:8080`（或你设置的 `WEB_PUBLISH_PORT`），用 `INITIAL_ADMIN_USERNAME` 与对应密码登录。首次成功后建议修改密码，并可从 `.env.compose` 删除 `INITIAL_ADMIN_PASSWORD`（改 env 不会重置已有账号密码）。仍需在「我的 → 模型设置」配置供应商；密钥保存在 PostgreSQL，不写在 Compose 环境变量里。
 
-升级到新版本时：改 `.env.compose` 中的 `MEET_VERSION`，先对同一数据库执行新版本代码的 `pnpm db:migrate`，再：
+未配置 `INITIAL_ADMIN_*` 且需要交互式创建管理员时，可在能连上该库的开发机执行 `pnpm admin:init --username admin --display-name 家庭管理员`（见 [ADR-0039](docs/decisions/0039-env-initial-admin.md)）。
+
+### 3. 升级
+
+升级前先对 Postgres 与媒体卷做快照。改 `.env.compose` 中的 `MEET_VERSION`，再：
 
 ```bash
 docker compose --env-file .env.compose pull
 docker compose --env-file .env.compose up -d
 ```
+
+新 API 镜像启动时会应用该版本自带的迁移，不必在宿主机执行 `pnpm db:migrate`。
 
 媒体与 Embedding 缓存在命名卷 `meet-media`、`meet-embedding` 中，需与 Postgres 卷一并纳入磁盘快照。
 
@@ -249,7 +238,7 @@ docker compose --env-file .env.compose up -d
 | 服务 | 镜像 | 作用 |
 | --- | --- | --- |
 | `postgres` | `postgres:16-alpine` | 业务库与 `pg-boss` 队列；仅监听本机 `127.0.0.1:5432` |
-| `api` | `ghcr.io/alexmaze/meet/api` | HTTP / WebSocket；默认容器内 `8787`，不单独映射到宿主机 |
+| `api` | `ghcr.io/alexmaze/meet/api` | HTTP / WebSocket；启动时迁移数据库；默认容器内 `8787`，不单独映射到宿主机 |
 | `worker` | `ghcr.io/alexmaze/meet/worker` | 摘要、记忆、媒体清理；必须与 api 同时运行 |
 | `web` | `ghcr.io/alexmaze/meet/web` | 静态前端；Compose 下反代 `/api` 到 api |
 

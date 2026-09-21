@@ -1,3 +1,5 @@
+import { applyDatabaseMigrationsToUrl } from "@meet/database";
+
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { loadProjectEnvironment } from "./load-environment.js";
@@ -19,6 +21,11 @@ if (legacyModelVariables.length > 0) {
 }
 
 const config = loadConfig();
+if (config.database.url) {
+  await applyDatabaseMigrationsToUrl(config.database.url);
+  console.info("数据库迁移已应用。");
+}
+
 const app = await buildApp({ config });
 
 const close = async (signal: string): Promise<void> => {
